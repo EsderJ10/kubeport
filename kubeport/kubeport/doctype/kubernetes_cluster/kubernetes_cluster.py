@@ -22,7 +22,7 @@ class KubernetesCluster(Document):
     @frappe.whitelist()
     def test_connection(self):
         if not self.kubeconfig:
-            frappe.throw("El campo Kubeconfig está vacío.")
+            frappe.throw("The Kubeconfig field is empty.")
 
         try:
             kubeconfig_dict = yaml.safe_load(self.kubeconfig)
@@ -37,8 +37,8 @@ class KubernetesCluster(Document):
             nodes = v1.list_node()
             
             self.db_set('status', 'Connected')
-            frappe.msgprint(f"¡Conexión exitosa! El clúster respondió y tiene {len(nodes.items)} nodo(s).", alert=True, indicator='green')
+            frappe.msgprint(f"Successfully connected. The cluster responded and has {len(nodes.items)} node(s).", alert=True, indicator='green')
             
         except Exception as e:
             self.db_set('status', 'Error')
-            frappe.throw(f"Fallo al conectar: {str(e)}")
+            frappe.throw(f"Failed to connect: {str(e)}")

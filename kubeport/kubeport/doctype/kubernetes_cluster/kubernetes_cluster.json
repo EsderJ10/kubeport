@@ -38,7 +38,8 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
-   "options": "Pending\nConnected\nError"
+   "options": "Pending\nConnected\nError",
+   "read_only": 1
   },
   {
    "button_color": "Primary",
@@ -50,7 +51,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-03-19 20:36:44.341102",
+ "modified": "2026-03-24 19:10:24.376325",
  "modified_by": "Administrator",
  "module": "Kubeport",
  "name": "Kubernetes Cluster",
