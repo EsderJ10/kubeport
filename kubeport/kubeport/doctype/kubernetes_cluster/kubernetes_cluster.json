@@ -1,6 +1,7 @@
 {
  "actions": [],
  "allow_rename": 1,
+ "autoname": "field:cluster_name",
  "creation": "2026-03-19 19:54:57.231819",
  "doctype": "DocType",
  "engine": "InnoDB",
@@ -51,10 +52,11 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-03-24 19:10:24.376325",
+ "modified": "2026-03-24 21:44:07.133619",
  "modified_by": "Administrator",
  "module": "Kubeport",
  "name": "Kubernetes Cluster",
+ "naming_rule": "By fieldname",
  "owner": "Administrator",
  "permissions": [
   {
@@ -74,5 +76,6 @@
  "rows_threshold_for_grid_search": 20,
  "sort_field": "creation",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "title_field": "cluster_name"
 }
