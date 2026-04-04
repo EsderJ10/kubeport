@@ -9,9 +9,9 @@ readme = "README.md"
 dynamic = ["version"]
 dependencies = [
     # "frappe~=16.0.0" # Installed and managed by bench.
-    "kubernetes>=34.1.0"
-    "urllib3>=2.5.0"
-    "PyYAML>=6.0.2"
+    "kubernetes>=34.1.0",
+    "urllib3>=2.5.0",
+    "PyYAML>=6.0.2",
 ]
 
 [build-system]
