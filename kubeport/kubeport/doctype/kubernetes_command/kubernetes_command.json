@@ -9,7 +9,8 @@
   "section_break_ezd5",
   "command_name",
   "cluster",
-  "command",
+  "resource_type",
+  "namespace",
   "execute_command",
   "output"
  ],
@@ -17,7 +18,7 @@
   {
    "fieldname": "section_break_ezd5",
    "fieldtype": "Section Break",
-   "label": "Kubernetes Command Configuration"
+   "label": "Kubernetes Query Configuration"
   },
   {
    "fieldname": "command_name",
@@ -36,11 +37,19 @@
    "reqd": 1
   },
   {
-   "fieldname": "command",
-   "fieldtype": "Data",
+   "fieldname": "resource_type",
+   "fieldtype": "Select",
    "in_list_view": 1,
-   "label": "Command",
+   "label": "Resource Type",
+   "options": "Pod\nService\nDeployment\nConfigMap\nSecret\nNamespace\nNode\nIngress\nPersistentVolumeClaim\nStatefulSet\nDaemonSet\nJob\nCronJob",
    "reqd": 1
+  },
+  {
+   "default": "default",
+   "depends_on": "eval:!['Namespace','Node'].includes(doc.resource_type)",
+   "fieldname": "namespace",
+   "fieldtype": "Data",
+   "label": "Namespace"
   },
   {
    "button_color": "Primary",
@@ -59,7 +68,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-03-26 21:53:10.890799",
+ "modified": "2026-04-05 17:50:00.000000",
  "modified_by": "Administrator",
  "module": "Kubeport",
  "name": "Kubernetes Command",

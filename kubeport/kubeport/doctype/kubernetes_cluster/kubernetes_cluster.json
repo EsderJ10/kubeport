@@ -9,6 +9,7 @@
   "cluster_configuration_section",
   "cluster_name",
   "kubeconfig",
+  "skip_tls_verify",
   "status",
   "test_connection"
  ],
@@ -35,6 +36,13 @@
    "reqd": 1
   },
   {
+   "default": "0",
+   "description": "Enable only for local development clusters (K3d, Kind, Minikube). Never enable in production.",
+   "fieldname": "skip_tls_verify",
+   "fieldtype": "Check",
+   "label": "Skip TLS Verification (Development Only)"
+  },
+  {
    "default": "Pending",
    "fieldname": "status",
    "fieldtype": "Select",
@@ -52,7 +60,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-03-24 21:44:07.133619",
+ "modified": "2026-04-05 18:15:00.000000",
  "modified_by": "Administrator",
  "module": "Kubeport",
  "name": "Kubernetes Cluster",
