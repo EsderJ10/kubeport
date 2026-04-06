@@ -1,7 +1,7 @@
 frappe.ui.form.on('Kubernetes Command', {
     execute_command: function(frm) {
-        if (!frm.doc.cluster || !frm.doc.command) {
-            frappe.msgprint("Please, select a cluster and write a command.");
+        if (!frm.doc.cluster || !frm.doc.resource_type) {
+            frappe.msgprint(__("Please select a cluster and a resource type."));
             return;
         }
 
@@ -9,12 +9,12 @@ frappe.ui.form.on('Kubernetes Command', {
             doc: frm.doc,
             method: 'execute_command',
             freeze: true,
-            freeze_message: __('Executing in the cluster...'),
+            freeze_message: __('Querying cluster...'),
             callback: function(r) {
                 if (!r.exc) {
-                    frm.reload_doc(); // Recarga para mostrar el Output
+                    frm.reload_doc();
                 }
             }
         });
     }
-}); 
+});

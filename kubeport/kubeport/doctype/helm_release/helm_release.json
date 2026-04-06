@@ -69,7 +69,7 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
-   "options": "Draft\nDeployed\nFailed",
+   "options": "Draft\nIn Progress\nDeployed\nDegraded\nFailed",
    "read_only": 1
   },
   {

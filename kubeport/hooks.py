@@ -143,23 +143,13 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"kubeport.tasks.all"
-# 	],
-# 	"daily": [
-# 		"kubeport.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"kubeport.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"kubeport.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"kubeport.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"cron": {
+		"*/5 * * * *": [
+			"kubeport.tasks.reconcile_all_releases"
+		],
+	},
+}
 
 # Testing
 # -------

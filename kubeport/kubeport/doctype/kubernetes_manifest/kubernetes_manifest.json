@@ -67,7 +67,7 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
-   "options": "Draft\nApplied\nFailed",
+   "options": "Draft\nIn Progress\nApplied\nDegraded\nFailed",
    "read_only": 1
   }
  ],
