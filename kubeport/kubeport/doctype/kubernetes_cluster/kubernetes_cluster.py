@@ -20,6 +20,7 @@ class KubernetesCluster(Document):
 		ca_certificate: DF.Code | None
 		cluster_name: DF.Data
 		kubeconfig: DF.Code | None
+		kubeconfig_context: DF.Data | None
 		skip_tls_verify: DF.Check
 		status: DF.Literal["Pending", "Connected", "Error"]
 	# end: auto-generated types
