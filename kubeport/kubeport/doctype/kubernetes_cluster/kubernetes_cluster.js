@@ -43,14 +43,15 @@ frappe.ui.form.on('Kubernetes Cluster', {
                 {
                     fieldname: 'kubeconfig_file',
                     fieldtype: 'HTML',
-                    options: '<input type="file" id="kubeconfig-file-input" accept=".yaml,.yml,.conf,.config,*" ' +
+                    // No accept filter — kubeconfig files often have no extension (e.g. "config")
+                    options: '<input type="file" class="kubeconfig-file-input" ' +
                              'style="padding: 12px; border: 2px dashed var(--border-color); border-radius: 8px; ' +
                              'width: 100%; cursor: pointer; background: var(--bg-color);" />'
                 }
             ],
             primary_action_label: __('Parse Contexts'),
             primary_action: function() {
-                const file_input = document.getElementById('kubeconfig-file-input');
+                const file_input = upload_dialog.$wrapper.find('.kubeconfig-file-input')[0];
                 if (!file_input || !file_input.files.length) {
                     frappe.msgprint(__('Please select a kubeconfig file.'));
                     return;
@@ -156,24 +157,10 @@ function _show_context_picker(frm, kubeconfig_content) {
                         options: table_html
                     },
                     {
-                        fieldname: 'name_section',
-                        fieldtype: 'Section Break',
-                        label: __('Cluster Display Name'),
-                        hidden: 1
-                    },
-                    {
-                        fieldname: 'display_name_info',
-                        fieldtype: 'HTML',
-                        options: '<p class="text-muted">' +
-                            __('Give this cluster a friendly name. The technical context name is stored separately.') +
-                            '</p>',
-                        hidden: 1
-                    },
-                    {
                         fieldname: 'display_name',
                         fieldtype: 'Data',
-                        label: __('Display Name'),
-                        description: __('e.g. "Production East", "Dev K3d", "Staging GKE"'),
+                        label: __('Cluster Display Name'),
+                        description: __('Give this cluster a friendly name (e.g. "Production East", "Dev K3d"). The technical context name is stored separately.'),
                         hidden: 1
                     }
                 ],
@@ -217,7 +204,7 @@ function _show_context_picker(frm, kubeconfig_content) {
 
             context_dialog.show();
 
-            // Row selection behavior — selecting a row reveals the display name field
+            // Row selection — clicking a row selects it and reveals the display name field
             context_dialog.$wrapper.on('click', '.context-row', function() {
                 const idx = parseInt($(this).data('idx'));
                 selected_context = idx;
@@ -228,13 +215,8 @@ function _show_context_picker(frm, kubeconfig_content) {
                 context_dialog.$wrapper.find('.context-row').css('background', '');
                 $(this).css('background', 'var(--highlight-color, #e8f4fd)');
 
-                // Show and pre-fill the display name field
-                context_dialog.fields_dict.name_section.df.hidden = 0;
-                context_dialog.fields_dict.name_section.refresh();
-                context_dialog.fields_dict.display_name_info.df.hidden = 0;
-                context_dialog.fields_dict.display_name_info.refresh();
-                context_dialog.fields_dict.display_name.df.hidden = 0;
-                context_dialog.fields_dict.display_name.refresh();
+                // Reveal and pre-fill the display name field
+                context_dialog.set_df_property('display_name', 'hidden', 0);
                 context_dialog.set_value('display_name', ctx.cluster_name);
             });
 
@@ -242,20 +224,14 @@ function _show_context_picker(frm, kubeconfig_content) {
             const current_idx = contexts.findIndex(ctx => ctx.is_current);
             if (current_idx >= 0) {
                 selected_context = current_idx;
-                const current_ctx = contexts[current_idx];
 
                 context_dialog.$wrapper
                     .find(`.context-row[data-idx="${current_idx}"]`)
                     .css('background', 'var(--highlight-color, #e8f4fd)');
 
-                // Show display name field pre-filled with the current context's cluster
-                context_dialog.fields_dict.name_section.df.hidden = 0;
-                context_dialog.fields_dict.name_section.refresh();
-                context_dialog.fields_dict.display_name_info.df.hidden = 0;
-                context_dialog.fields_dict.display_name_info.refresh();
-                context_dialog.fields_dict.display_name.df.hidden = 0;
-                context_dialog.fields_dict.display_name.refresh();
-                context_dialog.set_value('display_name', current_ctx.cluster_name);
+                // Reveal display name for pre-selected context
+                context_dialog.set_df_property('display_name', 'hidden', 0);
+                context_dialog.set_value('display_name', contexts[current_idx].cluster_name);
             }
         }
     });
