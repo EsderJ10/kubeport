@@ -8,12 +8,29 @@
  "field_order": [
   "cluster_configuration_section",
   "cluster_name",
+  "auth_method",
+  "column_break_auth",
+  "status",
+  "section_break_kubeconfig",
+  "import_kubeconfig",
+  "kubeconfig_context",
   "kubeconfig",
   "skip_tls_verify",
-  "status",
+  "section_break_token",
+  "api_server_url",
+  "column_break_token",
+  "bearer_token",
+  "section_break_ca",
+  "ca_certificate",
+  "section_break_actions",
   "test_connection"
  ],
  "fields": [
+  {
+   "fieldname": "cluster_configuration_section",
+   "fieldtype": "Section Break",
+   "label": "Cluster Configuration"
+  },
   {
    "fieldname": "cluster_name",
    "fieldtype": "Data",
@@ -23,24 +40,18 @@
    "unique": 1
   },
   {
-   "fieldname": "cluster_configuration_section",
-   "fieldtype": "Section Break",
-   "label": "Cluster Configuration"
-  },
-  {
-   "fieldname": "kubeconfig",
-   "fieldtype": "Code",
+   "default": "Kubeconfig",
+   "description": "How Kubeport authenticates to this cluster.",
+   "fieldname": "auth_method",
+   "fieldtype": "Select",
    "in_list_view": 1,
-   "label": "Kubeconfig",
-   "options": "JSON",
+   "label": "Auth Method",
+   "options": "Kubeconfig\nBearer Token\nIn-Cluster",
    "reqd": 1
   },
   {
-   "default": "0",
-   "description": "Enable only for local development clusters (K3d, Kind, Minikube). Never enable in production.",
-   "fieldname": "skip_tls_verify",
-   "fieldtype": "Check",
-   "label": "Skip TLS Verification (Development Only)"
+   "fieldname": "column_break_auth",
+   "fieldtype": "Column Break"
   },
   {
    "default": "Pending",
@@ -49,6 +60,90 @@
    "label": "Status",
    "options": "Pending\nConnected\nError",
    "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Kubeconfig'",
+   "fieldname": "section_break_kubeconfig",
+   "fieldtype": "Section Break",
+   "label": "Kubeconfig"
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Kubeconfig'",
+   "description": "Upload a kubeconfig file from your machine to auto-detect available contexts.",
+   "fieldname": "import_kubeconfig",
+   "fieldtype": "Button",
+   "label": "Import Kubeconfig",
+   "button_color": "Default"
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Kubeconfig'",
+   "description": "The Kubernetes context imported from the kubeconfig file.",
+   "fieldname": "kubeconfig_context",
+   "fieldtype": "Data",
+   "label": "Imported Context",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Kubeconfig'",
+   "description": "Paste kubeconfig YAML manually, or use the Import button above.",
+   "fieldname": "kubeconfig",
+   "fieldtype": "Code",
+   "label": "Kubeconfig",
+   "mandatory_depends_on": "eval:doc.auth_method === 'Kubeconfig'",
+   "options": "YAML"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.auth_method === 'Kubeconfig'",
+   "description": "Enable only for local development clusters (K3d, Kind, Minikube). Never enable in production.",
+   "fieldname": "skip_tls_verify",
+   "fieldtype": "Check",
+   "label": "Skip TLS Verification (Development Only)"
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Bearer Token'",
+   "fieldname": "section_break_token",
+   "fieldtype": "Section Break",
+   "label": "Bearer Token Authentication"
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Bearer Token'",
+   "description": "The full URL of the Kubernetes API server (e.g. https://192.168.1.100:6443).",
+   "fieldname": "api_server_url",
+   "fieldtype": "Data",
+   "label": "API Server URL",
+   "mandatory_depends_on": "eval:doc.auth_method === 'Bearer Token'"
+  },
+  {
+   "fieldname": "column_break_token",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Bearer Token'",
+   "description": "A Service Account bearer token for authenticating to the cluster.",
+   "fieldname": "bearer_token",
+   "fieldtype": "Password",
+   "label": "Bearer Token",
+   "mandatory_depends_on": "eval:doc.auth_method === 'Bearer Token'"
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Bearer Token'",
+   "fieldname": "section_break_ca",
+   "fieldtype": "Section Break",
+   "label": "TLS Certificate (Optional)"
+  },
+  {
+   "depends_on": "eval:doc.auth_method === 'Bearer Token'",
+   "description": "PEM-encoded CA certificate for the API server. Leave empty to skip TLS verification (development only).",
+   "fieldname": "ca_certificate",
+   "fieldtype": "Code",
+   "label": "CA Certificate",
+   "options": "PEM"
+  },
+  {
+   "fieldname": "section_break_actions",
+   "fieldtype": "Section Break",
+   "label": "Actions"
   },
   {
    "button_color": "Primary",
@@ -60,7 +155,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-04-05 18:15:00.000000",
+ "modified": "2026-04-07 20:13:00.000000",
  "modified_by": "Administrator",
  "module": "Kubeport",
  "name": "Kubernetes Cluster",
