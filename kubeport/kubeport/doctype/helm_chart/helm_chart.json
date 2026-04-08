@@ -1,0 +1,123 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "format:{repository}/{chart_name}",
+ "creation": "2026-04-08 06:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_info",
+  "chart_name",
+  "repository",
+  "column_break_meta",
+  "latest_version",
+  "latest_app_version",
+  "description",
+  "section_break_versions",
+  "versions",
+  "section_break_values",
+  "default_values"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_info",
+   "fieldtype": "Section Break",
+   "label": "Chart Information"
+  },
+  {
+   "fieldname": "chart_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Chart Name",
+   "reqd": 1,
+   "description": "The name of the Helm chart (e.g. nginx, postgresql)."
+  },
+  {
+   "fieldname": "repository",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Repository",
+   "options": "Helm Repository",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "latest_version",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Latest Version",
+   "read_only": 1,
+   "description": "The most recent chart version discovered during sync."
+  },
+  {
+   "fieldname": "latest_app_version",
+   "fieldtype": "Data",
+   "label": "Latest App Version",
+   "read_only": 1
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_versions",
+   "fieldtype": "Section Break",
+   "label": "Available Versions"
+  },
+  {
+   "fieldname": "versions",
+   "fieldtype": "Table",
+   "label": "Versions",
+   "options": "Helm Chart Version",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_values",
+   "fieldtype": "Section Break",
+   "label": "Default Values",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "default_values",
+   "fieldtype": "Code",
+   "label": "Default Values",
+   "options": "YAML",
+   "read_only": 1,
+   "description": "The default values.yaml for the latest version of this chart."
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-04-08 06:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Kubeport",
+ "name": "Helm Chart",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "chart_name"
+}
