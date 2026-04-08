@@ -9,6 +9,8 @@ modules — they should never be called directly from a web request.
 import json
 from typing import Any
 
+import yaml
+
 import frappe
 from kubernetes import client
 from kubernetes.client.rest import ApiException
@@ -115,15 +117,34 @@ _RESOURCE_DISPATCH: dict[str, dict[str, Any]] = {
 # Public Helpers
 # ---------------------------------------------------------------------------
 
-def parse_manifest_objects(manifest_json: str) -> list[dict]:
-	"""Parse a JSON string into a list of K8s resource dicts.
+def parse_manifest_objects(manifest_content: str) -> list[dict]:
+	"""Parse a JSON or YAML string into a list of K8s resource dicts.
 
-	Accepts both a single object ``{}`` and a list ``[{}, {}]``.
+	Accepts:
+	- A single JSON object ``{}`` or a JSON array ``[{}, {}]``.
+	- A single YAML document.
+	- A multi-document YAML stream separated by ``---``.
+
+	Tries JSON first (fast path) and falls back to YAML parsing.
 	"""
-	data = json.loads(manifest_json)
-	if isinstance(data, dict):
-		return [data]
-	return data
+	# Fast path: try JSON first (cheaper than YAML for structured data)
+	try:
+		data = json.loads(manifest_content)
+		if isinstance(data, dict):
+			return [data]
+		if isinstance(data, list):
+			return data
+	except (json.JSONDecodeError, TypeError):
+		pass
+
+	# Slow path: YAML — supports multi-document streams (--- separators)
+	try:
+		documents = list(yaml.safe_load_all(manifest_content))
+	except yaml.YAMLError as e:
+		frappe.throw(f"Failed to parse manifest content as JSON or YAML: {e}")
+
+	# Filter out None entries (empty documents between --- markers)
+	return [doc for doc in documents if isinstance(doc, dict)]
 
 
 def apply_resource(api_client: client.ApiClient, k8s_object: dict, namespace: str):
@@ -221,6 +242,10 @@ def read_resource(api_client: client.ApiClient, kind: str, name: str, namespace:
 	"""Read (GET) a single K8s resource. Raises ApiException on 404."""
 	dispatch = _RESOURCE_DISPATCH.get(kind)
 	if not dispatch:
+		frappe.logger("kubeport").warning(
+			f"Skipping reconciliation for unsupported resource kind '{kind}/{name}' "
+			f"in namespace '{namespace}'. Add it to _RESOURCE_DISPATCH to enable tracking."
+		)
 		return  # Skip unknown resource types during reconciliation
 
 	api_class = getattr(client, dispatch["api"])

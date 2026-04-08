@@ -11,6 +11,10 @@ Kubernetes Cluster DocType record.  Supports multiple authentication methods:
   Kubeport is deployed inside Kubernetes.
 """
 
+import atexit
+import os
+import tempfile
+
 import frappe
 import urllib3
 import yaml
@@ -86,18 +90,7 @@ def _client_from_bearer_token(cluster_doc) -> client.ApiClient:
 
 	# Use the CA certificate if provided; otherwise skip TLS verification
 	if cluster_doc.ca_certificate:
-		import tempfile
-		import os
-
-		# The kubernetes client needs a file path for ssl_ca_cert, so we
-		# write the PEM to a temporary file.  The file persists for the
-		# lifetime of this ApiClient instance.
-		ca_fd, ca_path = tempfile.mkstemp(suffix=".pem", prefix="kubeport_ca_")
-		try:
-			os.write(ca_fd, cluster_doc.ca_certificate.encode("utf-8"))
-		finally:
-			os.close(ca_fd)
-
+		ca_path = _write_ca_tempfile(cluster_doc.ca_certificate)
 		configuration.ssl_ca_cert = ca_path
 	else:
 		# No CA certificate — skip TLS verification (development only)
@@ -107,12 +100,69 @@ def _client_from_bearer_token(cluster_doc) -> client.ApiClient:
 	return client.ApiClient(configuration=configuration)
 
 
+# Well-known paths for in-cluster service account credentials.
+_INCLUSTER_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+_INCLUSTER_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+_INCLUSTER_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+
 def _client_from_incluster() -> client.ApiClient:
 	"""Build a client using in-cluster service account credentials.
 
 	This works when Kubeport is deployed as a pod inside a Kubernetes cluster.
 	The service account token and CA certificate are automatically mounted
 	by Kubernetes at well-known paths.
+
+	Unlike ``config.load_incluster_config()``, this reads the credentials
+	manually and builds a scoped ``Configuration`` instance, so we never
+	mutate the global ``kubernetes.client.configuration``.  This is critical
+	for multi-user safety — other threads or background jobs that connect
+	to *different* clusters must not be affected.
 	"""
-	config.load_incluster_config()
-	return client.ApiClient()
+	if not os.path.isfile(_INCLUSTER_TOKEN_PATH):
+		frappe.throw(
+			"In-Cluster auth failed: service account token not found at "
+			f"{_INCLUSTER_TOKEN_PATH}. Is Kubeport running inside a Kubernetes pod?"
+		)
+
+	with open(_INCLUSTER_TOKEN_PATH) as f:
+		token = f.read().strip()
+
+	configuration = client.Configuration()
+	configuration.host = "https://kubernetes.default.svc"
+	configuration.api_key = {"authorization": f"Bearer {token}"}
+
+	if os.path.isfile(_INCLUSTER_CA_PATH):
+		configuration.ssl_ca_cert = _INCLUSTER_CA_PATH
+	else:
+		configuration.verify_ssl = False
+		urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+	return client.ApiClient(configuration=configuration)
+
+
+# ---------------------------------------------------------------------------
+# Private Utilities
+# ---------------------------------------------------------------------------
+
+def _write_ca_tempfile(ca_pem: str) -> str:
+	"""Write a PEM string to a temp file and register cleanup on exit.
+
+	The kubernetes client requires a *file path* for ``ssl_ca_cert``, so we
+	write the CA certificate to a temporary file.  An ``atexit`` handler
+	ensures the file is removed when the worker process terminates, avoiding
+	a slow leak of temp files in long-running Frappe workers.
+
+	Returns:
+		The absolute path to the temporary PEM file.
+	"""
+	ca_fd, ca_path = tempfile.mkstemp(suffix=".pem", prefix="kubeport_ca_")
+	try:
+		os.write(ca_fd, ca_pem.encode("utf-8"))
+	finally:
+		os.close(ca_fd)
+
+	# Schedule cleanup so temp files don't accumulate across requests
+	atexit.register(lambda p=ca_path: os.unlink(p) if os.path.exists(p) else None)
+
+	return ca_path
