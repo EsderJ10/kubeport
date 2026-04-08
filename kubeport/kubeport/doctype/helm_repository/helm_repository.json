@@ -1,0 +1,141 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:repo_name",
+ "creation": "2026-04-08 06:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_config",
+  "repo_name",
+  "repo_url",
+  "column_break_meta",
+  "status",
+  "last_synced",
+  "section_break_auth",
+  "repo_username",
+  "column_break_auth",
+  "repo_password",
+  "section_break_filters",
+  "include_patterns",
+  "section_break_actions",
+  "sync_charts"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_config",
+   "fieldtype": "Section Break",
+   "label": "Repository Configuration"
+  },
+  {
+   "fieldname": "repo_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Repository Name",
+   "reqd": 1,
+   "unique": 1,
+   "description": "A short identifier for this repository (e.g. bitnami, ingress-nginx)."
+  },
+  {
+   "fieldname": "repo_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Repository URL",
+   "reqd": 1,
+   "description": "The URL of the Helm chart repository (e.g. https://charts.bitnami.com/bitnami)."
+  },
+  {
+   "fieldname": "column_break_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Pending",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Pending\nSyncing\nSynced\nError",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_synced",
+   "fieldtype": "Datetime",
+   "label": "Last Synced",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_auth",
+   "fieldtype": "Section Break",
+   "label": "Authentication (Optional)",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "repo_username",
+   "fieldtype": "Data",
+   "label": "Username",
+   "description": "Username for private repositories."
+  },
+  {
+   "fieldname": "column_break_auth",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "repo_password",
+   "fieldtype": "Password",
+   "label": "Password",
+   "description": "Password for private repositories (encrypted at rest)."
+  },
+  {
+   "fieldname": "section_break_filters",
+   "fieldtype": "Section Break",
+   "label": "Sync Filters",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "include_patterns",
+   "fieldtype": "Small Text",
+   "label": "Include Patterns",
+   "description": "Comma-separated chart name patterns to include during sync (e.g. nginx, postgresql*). Leave empty to sync all charts from this repository."
+  },
+  {
+   "fieldname": "section_break_actions",
+   "fieldtype": "Section Break",
+   "label": "Actions"
+  },
+  {
+   "button_color": "Primary",
+   "fieldname": "sync_charts",
+   "fieldtype": "Button",
+   "label": "Sync Charts"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-04-08 06:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Kubeport",
+ "name": "Helm Repository",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "repo_name"
+}

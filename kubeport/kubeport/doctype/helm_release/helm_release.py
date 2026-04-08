@@ -1,6 +1,18 @@
+# Copyright (c) 2026, Los Favs and contributors
+# For license information, please see license.txt
+
+"""
+Helm Release Controller
+
+Manages real Helm chart deployments via the Helm CLI.  Each document
+represents a single Helm release on a target cluster, backed by
+``helm upgrade --install`` and ``helm uninstall`` commands executed
+in background tasks.
+"""
+
 import frappe
+import yaml
 from frappe.model.document import Document
-import json
 
 
 class HelmRelease(Document):
@@ -12,52 +24,69 @@ class HelmRelease(Document):
 	if TYPE_CHECKING:
 		from frappe.types import DF
 
-		chart_reference: DF.Data
+		chart: DF.Link
+		chart_version: DF.Data | None
 		cluster: DF.Link
+		helm_revision: DF.Int
+		helm_status_detail: DF.SmallText | None
 		namespace: DF.Data
 		release_name: DF.Data
-		status: DF.Literal["Draft", "In Progress", "Deployed", "Degraded", "Failed"]
-		values: DF.Code
+		status: DF.Literal["Draft", "In Progress", "Deployed", "Degraded", "Uninstalling", "Failed"]
+		values: DF.Code | None
 	# end: auto-generated types
+
+	def validate(self):
+		"""Validate YAML syntax in the values field."""
+		if self.values:
+			try:
+				parsed = yaml.safe_load(self.values)
+				if parsed is not None and not isinstance(parsed, dict):
+					frappe.throw(
+						"Values must be a YAML mapping (key-value pairs), not a list or scalar."
+					)
+			except yaml.YAMLError as e:
+				frappe.throw(f"Invalid YAML in values: {e}")
 
 	@frappe.whitelist()
 	def deploy_release(self):
-		if not self.values:
-			frappe.throw("The Values (JSON) field is empty.")
+		"""Install or upgrade the Helm release via background task.
 
-		# Validate JSON syntax before enqueuing
-		try:
-			json.loads(self.values)
-		except json.JSONDecodeError as e:
-			frappe.throw(f"JSON syntax error: {str(e)}")
-
+		Uses ``helm upgrade --install`` for idempotency — creating on first
+		deploy, updating on subsequent deploys.
+		"""
+		if not self.chart:
+			frappe.throw("A chart is required.")
 		if not self.cluster:
 			frappe.throw("A target cluster is required.")
 
 		self.db_set("status", "In Progress")
 
 		frappe.enqueue(
-			"kubeport.tasks.deploy_release_task",
+			"kubeport.tasks.helm_tasks.install_or_upgrade_release",
 			release_name=self.name,
 			queue="long",
 			enqueue_after_commit=True,
 		)
 
 		frappe.msgprint(
-			f"Deployment of '{self.release_name}' has been queued. Status will update automatically.",
+			f"Deployment of '{self.release_name}' has been queued. "
+			"Status will update automatically.",
 			alert=True,
 			indicator="blue",
 		)
 
 	@frappe.whitelist()
 	def uninstall_release(self):
-		if self.status not in ["Deployed", "Degraded"]:
-			frappe.throw("Only deployed or degraded releases can be uninstalled.")
+		"""Uninstall the Helm release via background task."""
+		if self.status not in ["Deployed", "Degraded", "Failed"]:
+			frappe.throw(
+				"Only deployed, degraded, or failed releases can be uninstalled."
+			)
 
-		self.db_set("status", "In Progress")
+		self.db_set("status", "Uninstalling")
 
 		frappe.enqueue(
-			"kubeport.tasks.uninstall_release_task",
+			"kubeport.tasks.helm_tasks.uninstall_release",
 			release_name=self.name,
 			queue="long",
 			enqueue_after_commit=True,
@@ -68,3 +97,29 @@ class HelmRelease(Document):
 			alert=True,
 			indicator="blue",
 		)
+
+	@frappe.whitelist()
+	def load_defaults(self) -> str:
+		"""Fetch default values.yaml from the linked chart.
+
+		First checks the cached values on the Helm Chart document.
+		Falls back to a live ``helm show values`` call.
+
+		Returns:
+			The default values as a YAML string.
+		"""
+		if not self.chart:
+			frappe.throw("Select a chart first.")
+
+		chart_doc = frappe.get_doc("Helm Chart", self.chart)
+
+		# Use cached default values if available
+		if chart_doc.default_values:
+			return chart_doc.default_values
+
+		# Fall back to a live fetch
+		from kubeport.utils.helm import show_values
+
+		chart_ref = chart_doc.get_chart_reference()
+		version = self.chart_version or chart_doc.latest_version
+		return show_values(chart_ref, version=version)
