@@ -287,11 +287,10 @@ def _sync_charts(repo_doc):
 
 		else:
 			# Create a new Helm Chart document
+			# We DO NOT fetch default_values here because running `helm show values`
+			# for hundreds of charts sequentially will cause the sync to take over 10 minutes.
+			# Instead, values are fetched on-demand when 'Load Default Values' is clicked.
 			default_values = ""
-			try:
-				default_values = helm.show_values(full_name, version=chart_version)
-			except Exception:
-				pass  # Non-critical — values can be fetched later
 
 			new_chart = frappe.get_doc({
 				"doctype": "Helm Chart",
