@@ -149,6 +149,9 @@ scheduler_events = {
 			"kubeport.tasks.reconcile_all_releases"
 		],
 	},
+	"daily": [
+		"kubeport.tasks.helm_tasks.sync_all_repos"
+	],
 }
 
 # Testing

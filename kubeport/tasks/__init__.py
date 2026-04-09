@@ -10,8 +10,15 @@ from kubeport.tasks.manifest_tasks import (  # noqa: F401
 	apply_manifest_task,
 	delete_manifest_task,
 )
-from kubeport.tasks.release_tasks import (  # noqa: F401
-	deploy_release_task,
-	uninstall_release_task,
+from kubeport.tasks.service_bundle_tasks import (  # noqa: F401
+	apply_bundle_task,
+	delete_bundle_task,
+)
+from kubeport.tasks.helm_tasks import (  # noqa: F401
+	add_and_sync_repo,
+	sync_repo_charts,
+	sync_all_repos,
+	install_or_upgrade_release,
+	uninstall_release as helm_uninstall_release,
 )
 from kubeport.tasks.reconciliation import reconcile_all_releases  # noqa: F401

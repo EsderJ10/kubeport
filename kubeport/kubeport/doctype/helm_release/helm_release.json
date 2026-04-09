@@ -2,26 +2,34 @@
  "actions": [],
  "allow_rename": 1,
  "autoname": "field:release_name",
- "creation": "2026-03-26 21:28:38.739773",
+ "creation": "2026-04-08 06:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "section_break_k131",
+  "section_break_config",
   "release_name",
   "cluster",
   "namespace",
-  "chart_reference",
+  "column_break_chart",
+  "chart",
+  "chart_version",
+  "section_break_values",
+  "load_defaults",
   "values",
-  "section_break_4lda",
+  "section_break_actions",
   "deploy_release",
   "uninstall_release",
-  "status"
+  "section_break_status",
+  "status",
+  "column_break_status",
+  "helm_revision",
+  "helm_status_detail"
  ],
  "fields": [
   {
-   "fieldname": "section_break_k131",
+   "fieldname": "section_break_config",
    "fieldtype": "Section Break",
-   "label": "Configuration"
+   "label": "Release Configuration"
   },
   {
    "fieldname": "release_name",
@@ -29,7 +37,8 @@
    "in_list_view": 1,
    "label": "Release Name",
    "reqd": 1,
-   "unique": 1
+   "unique": 1,
+   "description": "The Helm release name. Must be unique within the target namespace."
   },
   {
    "fieldname": "cluster",
@@ -40,15 +49,54 @@
    "reqd": 1
   },
   {
-   "default": "{}",
-   "fieldname": "values",
-   "fieldtype": "Code",
-   "label": "Values",
-   "options": "JSON",
+   "default": "default",
+   "fieldname": "namespace",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Namespace",
    "reqd": 1
   },
   {
-   "fieldname": "section_break_4lda",
+   "fieldname": "column_break_chart",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "chart",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Chart",
+   "options": "Helm Chart",
+   "reqd": 1,
+   "description": "The Helm chart to deploy."
+  },
+  {
+   "fieldname": "chart_version",
+   "fieldtype": "Data",
+   "label": "Chart Version",
+   "description": "The specific chart version to install. Leave blank for the latest version.",
+   "depends_on": "chart"
+  },
+  {
+   "fieldname": "section_break_values",
+   "fieldtype": "Section Break",
+   "label": "Values Override"
+  },
+  {
+   "fieldname": "load_defaults",
+   "fieldtype": "Button",
+   "label": "Load Default Values",
+   "button_color": "Default",
+   "description": "Fetch the default values.yaml from the selected chart and populate the editor below."
+  },
+  {
+   "fieldname": "values",
+   "fieldtype": "Code",
+   "label": "Values",
+   "options": "YAML",
+   "description": "YAML values to override chart defaults. Equivalent to helm install --values."
+  },
+  {
+   "fieldname": "section_break_actions",
    "fieldtype": "Section Break",
    "label": "Actions"
   },
@@ -56,7 +104,7 @@
    "button_color": "Primary",
    "fieldname": "deploy_release",
    "fieldtype": "Button",
-   "label": "Deploy"
+   "label": "Install / Upgrade"
   },
   {
    "button_color": "Primary",
@@ -65,33 +113,43 @@
    "label": "Uninstall"
   },
   {
+   "fieldname": "section_break_status",
+   "fieldtype": "Section Break",
+   "label": "Release Status"
+  },
+  {
    "default": "Draft",
    "fieldname": "status",
    "fieldtype": "Select",
+   "in_list_view": 1,
    "label": "Status",
-   "options": "Draft\nIn Progress\nDeployed\nDegraded\nFailed",
+   "options": "Draft\nIn Progress\nDeployed\nDegraded\nUninstalling\nFailed",
    "read_only": 1
   },
   {
-   "fieldname": "chart_reference",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Chart Reference",
-   "reqd": 1
+   "fieldname": "column_break_status",
+   "fieldtype": "Column Break"
   },
   {
-   "default": "default",
-   "fieldname": "namespace",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Namespace",
-   "reqd": 1
+   "default": "0",
+   "fieldname": "helm_revision",
+   "fieldtype": "Int",
+   "label": "Revision",
+   "read_only": 1,
+   "description": "The Helm release revision number."
+  },
+  {
+   "fieldname": "helm_status_detail",
+   "fieldtype": "Small Text",
+   "label": "Status Detail",
+   "read_only": 1,
+   "description": "Detailed status information from the Helm CLI."
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-03-26 21:43:18.617438",
+ "modified": "2026-04-08 06:00:00.000000",
  "modified_by": "Administrator",
  "module": "Kubeport",
  "name": "Helm Release",

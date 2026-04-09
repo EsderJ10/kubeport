@@ -1,0 +1,124 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "field:bundle_name",
+ "creation": "2026-04-08 06:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_config",
+  "bundle_name",
+  "cluster",
+  "namespace",
+  "column_break_meta",
+  "status",
+  "section_break_content",
+  "content",
+  "section_break_actions",
+  "apply_bundle",
+  "delete_bundle"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_config",
+   "fieldtype": "Section Break",
+   "label": "Bundle Configuration"
+  },
+  {
+   "fieldname": "bundle_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Bundle Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "cluster",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Target Cluster",
+   "options": "Kubernetes Cluster",
+   "reqd": 1
+  },
+  {
+   "default": "default",
+   "fieldname": "namespace",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Namespace",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_meta",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Draft\nIn Progress\nDeployed\nDegraded\nFailed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_content",
+   "fieldtype": "Section Break",
+   "label": "Resource Manifests"
+  },
+  {
+   "default": "{}",
+   "description": "Raw Kubernetes resource manifests in JSON or YAML format. Use --- to separate multiple resources.",
+   "fieldname": "content",
+   "fieldtype": "Code",
+   "label": "Content",
+   "options": "YAML",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_actions",
+   "fieldtype": "Section Break",
+   "label": "Actions"
+  },
+  {
+   "button_color": "Primary",
+   "fieldname": "apply_bundle",
+   "fieldtype": "Button",
+   "label": "Apply"
+  },
+  {
+   "button_color": "Primary",
+   "fieldname": "delete_bundle",
+   "fieldtype": "Button",
+   "label": "Delete"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-04-08 06:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Kubeport",
+ "name": "Service Bundle",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "bundle_name"
+}
