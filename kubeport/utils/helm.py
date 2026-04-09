@@ -131,8 +131,6 @@ def install_or_upgrade(
 			"--namespace", namespace,
 			"--create-namespace",
 			"--output", "json",
-			"--wait",
-			"--timeout", "5m0s",
 		]
 
 		if chart_version:
