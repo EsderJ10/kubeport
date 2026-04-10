@@ -50,6 +50,32 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 
 		self.assertEqual(sites, [])
 
+	@patch("kubeport.utils.discovery.client.CoreV1Api")
+	def test_discover_release_sites_ignores_running_infra_pods(
+		self,
+		mock_core_v1_api,
+	):
+		core_v1 = mock_core_v1_api.return_value
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
+			SimpleNamespace(
+				metadata=SimpleNamespace(name="bench-a-erpnext-mariadb-sts-0", labels={}),
+				status=SimpleNamespace(phase="Running", container_statuses=[]),
+				spec=SimpleNamespace(containers=[SimpleNamespace(name="mariadb")]),
+			),
+			SimpleNamespace(
+				metadata=SimpleNamespace(name="bench-a-valkey-cache-123", labels={}),
+				status=SimpleNamespace(phase="Running", container_statuses=[]),
+				spec=SimpleNamespace(containers=[SimpleNamespace(name="valkey")]),
+			),
+		])
+
+		with self.assertRaisesRegex(RuntimeError, "No running Frappe workload pods found"):
+			discover_release_sites(object(), {
+				"release_name": "bench-a",
+				"namespace": "erp",
+				"is_frappe_bench": True,
+			})
+
 	@patch("kubeport.utils.discovery.stream")
 	@patch("kubeport.utils.discovery.client.CoreV1Api")
 	def test_discover_release_sites_uses_scalar_request_timeouts(

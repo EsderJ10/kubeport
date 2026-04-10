@@ -31,6 +31,18 @@ _COMPONENT_RANK = {
 	"nginx": 50,
 	"socketio": 10,
 }
+_SITE_DISCOVERY_ALLOWED_NAME_TOKENS = (
+	"gunicorn",
+	"scheduler",
+	"worker-default",
+	"worker-short",
+	"worker-long",
+	"worker-d",
+	"worker-s",
+	"worker-l",
+	"nginx",
+	"socketio",
+)
 
 
 def discover_cluster_releases(cluster_name: str) -> list[dict[str, Any]]:
@@ -119,10 +131,11 @@ def _select_site_discovery_pod(
 		label_selector=f"app.kubernetes.io/instance={release_name}",
 		_request_timeout=_POD_LIST_TIMEOUT_SECONDS,
 	)
-	candidates = [pod for pod in pods.items if _is_running_pod(pod)]
+	candidates = [pod for pod in pods.items if _is_site_discovery_candidate(pod)]
 	if not candidates:
 		raise RuntimeError(
-			f"No running pods found for Helm release '{release_name}' in namespace '{namespace}'."
+			f"No running Frappe workload pods found for Helm release '{release_name}' "
+			f"in namespace '{namespace}'."
 		)
 
 	return max(candidates, key=_score_site_pod)
@@ -131,6 +144,20 @@ def _select_site_discovery_pod(
 def _is_running_pod(pod: client.V1Pod) -> bool:
 	status = getattr(pod, "status", None)
 	return bool(status and getattr(status, "phase", "") == "Running")
+
+
+def _is_site_discovery_candidate(pod: client.V1Pod) -> bool:
+	if not _is_running_pod(pod):
+		return False
+
+	metadata = getattr(pod, "metadata", None)
+	labels = metadata.labels if metadata and metadata.labels else {}
+	component = str(labels.get("app.kubernetes.io/component") or "")
+	if component in _COMPONENT_RANK:
+		return True
+
+	name = str(metadata.name if metadata and metadata.name else "")
+	return any(token in name for token in _SITE_DISCOVERY_ALLOWED_NAME_TOKENS)
 
 
 def _score_site_pod(pod: client.V1Pod) -> int:
