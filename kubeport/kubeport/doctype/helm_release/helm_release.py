@@ -44,6 +44,7 @@ class HelmRelease(Document):
 					frappe.throw(
 						"Values must be a YAML mapping (key-value pairs), not a list or scalar."
 					)
+				_validate_storage_access_modes(parsed)
 			except yaml.YAMLError as e:
 				frappe.throw(f"Invalid YAML in values: {e}")
 
@@ -123,3 +124,43 @@ class HelmRelease(Document):
 		chart_ref = chart_doc.get_chart_reference()
 		version = self.chart_version or chart_doc.latest_version
 		return show_values(chart_ref, version=version)
+
+
+def _validate_storage_access_modes(values: dict | None) -> None:
+	"""Reject storage settings that cannot schedule on common local-path setups."""
+	if not values:
+		return
+
+	for path, storage_class, access_modes in _iter_storage_configs(values):
+		if storage_class != "local-path":
+			continue
+		if "ReadWriteMany" not in access_modes:
+			continue
+
+		frappe.throw(
+			"Invalid Helm values: "
+			f"{path} uses storageClass 'local-path' with accessModes {access_modes}. "
+			"'local-path' only supports ReadWriteOnce on typical K3s/local-path setups."
+		)
+
+
+def _iter_storage_configs(
+	node: dict,
+	path: str = "values",
+) -> list[tuple[str, str, list[str]]]:
+	configs: list[tuple[str, str, list[str]]] = []
+
+	for key, value in node.items():
+		current_path = f"{path}.{key}"
+		if not isinstance(value, dict):
+			continue
+
+		storage_class = value.get("storageClass")
+		access_modes = value.get("accessModes")
+		if isinstance(storage_class, str) and isinstance(access_modes, list):
+			normalized_access_modes = [mode for mode in access_modes if isinstance(mode, str)]
+			configs.append((current_path, storage_class, normalized_access_modes))
+
+		configs.extend(_iter_storage_configs(value, current_path))
+
+	return configs
