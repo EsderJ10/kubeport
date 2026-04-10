@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from frappe.tests import UnitTestCase
@@ -48,6 +49,42 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 		})
 
 		self.assertEqual(sites, [])
+
+	@patch("kubeport.utils.discovery.stream")
+	@patch("kubeport.utils.discovery.client.CoreV1Api")
+	def test_discover_release_sites_uses_scalar_request_timeouts(
+		self,
+		mock_core_v1_api,
+		mock_stream,
+	):
+		core_v1 = mock_core_v1_api.return_value
+		core_v1.connect_get_namespaced_pod_exec = object()
+		pod = SimpleNamespace(
+			metadata=SimpleNamespace(
+				name="bench-a-gunicorn-123",
+				labels={"app.kubernetes.io/component": "gunicorn"},
+			),
+			status=SimpleNamespace(
+				phase="Running",
+				container_statuses=[SimpleNamespace(ready=True)],
+			),
+			spec=SimpleNamespace(containers=[SimpleNamespace(name="web")]),
+		)
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
+		mock_stream.return_value = "\n".join(["site-one.local", "assets", "site-two.local"])
+
+		sites = discover_release_sites(object(), {
+			"release_name": "bench-a",
+			"namespace": "erp",
+			"is_frappe_bench": True,
+		})
+
+		self.assertEqual(
+			[site["site_name"] for site in sites],
+			["site-one.local", "site-two.local"],
+		)
+		self.assertEqual(core_v1.list_namespaced_pod.call_args.kwargs["_request_timeout"], 15.0)
+		self.assertEqual(mock_stream.call_args.kwargs["_request_timeout"], 20.0)
 
 
 class UnitTestClusterDiscoveryAPI(UnitTestCase):

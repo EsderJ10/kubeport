@@ -17,6 +17,8 @@ from kubernetes.stream import stream
 
 FRAPPE_BENCH_SITES_PATH = "/home/frappe/frappe-bench/sites"
 SITE_DISCOVERY_EXCLUDED_DIRS = {"assets"}
+_POD_LIST_TIMEOUT_SECONDS = 15.0
+_POD_EXEC_TIMEOUT_SECONDS = 20.0
 _COMPONENT_RANK = {
 	"gunicorn": 500,
 	"scheduler": 400,
@@ -115,7 +117,7 @@ def _select_site_discovery_pod(
 	pods = core_v1.list_namespaced_pod(
 		namespace=namespace,
 		label_selector=f"app.kubernetes.io/instance={release_name}",
-		_request_timeout=(5, 15),
+		_request_timeout=_POD_LIST_TIMEOUT_SECONDS,
 	)
 	candidates = [pod for pod in pods.items if _is_running_pod(pod)]
 	if not candidates:
@@ -193,7 +195,7 @@ def _exec_list_sites(
 		"stdin": False,
 		"stdout": True,
 		"tty": False,
-		"_request_timeout": (5, 20),
+		"_request_timeout": _POD_EXEC_TIMEOUT_SECONDS,
 	}
 	if container_name:
 		exec_kwargs["container"] = container_name
