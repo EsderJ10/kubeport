@@ -23,14 +23,14 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_set_helm_release_fields,
 		mock_publish_realtime,
 	):
-		mock_get_value.return_value = SimpleNamespace(
-			release_name="bench-a",
-			chart="ERPNext",
-			chart_version="8.0.41",
-			namespace="tfg",
-			cluster="cluster-a",
-			values="jobs:\n  createSite:\n    enabled: true\n",
-		)
+		mock_get_value.return_value = {
+			"release_name": "bench-a",
+			"chart": "ERPNext",
+			"chart_version": "8.0.41",
+			"namespace": "tfg",
+			"cluster": "cluster-a",
+			"values": "jobs:\n  createSite:\n    enabled: true\n",
+		}
 		mock_get_doc.return_value = SimpleNamespace(
 			latest_version="8.0.41",
 			get_chart_reference=lambda: "repo/erpnext",

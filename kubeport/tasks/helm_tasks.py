@@ -150,18 +150,18 @@ def install_or_upgrade_release(release_name: str):
 	if not release:
 		frappe.throw(f"Helm Release '{release_name}' was not found.")
 
-	chart_doc = frappe.get_doc("Helm Chart", release.chart)
+	chart_doc = frappe.get_doc("Helm Chart", release["chart"])
 
 	try:
 		chart_ref = chart_doc.get_chart_reference()
-		version = release.chart_version or chart_doc.latest_version
+		version = release["chart_version"] or chart_doc.latest_version
 
 		result = helm.install_or_upgrade(
-			release_name=release.release_name,
+			release_name=release["release_name"],
 			chart_ref=chart_ref,
-			namespace=release.namespace or "default",
-			cluster_name=release.cluster,
-			values_yaml=release.values,
+			namespace=release["namespace"] or "default",
+			cluster_name=release["cluster"],
+			values_yaml=release.get("values"),
 			chart_version=version,
 		)
 
