@@ -1,11 +1,12 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from kubeport.kubeport.doctype.helm_release.helm_release import (
+	HelmRelease,
 	_iter_storage_configs,
 	_validate_storage_access_modes,
 )
@@ -59,6 +60,20 @@ class UnitTestHelmRelease(UnitTestCase):
 		})
 
 		mock_throw.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	def test_deploy_release_rejects_duplicate_in_progress_deploy(self, mock_throw):
+		doc = object.__new__(HelmRelease)
+		doc.chart = "ERPNext"
+		doc.cluster = "cluster-a"
+		doc.status = "In Progress"
+		doc.db_set = MagicMock()
+		doc.name = "bench-a"
+		doc.release_name = "bench-a"
+		mock_throw.side_effect = RuntimeError("Deployment is already in progress for this release.")
+
+		with self.assertRaisesRegex(RuntimeError, "already in progress"):
+			doc.deploy_release()
 
 
 # On IntegrationTestCase, the doctype test records and all

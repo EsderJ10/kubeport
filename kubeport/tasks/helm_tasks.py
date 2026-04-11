@@ -141,19 +141,27 @@ def install_or_upgrade_release(release_name: str):
 
 	Uses ``helm upgrade --install`` for idempotency.
 	"""
-	doc = frappe.get_doc("Helm Release", release_name)
-	chart_doc = frappe.get_doc("Helm Chart", doc.chart)
+	release = frappe.db.get_value(
+		"Helm Release",
+		release_name,
+		["release_name", "chart", "chart_version", "namespace", "cluster", "values"],
+		as_dict=True,
+	)
+	if not release:
+		frappe.throw(f"Helm Release '{release_name}' was not found.")
+
+	chart_doc = frappe.get_doc("Helm Chart", release.chart)
 
 	try:
 		chart_ref = chart_doc.get_chart_reference()
-		version = doc.chart_version or chart_doc.latest_version
+		version = release.chart_version or chart_doc.latest_version
 
 		result = helm.install_or_upgrade(
-			release_name=doc.release_name,
+			release_name=release.release_name,
 			chart_ref=chart_ref,
-			namespace=doc.namespace or "default",
-			cluster_name=doc.cluster,
-			values_yaml=doc.values if doc.values else None,
+			namespace=release.namespace or "default",
+			cluster_name=release.cluster,
+			values_yaml=release.values,
 			chart_version=version,
 		)
 
@@ -166,9 +174,11 @@ def install_or_upgrade_release(release_name: str):
 			if isinstance(info, dict):
 				status_detail = info.get("status", "")
 
-		doc.db_set("status", "Deployed")
-		doc.db_set("helm_revision", revision)
-		doc.db_set("helm_status_detail", status_detail)
+		_set_helm_release_fields(release_name, {
+			"status": "Deployed",
+			"helm_revision": revision,
+			"helm_status_detail": status_detail,
+		})
 
 		frappe.publish_realtime(
 			"helm_release_status_update",
@@ -178,8 +188,10 @@ def install_or_upgrade_release(release_name: str):
 		)
 
 	except Exception as e:
-		doc.db_set("status", "Failed")
-		doc.db_set("helm_status_detail", str(e)[:500])
+		_set_helm_release_fields(release_name, {
+			"status": "Failed",
+			"helm_status_detail": str(e)[:500],
+		})
 		frappe.log_error(
 			title=f"Helm Install/Upgrade Failed: {release_name}",
 			message=str(e),
@@ -232,6 +244,11 @@ def uninstall_release(release_name: str):
 # ---------------------------------------------------------------------------
 # Private Helpers
 # ---------------------------------------------------------------------------
+
+
+def _set_helm_release_fields(release_name: str, values: dict[str, object]) -> None:
+	for fieldname, value in values.items():
+		frappe.db.set_value("Helm Release", release_name, fieldname, value)
 
 
 def _sync_charts(repo_doc):

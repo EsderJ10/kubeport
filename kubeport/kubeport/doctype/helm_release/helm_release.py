@@ -59,6 +59,10 @@ class HelmRelease(Document):
 			frappe.throw("A chart is required.")
 		if not self.cluster:
 			frappe.throw("A target cluster is required.")
+		if self.status == "In Progress":
+			frappe.throw("Deployment is already in progress for this release.")
+		if self.status == "Uninstalling":
+			frappe.throw("Cannot deploy a release while uninstall is in progress.")
 
 		self.db_set("status", "In Progress")
 

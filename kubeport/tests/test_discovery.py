@@ -69,7 +69,76 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 			),
 		])
 
-		with self.assertRaisesRegex(RuntimeError, "No running Frappe workload pods found"):
+		with self.assertRaisesRegex(RuntimeError, "Only non-Frappe pods found"):
+			discover_release_sites(object(), {
+				"release_name": "bench-a",
+				"namespace": "erp",
+				"is_frappe_bench": True,
+			})
+
+	@patch("kubeport.utils.discovery.stream")
+	@patch("kubeport.utils.discovery.client.CoreV1Api")
+	def test_discover_release_sites_falls_back_to_namespace_scan_when_selector_misses(
+		self,
+		mock_core_v1_api,
+		mock_stream,
+	):
+		core_v1 = mock_core_v1_api.return_value
+		core_v1.connect_get_namespaced_pod_exec = object()
+		core_v1.list_namespaced_pod.side_effect = [
+			SimpleNamespace(items=[]),
+			SimpleNamespace(items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="bench-a-erpnext-gunicorn-123", labels={}),
+					status=SimpleNamespace(
+						phase="Running",
+						container_statuses=[SimpleNamespace(ready=True)],
+					),
+					spec=SimpleNamespace(containers=[SimpleNamespace(name="web")]),
+				),
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="other-release-nginx-123", labels={}),
+					status=SimpleNamespace(phase="Running", container_statuses=[]),
+					spec=SimpleNamespace(containers=[SimpleNamespace(name="nginx")]),
+				),
+			]),
+		]
+		mock_stream.return_value = "site-one.local"
+
+		sites = discover_release_sites(object(), {
+			"release_name": "bench-a",
+			"namespace": "erp",
+			"is_frappe_bench": True,
+		})
+
+		self.assertEqual([site["site_name"] for site in sites], ["site-one.local"])
+		self.assertEqual(core_v1.list_namespaced_pod.call_count, 2)
+		self.assertEqual(
+			core_v1.list_namespaced_pod.call_args_list[0].kwargs["label_selector"],
+			"app.kubernetes.io/instance=bench-a",
+		)
+		self.assertNotIn("label_selector", core_v1.list_namespaced_pod.call_args_list[1].kwargs)
+
+	@patch("kubeport.utils.discovery.client.CoreV1Api")
+	def test_discover_release_sites_reports_pending_workload_pods(
+		self,
+		mock_core_v1_api,
+	):
+		core_v1 = mock_core_v1_api.return_value
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
+			SimpleNamespace(
+				metadata=SimpleNamespace(name="bench-a-erpnext-gunicorn-123", labels={}),
+				status=SimpleNamespace(phase="Pending", container_statuses=[]),
+				spec=SimpleNamespace(containers=[SimpleNamespace(name="web")]),
+			),
+			SimpleNamespace(
+				metadata=SimpleNamespace(name="bench-a-erpnext-nginx-123", labels={}),
+				status=SimpleNamespace(phase="Pending", container_statuses=[]),
+				spec=SimpleNamespace(containers=[SimpleNamespace(name="nginx")]),
+			),
+		])
+
+		with self.assertRaisesRegex(RuntimeError, "none are running"):
 			discover_release_sites(object(), {
 				"release_name": "bench-a",
 				"namespace": "erp",

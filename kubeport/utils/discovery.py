@@ -43,6 +43,7 @@ _SITE_DISCOVERY_ALLOWED_NAME_TOKENS = (
 	"nginx",
 	"socketio",
 )
+_POD_SUMMARY_LIMIT = 6
 
 
 def discover_cluster_releases(cluster_name: str) -> list[dict[str, Any]]:
@@ -126,16 +127,28 @@ def _select_site_discovery_pod(
 	if not release_name:
 		raise ValueError("Release name is required for site discovery.")
 
-	pods = core_v1.list_namespaced_pod(
+	release_pods = _list_release_pods(
+		core_v1=core_v1,
 		namespace=namespace,
-		label_selector=f"app.kubernetes.io/instance={release_name}",
-		_request_timeout=_POD_LIST_TIMEOUT_SECONDS,
+		release_name=release_name,
 	)
-	candidates = [pod for pod in pods.items if _is_site_discovery_candidate(pod)]
+	if not release_pods:
+		raise RuntimeError(
+			f"No pods found for Helm release '{release_name}' in namespace '{namespace}'."
+		)
+
+	workload_pods = [pod for pod in release_pods if _is_frappe_workload_pod(pod)]
+	if not workload_pods:
+		raise RuntimeError(
+			f"Only non-Frappe pods found for Helm release '{release_name}' in namespace "
+			f"'{namespace}'. Pods: {_summarize_pods(release_pods)}"
+		)
+
+	candidates = [pod for pod in workload_pods if _is_site_discovery_candidate(pod)]
 	if not candidates:
 		raise RuntimeError(
-			f"No running Frappe workload pods found for Helm release '{release_name}' "
-			f"in namespace '{namespace}'."
+			f"Found Frappe workload pods for Helm release '{release_name}' in namespace "
+			f"'{namespace}', but none are running. Pods: {_summarize_pods(workload_pods)}"
 		)
 
 	return max(candidates, key=_score_site_pod)
@@ -146,10 +159,61 @@ def _is_running_pod(pod: client.V1Pod) -> bool:
 	return bool(status and getattr(status, "phase", "") == "Running")
 
 
-def _is_site_discovery_candidate(pod: client.V1Pod) -> bool:
-	if not _is_running_pod(pod):
-		return False
+def _list_release_pods(
+	core_v1: client.CoreV1Api,
+	namespace: str,
+	release_name: str,
+) -> list[client.V1Pod]:
+	selector_pods = core_v1.list_namespaced_pod(
+		namespace=namespace,
+		label_selector=f"app.kubernetes.io/instance={release_name}",
+		_request_timeout=_POD_LIST_TIMEOUT_SECONDS,
+	)
+	release_pods = _merge_unique_pods([], selector_pods.items)
 
+	if release_pods and any(_is_frappe_workload_pod(pod) for pod in release_pods):
+		return release_pods
+
+	namespace_pods = core_v1.list_namespaced_pod(
+		namespace=namespace,
+		_request_timeout=_POD_LIST_TIMEOUT_SECONDS,
+	)
+	fallback_matches = [
+		pod for pod in namespace_pods.items if _pod_matches_release(pod, release_name)
+	]
+	return _merge_unique_pods(release_pods, fallback_matches)
+
+
+def _merge_unique_pods(
+	existing: list[client.V1Pod],
+	additional: Iterable[client.V1Pod],
+) -> list[client.V1Pod]:
+	merged: list[client.V1Pod] = list(existing)
+	seen = {_pod_identity(pod) for pod in merged}
+
+	for pod in additional:
+		pod_id = _pod_identity(pod)
+		if pod_id in seen:
+			continue
+		merged.append(pod)
+		seen.add(pod_id)
+
+	return merged
+
+
+def _pod_matches_release(pod: client.V1Pod, release_name: str) -> bool:
+	metadata = getattr(pod, "metadata", None)
+	labels = metadata.labels if metadata and metadata.labels else {}
+	name = str(metadata.name if metadata and metadata.name else "")
+
+	return any((
+		str(labels.get("app.kubernetes.io/instance") or "") == release_name,
+		str(labels.get("release") or "") == release_name,
+		name.startswith(f"{release_name}-"),
+	))
+
+
+def _is_frappe_workload_pod(pod: client.V1Pod) -> bool:
 	metadata = getattr(pod, "metadata", None)
 	labels = metadata.labels if metadata and metadata.labels else {}
 	component = str(labels.get("app.kubernetes.io/component") or "")
@@ -158,6 +222,13 @@ def _is_site_discovery_candidate(pod: client.V1Pod) -> bool:
 
 	name = str(metadata.name if metadata and metadata.name else "")
 	return any(token in name for token in _SITE_DISCOVERY_ALLOWED_NAME_TOKENS)
+
+
+def _is_site_discovery_candidate(pod: client.V1Pod) -> bool:
+	if not _is_running_pod(pod):
+		return False
+
+	return _is_frappe_workload_pod(pod)
 
 
 def _score_site_pod(pod: client.V1Pod) -> int:
@@ -239,3 +310,33 @@ def _parse_site_names(lines: Iterable[str]) -> list[str]:
 			continue
 		sites.add(line)
 	return sorted(sites)
+
+
+def _pod_identity(pod: client.V1Pod) -> str:
+	metadata = getattr(pod, "metadata", None)
+	if metadata and getattr(metadata, "uid", None):
+		return str(metadata.uid)
+
+	namespace = str(metadata.namespace if metadata and metadata.namespace else "")
+	name = str(metadata.name if metadata and metadata.name else "")
+	return f"{namespace}/{name}"
+
+
+def _summarize_pods(pods: Iterable[client.V1Pod]) -> str:
+	summary: list[str] = []
+	for pod in pods:
+		metadata = getattr(pod, "metadata", None)
+		name = str(metadata.name if metadata and metadata.name else "<unknown>")
+		status = getattr(pod, "status", None)
+		phase = str(getattr(status, "phase", "") or "Unknown")
+		summary.append(f"{name} ({phase})")
+
+	if not summary:
+		return "none"
+
+	if len(summary) > _POD_SUMMARY_LIMIT:
+		visible = summary[:_POD_SUMMARY_LIMIT]
+		remaining = len(summary) - _POD_SUMMARY_LIMIT
+		return f"{', '.join(visible)}, +{remaining} more"
+
+	return ", ".join(summary)
