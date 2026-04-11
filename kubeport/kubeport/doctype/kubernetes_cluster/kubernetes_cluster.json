@@ -23,7 +23,14 @@
   "section_break_ca",
   "ca_certificate",
   "section_break_actions",
-  "test_connection"
+  "test_connection",
+  "section_break_discovery",
+  "refresh_discovery",
+  "discovery_status_html",
+  "section_break_discovered_releases",
+  "discovered_releases_html",
+  "section_break_discovered_sites",
+  "discovered_sites_html"
  ],
  "fields": [
   {
@@ -150,12 +157,45 @@
    "fieldname": "test_connection",
    "fieldtype": "Button",
    "label": "Test Connection"
+  },
+  {
+   "fieldname": "section_break_discovery",
+   "fieldtype": "Section Break",
+   "label": "Discovery"
+  },
+  {
+   "depends_on": "eval:!doc.__islocal",
+   "fieldname": "refresh_discovery",
+   "fieldtype": "Button",
+   "label": "Refresh Discovery"
+  },
+  {
+   "fieldname": "discovery_status_html",
+   "fieldtype": "HTML"
+  },
+  {
+   "fieldname": "section_break_discovered_releases",
+   "fieldtype": "Section Break",
+   "label": "Helm Releases"
+  },
+  {
+   "fieldname": "discovered_releases_html",
+   "fieldtype": "HTML"
+  },
+  {
+   "fieldname": "section_break_discovered_sites",
+   "fieldtype": "Section Break",
+   "label": "Frappe Sites"
+  },
+  {
+   "fieldname": "discovered_sites_html",
+   "fieldtype": "HTML"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-04-07 20:13:00.000000",
+ "modified": "2026-04-10 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Kubeport",
  "name": "Kubernetes Cluster",
