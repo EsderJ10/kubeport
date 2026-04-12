@@ -2,8 +2,7 @@
 Service Bundle background tasks.
 
 Applies and deletes raw Kubernetes resource manifests defined in a
-Service Bundle document.  This is the renamed successor of the original
-``release_tasks.py`` that was incorrectly associated with Helm.
+Service Bundle document.
 """
 
 import frappe

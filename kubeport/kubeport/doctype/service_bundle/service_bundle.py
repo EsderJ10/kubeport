@@ -5,9 +5,6 @@
 Service Bundle Controller
 
 Deploys a set of raw Kubernetes resource manifests to a cluster.
-This is the honest successor to the original "Helm Release" DocType,
-which applied raw manifests despite its name.  Actual Helm integration
-is handled by the new ``Helm Release`` DocType.
 """
 
 import frappe

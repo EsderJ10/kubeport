@@ -5,10 +5,9 @@ Periodic task that compares desired state (Frappe DB) with actual state
 (Kubernetes cluster) and flags drift.  Runs via ``scheduler_events`` in
 ``hooks.py`` every 5 minutes.
 
-Covers three DocTypes:
+Covers two DocTypes:
 - **Helm Release** — uses ``helm status`` to check Helm-managed releases
 - **Service Bundle** — uses K8s API to check raw manifest resources
-- **Kubernetes Manifest** — uses K8s API to check raw manifest resources
 """
 
 import frappe
@@ -23,7 +22,6 @@ def reconcile_all_releases():
 	"""
 	_reconcile_helm_releases()
 	_reconcile_service_bundles()
-	_reconcile_kubernetes_manifests()
 
 
 def _reconcile_helm_releases():
@@ -100,29 +98,5 @@ def _reconcile_service_bundles():
 		except Exception as e:
 			frappe.log_error(
 				title=f"Reconciliation Error: Service Bundle {bundle.name}",
-				message=str(e),
-			)
-
-
-def _reconcile_kubernetes_manifests():
-	"""Check all Applied Kubernetes Manifests for resource drift."""
-	applied_manifests = frappe.get_all(
-		"Kubernetes Manifest",
-		filters={"status": "Applied"},
-		fields=["name", "cluster", "namespace", "content"],
-	)
-
-	for manifest in applied_manifests:
-		try:
-			check_resources_exist(
-				cluster_name=manifest.cluster,
-				manifest_json=manifest.content,
-				namespace=manifest.namespace or "default",
-				doctype="Kubernetes Manifest",
-				docname=manifest.name,
-			)
-		except Exception as e:
-			frappe.log_error(
-				title=f"Reconciliation Error: Kubernetes Manifest {manifest.name}",
 				message=str(e),
 			)
