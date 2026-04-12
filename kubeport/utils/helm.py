@@ -17,6 +17,7 @@ Output parsing:
 - Commands that produce text (e.g. ``helm show values``) return raw strings
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -310,7 +311,7 @@ def _build_kubeconfig_from_token(cluster_doc) -> str:
 	# Add CA certificate if present
 	if cluster_doc.ca_certificate:
 		kubeconfig["clusters"][0]["cluster"]["certificate-authority-data"] = (
-			cluster_doc.ca_certificate
+			base64.b64encode(cluster_doc.ca_certificate.encode("utf-8")).decode("ascii")
 		)
 	else:
 		kubeconfig["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True

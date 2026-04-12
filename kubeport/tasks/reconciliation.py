@@ -14,6 +14,9 @@ import frappe
 
 from kubeport.utils.k8s_resources import check_resources_exist
 
+_HEALTHY_RELEASE_STATUSES = ["Deployed", "Degraded"]
+_HELM_STATUS_DETAIL_LIMIT = 500
+
 
 def reconcile_all_releases():
 	"""Periodic task: compare desired state (DB) with actual state (K8s cluster).
@@ -35,8 +38,8 @@ def _reconcile_helm_releases():
 
 	deployed_releases = frappe.get_all(
 		"Helm Release",
-		filters={"status": "Deployed"},
-		fields=["name", "cluster", "namespace", "release_name"],
+		filters={"status": ["in", _HEALTHY_RELEASE_STATUSES]},
+		fields=["name", "cluster", "namespace", "release_name", "status"],
 	)
 
 	for release in deployed_releases:
@@ -54,23 +57,25 @@ def _reconcile_helm_releases():
 				if isinstance(info, dict):
 					actual_status = info.get("status", "")
 
-			if actual_status and actual_status != "deployed":
-				frappe.db.set_value("Helm Release", release.name, "status", "Degraded")
-				frappe.db.set_value(
-					"Helm Release", release.name,
-					"helm_status_detail", f"Helm reports: {actual_status}",
+			if actual_status == "deployed":
+				_set_helm_reconciliation_state(release.name, "Deployed", actual_status)
+			else:
+				_set_helm_reconciliation_state(
+					release.name,
+					"Degraded",
+					f"Helm reports: {actual_status or 'unknown'}",
 				)
 				frappe.log_error(
 					title=f"Helm Drift Detected: {release.name}",
-					message=f"Expected 'deployed', got '{actual_status}'.",
+					message=f"Expected 'deployed', got '{actual_status or 'unknown'}'.",
 				)
 
 		except Exception as e:
 			# If helm status fails entirely, mark as degraded
-			frappe.db.set_value("Helm Release", release.name, "status", "Degraded")
-			frappe.db.set_value(
-				"Helm Release", release.name,
-				"helm_status_detail", f"Reconciliation error: {str(e)[:500]}",
+			_set_helm_reconciliation_state(
+				release.name,
+				"Degraded",
+				f"Reconciliation error: {_truncate_status_detail(str(e))}",
 			)
 			frappe.log_error(
 				title=f"Helm Reconciliation Error: {release.name}",
@@ -82,21 +87,45 @@ def _reconcile_service_bundles():
 	"""Check all Deployed Service Bundles for resource drift."""
 	deployed_bundles = frappe.get_all(
 		"Service Bundle",
-		filters={"status": "Deployed"},
-		fields=["name", "cluster", "namespace", "content"],
+		filters={"status": ["in", _HEALTHY_RELEASE_STATUSES]},
+		fields=["name", "cluster", "namespace", "content", "status"],
 	)
 
 	for bundle in deployed_bundles:
 		try:
-			check_resources_exist(
+			is_healthy, detail = check_resources_exist(
 				cluster_name=bundle.cluster,
 				manifest_json=bundle.content,
 				namespace=bundle.namespace or "default",
 				doctype="Service Bundle",
 				docname=bundle.name,
 			)
+			next_status = "Deployed" if is_healthy else "Degraded"
+			if bundle.status != next_status:
+				frappe.db.set_value("Service Bundle", bundle.name, "status", next_status)
+
+			if not is_healthy:
+				frappe.log_error(
+					title=f"State Drift Detected: Service Bundle {bundle.name}",
+					message=detail,
+				)
 		except Exception as e:
+			frappe.db.set_value("Service Bundle", bundle.name, "status", "Degraded")
 			frappe.log_error(
 				title=f"Reconciliation Error: Service Bundle {bundle.name}",
 				message=str(e),
 			)
+
+
+def _set_helm_reconciliation_state(release_name: str, status: str, detail: str) -> None:
+	frappe.db.set_value("Helm Release", release_name, "status", status)
+	frappe.db.set_value(
+		"Helm Release",
+		release_name,
+		"helm_status_detail",
+		_truncate_status_detail(detail),
+	)
+
+
+def _truncate_status_detail(detail: str) -> str:
+	return detail[:_HELM_STATUS_DETAIL_LIMIT]
