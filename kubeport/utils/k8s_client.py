@@ -58,17 +58,22 @@ def _client_from_kubeconfig(cluster_doc) -> client.ApiClient:
 
 	kubeconfig_dict = yaml.safe_load(cluster_doc.kubeconfig)
 
-	# new_client_from_config_dict returns a scoped ApiClient without mutating
-	# global state or writing any files to disk.
-	api_client = config.new_client_from_config_dict(config_dict=kubeconfig_dict)
-
-	# Development-only: skip TLS verification for local clusters (K3d, Kind, Minikube)
-	# whose self-signed certificates don't include the Docker bridge IP in their SAN.
+	# The Python client snapshots TLS settings when the ApiClient is built, so
+	# development-only TLS bypass must be applied to the kubeconfig payload
+	# before constructing the client.
 	if cluster_doc.skip_tls_verify:
-		api_client.configuration.verify_ssl = False
+		for cluster in kubeconfig_dict.get("clusters", []):
+			cluster_config = cluster.get("cluster")
+			if not isinstance(cluster_config, dict):
+				continue
+			cluster_config["insecure-skip-tls-verify"] = True
+			cluster_config.pop("certificate-authority-data", None)
+			cluster_config.pop("certificate-authority", None)
 		urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-	return api_client
+	# new_client_from_config_dict returns a scoped ApiClient without mutating
+	# global state or writing any files to disk.
+	return config.new_client_from_config_dict(config_dict=kubeconfig_dict)
 
 
 def _client_from_bearer_token(cluster_doc) -> client.ApiClient:

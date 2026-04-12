@@ -6,10 +6,50 @@ from unittest.mock import patch
 
 from frappe.tests import UnitTestCase
 
-from kubeport.utils.k8s_client import _client_from_bearer_token
+from kubeport.utils.k8s_client import _client_from_bearer_token, _client_from_kubeconfig
 
 
 class UnitTestK8sClient(UnitTestCase):
+	@patch("kubeport.utils.k8s_client.urllib3.disable_warnings")
+	@patch("kubeport.utils.k8s_client.config.new_client_from_config_dict")
+	def test_client_from_kubeconfig_rewrites_tls_settings_before_client_creation(
+		self,
+		mock_new_client,
+		mock_disable_warnings,
+	):
+		cluster_doc = SimpleNamespace(
+			name="cluster-a",
+			skip_tls_verify=1,
+			kubeconfig="""
+apiVersion: v1
+kind: Config
+clusters:
+  - name: default
+    cluster:
+      server: https://172.22.0.1:34439
+      certificate-authority-data: ZmFrZS1jYQ==
+contexts:
+  - name: default
+    context:
+      cluster: default
+      user: default
+current-context: default
+users:
+  - name: default
+    user:
+      token: token-123
+""",
+		)
+
+		_client_from_kubeconfig(cluster_doc)
+
+		kubeconfig_dict = mock_new_client.call_args.kwargs["config_dict"]
+		cluster_config = kubeconfig_dict["clusters"][0]["cluster"]
+		self.assertTrue(cluster_config["insecure-skip-tls-verify"])
+		self.assertNotIn("certificate-authority-data", cluster_config)
+		self.assertNotIn("certificate-authority", cluster_config)
+		mock_disable_warnings.assert_called_once()
+
 	@patch("kubeport.utils.k8s_client.urllib3.disable_warnings")
 	@patch("kubeport.utils.k8s_client.client.ApiClient")
 	@patch("kubeport.utils.k8s_client._write_ca_tempfile")
