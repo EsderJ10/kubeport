@@ -29,6 +29,7 @@ class UnitTestHelmTasks(UnitTestCase):
 	@patch("kubeport.tasks.helm_tasks.frappe.utils.now", return_value="2026-04-12 10:00:00")
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
 	@patch("kubeport.tasks.helm_tasks._sync_charts")
+	@patch("kubeport.tasks.helm_tasks.helm.repo_add")
 	@patch("kubeport.tasks.helm_tasks.helm.repo_update")
 	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
 	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
@@ -37,6 +38,7 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_get_value,
 		mock_get_doc,
 		mock_repo_update,
+		mock_repo_add,
 		mock_sync_charts,
 		mock_publish_realtime,
 		_mock_now,
@@ -44,11 +46,21 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_get_value.side_effect = ["sync-token", "sync-token"]
 		doc = MagicMock()
 		doc.repo_name = "bitnami"
+		doc.repo_url = "https://charts.bitnami.com/bitnami"
+		doc.repo_username = "user-a"
+		doc.repo_password = "secret"
+		doc.get_password.return_value = "secret-value"
 		mock_get_doc.return_value = doc
 
 		sync_repo_charts("repo-a", "sync-token")
 
 		mock_get_doc.assert_called_once_with("Helm Repository", "repo-a")
+		mock_repo_add.assert_called_once_with(
+			"bitnami",
+			"https://charts.bitnami.com/bitnami",
+			username="user-a",
+			password="secret-value",
+		)
 		mock_repo_update.assert_called_once_with("bitnami")
 		mock_sync_charts.assert_called_once_with(doc)
 		doc.db_set.assert_any_call("status", "Synced")
@@ -64,6 +76,7 @@ class UnitTestHelmTasks(UnitTestCase):
 	@patch("kubeport.tasks.helm_tasks.frappe.log_error")
 	@patch("kubeport.tasks.helm_tasks.frappe.db.rollback")
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks.helm.repo_add")
 	@patch("kubeport.tasks.helm_tasks.helm.repo_update")
 	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
 	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
@@ -72,6 +85,7 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_get_value,
 		mock_get_doc,
 		mock_repo_update,
+		_mock_repo_add,
 		mock_publish_realtime,
 		mock_rollback,
 		mock_log_error,
@@ -80,6 +94,9 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_get_value.side_effect = ["sync-token", "newer-token"]
 		doc = MagicMock()
 		doc.repo_name = "bitnami"
+		doc.repo_url = "https://charts.bitnami.com/bitnami"
+		doc.repo_username = None
+		doc.repo_password = None
 		mock_get_doc.return_value = doc
 		mock_repo_update.side_effect = RuntimeError("helm repo update failed")
 
@@ -90,6 +107,47 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_publish_realtime.assert_not_called()
 		mock_log_error.assert_not_called()
 		mock_logger.return_value.info.assert_called_once()
+
+	@patch("kubeport.tasks.helm_tasks.frappe.utils.now", return_value="2026-04-12 10:00:00")
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._sync_charts")
+	@patch("kubeport.tasks.helm_tasks.helm.repo_add")
+	@patch("kubeport.tasks.helm_tasks.helm.repo_update")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_sync_repo_charts_re_registers_repo_before_update(
+		self,
+		mock_get_value,
+		mock_get_doc,
+		mock_repo_update,
+		mock_repo_add,
+		mock_sync_charts,
+		mock_publish_realtime,
+		_mock_now,
+	):
+		mock_get_value.side_effect = ["sync-token", "sync-token"]
+		call_order = []
+		doc = MagicMock()
+		doc.repo_name = "bitnami"
+		doc.repo_url = "https://charts.bitnami.com/bitnami"
+		doc.repo_username = None
+		doc.repo_password = None
+		mock_get_doc.return_value = doc
+		mock_repo_add.side_effect = lambda *args, **kwargs: call_order.append("repo_add")
+		mock_repo_update.side_effect = lambda *args, **kwargs: call_order.append("repo_update")
+
+		sync_repo_charts("repo-a", "sync-token")
+
+		mock_repo_add.assert_called_once_with(
+			"bitnami",
+			"https://charts.bitnami.com/bitnami",
+			username=None,
+			password=None,
+		)
+		mock_repo_update.assert_called_once_with("bitnami")
+		self.assertEqual(call_order, ["repo_add", "repo_update"])
+		mock_sync_charts.assert_called_once_with(doc)
+		mock_publish_realtime.assert_called_once()
 
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
 	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")

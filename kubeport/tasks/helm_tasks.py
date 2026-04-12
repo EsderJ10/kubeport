@@ -44,14 +44,7 @@ def add_and_sync_repo(repo_name: str, sync_token: str):
 	doc = frappe.get_doc("Helm Repository", repo_name)
 
 	try:
-		# Register the repo with Helm CLI
-		password = doc.get_password("repo_password") if doc.repo_password else None
-		helm.repo_add(
-			doc.repo_name,
-			doc.repo_url,
-			username=doc.repo_username or None,
-			password=password,
-		)
+		_ensure_repo_registered(doc)
 
 		# Sync charts into the database
 		_sync_charts(doc)
@@ -97,6 +90,10 @@ def sync_repo_charts(repo_name: str, sync_token: str):
 	doc = frappe.get_doc("Helm Repository", repo_name)
 
 	try:
+		# Re-register the repo before every sync so workers remain correct even if
+		# the original add job was superseded or Helm's local registry was reset.
+		_ensure_repo_registered(doc)
+
 		# Refresh the local chart index
 		helm.repo_update(doc.repo_name)
 
@@ -324,6 +321,16 @@ def _repo_sync_token_matches(repo_name: str, sync_token: str) -> bool:
 		current_token,
 	)
 	return False
+
+
+def _ensure_repo_registered(repo_doc) -> None:
+	password = repo_doc.get_password("repo_password") if repo_doc.repo_password else None
+	helm.repo_add(
+		repo_doc.repo_name,
+		repo_doc.repo_url,
+		username=repo_doc.repo_username or None,
+		password=password,
+	)
 
 
 def _sync_charts(repo_doc):
