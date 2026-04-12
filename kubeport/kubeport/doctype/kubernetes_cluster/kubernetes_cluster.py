@@ -73,4 +73,16 @@ class KubernetesCluster(Document):
 
 		except Exception as e:
 			self.db_set("status", "Error")
-			frappe.throw(f"Failed to connect: {str(e)}")
+			message = str(e)
+			if (
+				not self.skip_tls_verify
+				and self.auth_method in {"Kubeconfig", "Bearer Token"}
+				and "CERTIFICATE_VERIFY_FAILED" in message
+			):
+				message = (
+					f"{message} "
+					"Enable 'Skip TLS Verification (Development Only)' only for local or "
+					"non-production clusters whose API certificate does not match the "
+					"configured server address."
+				)
+			frappe.throw(f"Failed to connect: {message}")

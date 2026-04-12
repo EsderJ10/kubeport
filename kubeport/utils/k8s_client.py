@@ -88,8 +88,13 @@ def _client_from_bearer_token(cluster_doc) -> client.ApiClient:
 	configuration.host = cluster_doc.api_server_url
 	configuration.api_key = {"authorization": f"Bearer {token}"}
 
-	# Use the CA certificate if provided; otherwise skip TLS verification
-	if cluster_doc.ca_certificate:
+	# Development-only: some local clusters expose the API through an IP whose
+	# certificate SAN covers a DNS name instead. Allow explicitly bypassing
+	# verification for those setups, even when a CA bundle is present.
+	if cluster_doc.skip_tls_verify:
+		configuration.verify_ssl = False
+		urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+	elif cluster_doc.ca_certificate:
 		ca_path = _write_ca_tempfile(cluster_doc.ca_certificate)
 		configuration.ssl_ca_cert = ca_path
 	else:

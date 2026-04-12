@@ -47,6 +47,7 @@ Purpose:
 Key behavior:
 - Validates auth-method-specific fields.
 - Supports connection testing.
+- Supports dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
 - The client-side form renders live discovery using async API calls.
 
 ### `Helm Repository`

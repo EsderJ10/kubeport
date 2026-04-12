@@ -319,8 +319,10 @@ def _build_kubeconfig_from_token(cluster_doc) -> str:
 		}],
 	}
 
-	# Add CA certificate if present
-	if cluster_doc.ca_certificate:
+	# Keep Helm TLS behavior aligned with the Python Kubernetes client.
+	if cluster_doc.skip_tls_verify:
+		kubeconfig["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True
+	elif cluster_doc.ca_certificate:
 		kubeconfig["clusters"][0]["cluster"]["certificate-authority-data"] = (
 			base64.b64encode(cluster_doc.ca_certificate.encode("utf-8")).decode("ascii")
 		)

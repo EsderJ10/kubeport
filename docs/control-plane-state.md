@@ -14,6 +14,7 @@ The current milestone is robustness. Most of the meaningful recent work is about
   - kubeconfig auth
   - bearer-token auth
   - in-cluster auth
+- Dev-only TLS verification bypass is available for kubeconfig and bearer-token clusters whose local certificates do not match the configured endpoint.
 - Connection testing hits the real Kubernetes API and updates the cluster record status.
 - Namespace lookup is live and reused by forms that need cluster namespaces.
 - Kubeconfig upload flows are browser-driven and allow context extraction without reading server-side files.

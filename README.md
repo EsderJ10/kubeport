@@ -28,6 +28,7 @@ The current milestone is robustness, especially around discovery and asynchronou
   - kubeconfig
   - bearer token
   - in-cluster service account auth
+- Dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
 - Live namespace discovery for cluster-backed forms.
 - Browser-side kubeconfig import, context parsing, and context extraction.
 - Helm repository registration and chart sync.
