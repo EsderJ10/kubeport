@@ -28,6 +28,9 @@ from typing import Any
 import frappe
 import yaml
 
+_HELM_WORKER_TIMEOUT_SECONDS = 600
+_HELM_READ_TIMEOUT_SECONDS = 30
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -78,16 +81,32 @@ def search_repo(repo_name: str, keyword: str = "") -> list[dict]:
 	Equivalent to ``helm search repo <repo_name>/ --output json``.
 	Returns a list of chart dicts with keys: name, version, app_version, description.
 	"""
+	return search_repo_with_options(repo_name, keyword=keyword)
+
+
+def search_repo_with_options(
+	repo_name: str,
+	keyword: str = "",
+	all_versions: bool = False,
+	timeout: int = _HELM_READ_TIMEOUT_SECONDS,
+) -> list[dict]:
+	"""List charts in a repository with optional full version history."""
 	search_term = f"{repo_name}/"
 	if keyword:
 		search_term = f"{repo_name}/{keyword}"
 
 	cmd = ["helm", "search", "repo", search_term, "--output", "json"]
-	output = _run_helm(cmd)
+	if all_versions:
+		cmd.append("--versions")
+	output = _run_helm(cmd, timeout=timeout)
 	return _parse_json_or_empty(output)
 
 
-def show_chart(chart_ref: str, version: str | None = None) -> dict:
+def show_chart(
+	chart_ref: str,
+	version: str | None = None,
+	timeout: int = _HELM_READ_TIMEOUT_SECONDS,
+) -> dict:
 	"""Get chart metadata (Chart.yaml content).
 
 	Equivalent to ``helm show chart <ref> [--version <v>]``.
@@ -95,11 +114,15 @@ def show_chart(chart_ref: str, version: str | None = None) -> dict:
 	cmd = ["helm", "show", "chart", chart_ref]
 	if version:
 		cmd.extend(["--version", version])
-	output = _run_helm(cmd)
+	output = _run_helm(cmd, timeout=timeout)
 	return yaml.safe_load(output) or {}
 
 
-def show_values(chart_ref: str, version: str | None = None) -> str:
+def show_values(
+	chart_ref: str,
+	version: str | None = None,
+	timeout: int = _HELM_READ_TIMEOUT_SECONDS,
+) -> str:
 	"""Get default values.yaml for a chart as raw YAML string.
 
 	Equivalent to ``helm show values <ref> [--version <v>]``.
@@ -107,7 +130,7 @@ def show_values(chart_ref: str, version: str | None = None) -> str:
 	cmd = ["helm", "show", "values", chart_ref]
 	if version:
 		cmd.extend(["--version", version])
-	return _run_helm(cmd)
+	return _run_helm(cmd, timeout=timeout)
 
 
 def install_or_upgrade(
@@ -149,12 +172,12 @@ def install_or_upgrade(
 				os.write(values_fd, values_yaml.encode("utf-8"))
 				os.close(values_fd)
 				cmd.extend(["--values", values_path])
-				output = _run_helm(cmd)
+				output = _run_helm(cmd, timeout=_HELM_WORKER_TIMEOUT_SECONDS)
 			finally:
 				if os.path.exists(values_path):
 					os.unlink(values_path)
 		else:
-			output = _run_helm(cmd)
+			output = _run_helm(cmd, timeout=_HELM_WORKER_TIMEOUT_SECONDS)
 
 	return _parse_json_or_empty(output)
 
@@ -176,7 +199,7 @@ def uninstall(
 		if kubeconfig_path:
 			cmd.extend(["--kubeconfig", kubeconfig_path])
 
-		return _run_helm(cmd)
+		return _run_helm(cmd, timeout=_HELM_WORKER_TIMEOUT_SECONDS)
 
 
 def status(
@@ -197,7 +220,7 @@ def status(
 		if kubeconfig_path:
 			cmd.extend(["--kubeconfig", kubeconfig_path])
 
-		output = _run_helm(cmd)
+		output = _run_helm(cmd, timeout=_HELM_READ_TIMEOUT_SECONDS)
 
 	return _parse_json_or_empty(output)
 
@@ -220,9 +243,9 @@ def list_releases(
 		with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 			if kubeconfig_path:
 				cmd.extend(["--kubeconfig", kubeconfig_path])
-			output = _run_helm(cmd)
+			output = _run_helm(cmd, timeout=_HELM_READ_TIMEOUT_SECONDS)
 	else:
-		output = _run_helm(cmd)
+		output = _run_helm(cmd, timeout=_HELM_READ_TIMEOUT_SECONDS)
 
 	return _parse_json_or_empty(output)
 
@@ -327,7 +350,10 @@ def _build_kubeconfig_from_token(cluster_doc) -> str:
 			base64.b64encode(cluster_doc.ca_certificate.encode("utf-8")).decode("ascii")
 		)
 	else:
-		kubeconfig["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True
+		frappe.throw(
+			"Bearer Token authentication requires a CA certificate unless "
+			"'Skip TLS Verification (Development Only)' is enabled."
+		)
 
 	return yaml.dump(kubeconfig, default_flow_style=False)
 
@@ -337,7 +363,7 @@ def _build_kubeconfig_from_token(cluster_doc) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_helm(cmd: list[str]) -> str:
+def _run_helm(cmd: list[str], timeout: int = _HELM_WORKER_TIMEOUT_SECONDS) -> str:
 	"""Execute a Helm CLI command and return stdout.
 
 	Args:
@@ -355,7 +381,7 @@ def _run_helm(cmd: list[str]) -> str:
 			capture_output=True,
 			text=True,
 			check=True,
-			timeout=600,  # 10-minute safety timeout
+			timeout=timeout,
 		)
 		return result.stdout
 	except FileNotFoundError:
@@ -371,7 +397,7 @@ def _run_helm(cmd: list[str]) -> str:
 		)
 	except subprocess.TimeoutExpired:
 		frappe.throw(
-			"Helm command timed out after 10 minutes.",
+			f"Helm command timed out after {timeout} seconds.",
 			title="Helm Timeout",
 		)
 
@@ -379,10 +405,10 @@ def _run_helm(cmd: list[str]) -> str:
 
 
 def _parse_json_or_empty(text: str) -> Any:
-	"""Parse JSON output from Helm, returning an empty list/dict on failure."""
+	"""Parse JSON output from Helm, returning an empty list for empty output."""
 	if not text or not text.strip():
 		return []
 	try:
 		return json.loads(text)
 	except json.JSONDecodeError:
-		return []
+		frappe.throw("Helm returned invalid JSON output.", title="Helm Error")

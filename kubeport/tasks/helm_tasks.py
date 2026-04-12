@@ -14,6 +14,7 @@ Each task follows the pattern:
 6. Push a realtime event so the browser auto-reloads
 """
 
+from collections import defaultdict
 import fnmatch
 import re
 import secrets
@@ -145,7 +146,12 @@ def sync_all_repos():
 			sync_token = secrets.token_hex(16)
 			frappe.db.set_value("Helm Repository", repo_name, "status", "Syncing")
 			frappe.db.set_value("Helm Repository", repo_name, "sync_token", sync_token)
-			sync_repo_charts(repo_name, sync_token)
+			frappe.enqueue(
+				"kubeport.tasks.helm_tasks.sync_repo_charts",
+				repo_name=repo_name,
+				sync_token=sync_token,
+				queue="long",
+			)
 		except Exception as e:
 			frappe.log_error(
 				title=f"Daily Sync Failed: {repo_name}",
@@ -336,76 +342,63 @@ def _ensure_repo_registered(repo_doc) -> None:
 def _sync_charts(repo_doc):
 	"""Parse ``helm search repo`` output and upsert Helm Chart documents.
 
-	Applies the ``include_patterns`` filter from the repository document.
-	For each matching chart, either creates a new Helm Chart parent or
-	appends a new version to the existing parent's child table.
+	Applies the ``include_patterns`` filter from the repository document and
+	fully rebuilds the per-chart version inventory from the current Helm repo
+	index, removing stale chart rows that no longer exist upstream.
 	"""
-	charts_data = helm.search_repo(repo_doc.repo_name)
-
-	if not charts_data:
-		return
+	charts_data = helm.search_repo_with_options(
+		repo_doc.repo_name,
+		all_versions=True,
+		timeout=600,
+	)
 
 	# Parse include patterns (comma-separated, with optional glob wildcards)
 	patterns = _parse_include_patterns(repo_doc.include_patterns)
+	chart_groups = _group_chart_inventory(charts_data, patterns)
+	desired_chart_doc_names: set[str] = set()
 
-	for chart_entry in charts_data:
-		# chart_entry: {"name": "bitnami/nginx", "version": "18.2.4", ...}
-		full_name = chart_entry.get("name", "")
-		chart_name = full_name.split("/")[-1] if "/" in full_name else full_name
-		chart_version = chart_entry.get("version", "")
-		app_version = chart_entry.get("app_version", "")
-		description = chart_entry.get("description", "")
-
-		if not chart_name or not chart_version:
-			continue
-
-		# Apply inclusion filter
-		if patterns and not _matches_any_pattern(chart_name, patterns):
-			continue
-
-		# Helm Chart parent document name: "repo_name/chart_name"
+	for chart_name, version_rows in chart_groups.items():
 		chart_doc_name = f"{repo_doc.name}/{chart_name}"
+		desired_chart_doc_names.add(chart_doc_name)
+		latest_entry = version_rows[0]
+		version_payload = [{
+			"version": entry["version"],
+			"app_version": entry["app_version"],
+			"description": entry["description"],
+		} for entry in version_rows]
 
 		if frappe.db.exists("Helm Chart", chart_doc_name):
-			# Chart exists — check if this version is already tracked
 			chart_doc = frappe.get_doc("Helm Chart", chart_doc_name)
-
-			existing_versions = {row.version for row in chart_doc.versions}
-			if chart_version not in existing_versions:
-				chart_doc.append("versions", {
-					"version": chart_version,
-					"app_version": app_version,
-					"description": description,
-				})
-				chart_doc.save(ignore_permissions=True)
-
-			# Update latest version if this is newer
-			chart_doc.db_set("latest_version", chart_version)
-			chart_doc.db_set("latest_app_version", app_version)
-			chart_doc.db_set("description", description)
-
+			previous_latest_version = chart_doc.latest_version or ""
+			chart_doc.chart_name = chart_name
+			chart_doc.repository = repo_doc.name
+			chart_doc.latest_version = latest_entry["version"]
+			chart_doc.latest_app_version = latest_entry["app_version"]
+			chart_doc.description = latest_entry["description"]
+			if previous_latest_version and previous_latest_version != latest_entry["version"]:
+				chart_doc.default_values = ""
+			chart_doc.set("versions", version_payload)
+			chart_doc.save(ignore_permissions=True)
 		else:
-			# Create a new Helm Chart document
-			# We DO NOT fetch default_values here because running `helm show values`
-			# for hundreds of charts sequentially will cause the sync to take over 10 minutes.
-			# Instead, values are fetched on-demand when 'Load Default Values' is clicked.
-			default_values = ""
-
 			new_chart = frappe.get_doc({
 				"doctype": "Helm Chart",
 				"chart_name": chart_name,
 				"repository": repo_doc.name,
-				"latest_version": chart_version,
-				"latest_app_version": app_version,
-				"description": description,
-				"default_values": default_values,
-				"versions": [{
-					"version": chart_version,
-					"app_version": app_version,
-					"description": description,
-				}],
+				"latest_version": latest_entry["version"],
+				"latest_app_version": latest_entry["app_version"],
+				"description": latest_entry["description"],
+				"default_values": "",
+				"versions": version_payload,
 			})
 			new_chart.insert(ignore_permissions=True)
+
+	existing_chart_doc_names = set(frappe.get_all(
+		"Helm Chart",
+		filters={"repository": repo_doc.name},
+		pluck="name",
+	))
+	for stale_chart_doc_name in existing_chart_doc_names - desired_chart_doc_names:
+		frappe.delete_doc("Helm Chart", stale_chart_doc_name, ignore_permissions=True)
 
 
 
@@ -431,3 +424,59 @@ def _matches_any_pattern(chart_name: str, patterns: list[str]) -> bool:
 	Supports glob-style wildcards via ``fnmatch``.
 	"""
 	return any(fnmatch.fnmatch(chart_name, pattern) for pattern in patterns)
+
+
+def _group_chart_inventory(
+	charts_data: list[dict],
+	patterns: list[str],
+) -> dict[str, list[dict[str, str]]]:
+	grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+
+	for chart_entry in charts_data:
+		full_name = str(chart_entry.get("name") or "")
+		chart_name = full_name.split("/")[-1] if "/" in full_name else full_name
+		chart_version = str(chart_entry.get("version") or "")
+		if not chart_name or not chart_version:
+			continue
+		if patterns and not _matches_any_pattern(chart_name, patterns):
+			continue
+
+		grouped[chart_name].append({
+			"version": chart_version,
+			"app_version": str(chart_entry.get("app_version") or ""),
+			"description": str(chart_entry.get("description") or ""),
+		})
+
+	for chart_name, version_rows in grouped.items():
+		grouped[chart_name] = sorted(
+			_version_rows_deduplicated(version_rows),
+			key=lambda row: _version_sort_key(row["version"]),
+			reverse=True,
+		)
+
+	return dict(grouped)
+
+
+def _version_rows_deduplicated(version_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+	seen_versions: set[str] = set()
+	deduplicated: list[dict[str, str]] = []
+
+	for row in version_rows:
+		version = row["version"]
+		if version in seen_versions:
+			continue
+		seen_versions.add(version)
+		deduplicated.append(row)
+
+	return deduplicated
+
+
+def _version_sort_key(version: str) -> tuple[tuple[int, object], ...]:
+	parts = re.findall(r"\d+|[A-Za-z]+", version)
+	if not parts:
+		return ((1, version.lower()),)
+
+	return tuple(
+		(0, int(part)) if part.isdigit() else (1, part.lower())
+		for part in parts
+	)

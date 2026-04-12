@@ -7,6 +7,8 @@ Service Bundle Controller
 Deploys a set of raw Kubernetes resource manifests to a cluster.
 """
 
+import secrets
+
 import frappe
 from frappe.model.document import Document
 
@@ -26,7 +28,9 @@ class ServiceBundle(Document):
 		cluster: DF.Link
 		content: DF.Code
 		namespace: DF.Data
-		status: DF.Literal["Draft", "In Progress", "Deployed", "Degraded", "Failed"]
+		operation_token: DF.Data | None
+		status: DF.Literal["Draft", "In Progress", "Deleting", "Deployed", "Degraded", "Failed"]
+		status_detail: DF.SmallText | None
 	# end: auto-generated types
 
 	def validate(self):
@@ -44,20 +48,16 @@ class ServiceBundle(Document):
 			frappe.throw("The manifest content is empty.")
 		if not self.cluster:
 			frappe.throw("A target cluster is required.")
+		if self.status in {"In Progress", "Deleting"}:
+			frappe.throw("Another bundle operation is already in progress.")
 
-		self.db_set("status", "In Progress")
-
-		frappe.enqueue(
-			"kubeport.tasks.service_bundle_tasks.apply_bundle_task",
-			bundle_name=self.name,
-			queue="long",
-			enqueue_after_commit=True,
-		)
-
-		frappe.msgprint(
-			f"Deployment of '{self.bundle_name}' has been queued. Status will update automatically.",
-			alert=True,
-			indicator="blue",
+		self._enqueue_operation(
+			task_path="kubeport.tasks.service_bundle_tasks.apply_bundle_task",
+			status="In Progress",
+			message=(
+				f"Deployment of '{self.bundle_name}' has been queued. "
+				"Status will update automatically."
+			),
 		)
 
 	@frappe.whitelist()
@@ -65,18 +65,26 @@ class ServiceBundle(Document):
 		"""Delete the deployed resources from the cluster."""
 		if self.status not in ["Deployed", "Degraded"]:
 			frappe.throw("Only deployed or degraded bundles can be deleted.")
+		self._enqueue_operation(
+			task_path="kubeport.tasks.service_bundle_tasks.delete_bundle_task",
+			status="Deleting",
+			message="Bundle deletion has been queued. Status will update automatically.",
+		)
 
-		self.db_set("status", "In Progress")
-
+	def _enqueue_operation(self, task_path: str, status: str, message: str) -> None:
+		operation_token = secrets.token_hex(16)
+		self.db_set("status", status)
+		self.db_set("status_detail", "")
+		self.db_set("operation_token", operation_token)
 		frappe.enqueue(
-			"kubeport.tasks.service_bundle_tasks.delete_bundle_task",
+			task_path,
 			bundle_name=self.name,
+			operation_token=operation_token,
 			queue="long",
 			enqueue_after_commit=True,
 		)
-
 		frappe.msgprint(
-			"Bundle deletion has been queued. Status will update automatically.",
+			message,
 			alert=True,
 			indicator="blue",
 		)
