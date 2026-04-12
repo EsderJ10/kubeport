@@ -167,7 +167,7 @@ def apply_resource(api_client: client.ApiClient, k8s_object: dict, namespace: st
 	idempotent — calling it on an already-existing resource updates it
 	instead of erroring with a 409 Conflict.
 	"""
-	kind, api_version, name, obj_namespace, resource_path = _managed_resource_fields(
+	kind, _, _, obj_namespace, resource_path = _managed_resource_fields(
 		k8s_object,
 		namespace,
 	)
@@ -198,7 +198,7 @@ def apply_resource(api_client: client.ApiClient, k8s_object: dict, namespace: st
 		if e.status == 404:
 			# Resource doesn't exist yet — create it
 			from kubernetes import utils
-			utils.create_from_dict(api_client, data=k8s_object, namespace=namespace)
+			utils.create_from_dict(api_client, data=k8s_object, namespace=obj_namespace)
 		else:
 			raise
 
@@ -246,7 +246,7 @@ def check_resources_exist(
 	namespace: str,
 	doctype: str,
 	docname: str,
-	) -> tuple[bool, str]:
+) -> tuple[bool, str]:
 	"""Verify that K8s resources from a manifest JSON exist on the cluster.
 
 	Returns:

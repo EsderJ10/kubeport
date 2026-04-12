@@ -9,6 +9,17 @@ from kubeport.kubeport.doctype.service_bundle.service_bundle import ServiceBundl
 
 
 class UnitTestServiceBundle(UnitTestCase):
+	@patch("kubeport.kubeport.doctype.service_bundle.service_bundle.frappe.throw")
+	def test_validate_rejects_empty_managed_manifest(self, mock_throw):
+		doc = object.__new__(ServiceBundle)
+		doc.content = "[]"
+		mock_throw.side_effect = RuntimeError("Invalid manifest content")
+
+		with self.assertRaisesRegex(RuntimeError, "Invalid manifest content"):
+			doc.validate()
+
+		self.assertIn("Invalid manifest content", mock_throw.call_args.args[0])
+
 	@patch("kubeport.kubeport.doctype.service_bundle.service_bundle.frappe.msgprint")
 	@patch("kubeport.kubeport.doctype.service_bundle.service_bundle.frappe.enqueue")
 	def test_apply_bundle_enqueues_service_bundle_task(
