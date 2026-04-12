@@ -147,39 +147,34 @@ def parse_manifest_objects(manifest_content: str) -> list[dict]:
 	return [doc for doc in documents if isinstance(doc, dict)]
 
 
+def load_managed_manifest_objects(manifest_content: str) -> list[dict[str, Any]]:
+	"""Parse and validate a manifest for fully managed Service Bundle usage."""
+	manifest_data = parse_manifest_objects(manifest_content)
+	if not manifest_data:
+		frappe.throw("Manifest content must contain at least one Kubernetes object.")
+
+	validated_objects: list[dict[str, Any]] = []
+	for object_index, k8s_object in enumerate(manifest_data, start=1):
+		validated_objects.append(_validate_managed_manifest_object(k8s_object, object_index))
+
+	return validated_objects
+
+
 def apply_resource(api_client: client.ApiClient, k8s_object: dict, namespace: str):
 	"""Create or update a single K8s resource using server-side apply.
 
 	Server-side apply (PATCH with ``application/apply-patch+yaml``) is
 	idempotent — calling it on an already-existing resource updates it
-	instead of erroring with 409 Conflict.  This eliminates the fragility
-	of ``create_from_dict`` which only works on the first deploy.
-
-	Falls back to ``create_from_dict`` for resource kinds not yet in the
-	dispatch table.
+	instead of erroring with a 409 Conflict.
 	"""
-	kind = k8s_object.get("kind", "")
-	api_version = k8s_object.get("apiVersion", "")
-	metadata = k8s_object.get("metadata", {})
-	name = metadata.get("name", "")
-	obj_namespace = metadata.get("namespace", namespace)
-
-	if not kind or not name or not api_version:
-		# Not enough info for server-side apply, fall back
-		from kubernetes import utils
-		utils.create_from_dict(api_client, data=k8s_object, namespace=namespace)
-		return
-
-	# Build the URL path for the resource
-	resource_path = _build_resource_path(api_version, kind, name, obj_namespace)
-	if not resource_path:
-		# Unknown kind — fall back to create_from_dict
-		from kubernetes import utils
-		utils.create_from_dict(api_client, data=k8s_object, namespace=namespace)
-		return
+	kind, _, _, obj_namespace, resource_path = _managed_resource_fields(
+		k8s_object,
+		namespace,
+	)
 
 	# Ensure metadata has the namespace set for namespaced resources
 	dispatch = _RESOURCE_DISPATCH.get(kind)
+	metadata = k8s_object.setdefault("metadata", {})
 	if dispatch and not dispatch.get("cluster_scoped") and "namespace" not in metadata:
 		k8s_object.setdefault("metadata", {})["namespace"] = obj_namespace
 
@@ -203,24 +198,15 @@ def apply_resource(api_client: client.ApiClient, k8s_object: dict, namespace: st
 		if e.status == 404:
 			# Resource doesn't exist yet — create it
 			from kubernetes import utils
-			utils.create_from_dict(api_client, data=k8s_object, namespace=namespace)
+			utils.create_from_dict(api_client, data=k8s_object, namespace=obj_namespace)
 		else:
 			raise
 
 
 def delete_resource(api_client: client.ApiClient, k8s_object: dict, default_namespace: str):
 	"""Delete a single K8s resource.  Silently succeeds if already gone (404)."""
-	kind = k8s_object.get("kind", "")
-	name = k8s_object.get("metadata", {}).get("name", "")
-	namespace = k8s_object.get("metadata", {}).get("namespace", default_namespace)
-
-	dispatch = _RESOURCE_DISPATCH.get(kind)
-	if not dispatch:
-		frappe.log_error(
-			title="Unsupported K8s Resource Kind",
-			message=f"Cannot delete resource of kind '{kind}'. Add it to _RESOURCE_DISPATCH.",
-		)
-		return
+	kind, _, name, namespace, _ = _managed_resource_fields(k8s_object, default_namespace)
+	dispatch = _RESOURCE_DISPATCH[kind]
 
 	api_class = getattr(client, dispatch["api"])
 	api_instance = api_class(api_client=api_client)
@@ -242,11 +228,7 @@ def read_resource(api_client: client.ApiClient, kind: str, name: str, namespace:
 	"""Read (GET) a single K8s resource. Raises ApiException on 404."""
 	dispatch = _RESOURCE_DISPATCH.get(kind)
 	if not dispatch:
-		frappe.logger("kubeport").warning(
-			f"Skipping reconciliation for unsupported resource kind '{kind}/{name}' "
-			f"in namespace '{namespace}'. Add it to _RESOURCE_DISPATCH to enable tracking."
-		)
-		return  # Skip unknown resource types during reconciliation
+		_raise_unsupported_resource_kind(kind)
 
 	api_class = getattr(client, dispatch["api"])
 	api_instance = api_class(api_client=api_client)
@@ -264,35 +246,31 @@ def check_resources_exist(
 	namespace: str,
 	doctype: str,
 	docname: str,
-):
+) -> tuple[bool, str]:
 	"""Verify that K8s resources from a manifest JSON exist on the cluster.
 
-	If any resource is missing (404), the DocType status is set to ``Degraded``.
+	Returns:
+		A tuple of ``(is_healthy, detail_message)``.
 	"""
 	from kubeport.utils.k8s_client import get_k8s_api_client
 
 	api_client = get_k8s_api_client(cluster_name)
-	manifest_data = parse_manifest_objects(manifest_json)
+	manifest_data = load_managed_manifest_objects(manifest_json)
 
 	for k8s_object in manifest_data:
-		kind = k8s_object.get("kind", "")
-		name = k8s_object.get("metadata", {}).get("name", "")
-		obj_namespace = k8s_object.get("metadata", {}).get("namespace", namespace)
-
-		if not kind or not name:
-			continue
+		kind, _, name, obj_namespace, _ = _managed_resource_fields(k8s_object, namespace)
 
 		try:
 			read_resource(api_client, kind, name, obj_namespace)
 		except ApiException as e:
 			if e.status == 404:
-				frappe.db.set_value(doctype, docname, "status", "Degraded")
-				frappe.log_error(
-					title=f"State Drift Detected: {doctype} {docname}",
-					message=f"{kind}/{name} not found in namespace {obj_namespace}.",
-				)
-				return
-			raise
+				return False, f"{kind}/{name} not found in namespace {obj_namespace}."
+			return False, (
+				f"Failed to read {kind}/{name} in namespace {obj_namespace}: "
+				f"{_format_api_exception(e)}"
+			)
+
+	return True, "All managed resources are present."
 
 
 # ---------------------------------------------------------------------------
@@ -347,3 +325,76 @@ def _build_resource_path(
 		return f"{base}/{plural}/{name}"
 
 	return f"{base}/namespaces/{namespace}/{plural}/{name}"
+
+
+def _validate_managed_manifest_object(
+	k8s_object: Any,
+	object_index: int,
+) -> dict[str, Any]:
+	if not isinstance(k8s_object, dict):
+		frappe.throw(f"Manifest object #{object_index} must be a Kubernetes mapping/object.")
+
+	kind = str(k8s_object.get("kind") or "")
+	api_version = str(k8s_object.get("apiVersion") or "")
+	metadata = k8s_object.get("metadata")
+	metadata_dict = metadata if isinstance(metadata, dict) else {}
+	name = str(metadata_dict.get("name") or "")
+
+	missing_fields = [
+		field_name
+		for field_name, present in (
+			("apiVersion", bool(api_version)),
+			("kind", bool(kind)),
+			("metadata.name", bool(name)),
+		)
+		if not present
+	]
+	if missing_fields:
+		frappe.throw(
+			f"Manifest object #{object_index} is missing required field(s): "
+			f"{', '.join(missing_fields)}."
+		)
+
+	if kind not in _RESOURCE_DISPATCH:
+		_raise_unsupported_resource_kind(kind, object_index)
+
+	namespace = str(metadata_dict.get("namespace") or "default")
+	if not _build_resource_path(api_version, kind, name, namespace):
+		frappe.throw(
+			f"Manifest object #{object_index} uses unsupported apiVersion '{api_version}' "
+			f"for kind '{kind}'."
+		)
+
+	return k8s_object
+
+
+def _managed_resource_fields(
+	k8s_object: dict[str, Any],
+	default_namespace: str,
+) -> tuple[str, str, str, str, str]:
+	_validate_managed_manifest_object(k8s_object, 1)
+
+	kind = str(k8s_object["kind"])
+	api_version = str(k8s_object["apiVersion"])
+	metadata = k8s_object.get("metadata") or {}
+	name = str(metadata["name"])
+	namespace = str(metadata.get("namespace") or default_namespace)
+	resource_path = _build_resource_path(api_version, kind, name, namespace)
+	if not resource_path:
+		frappe.throw(
+			f"Unsupported managed resource '{kind}' with apiVersion '{api_version}'."
+		)
+
+	return kind, api_version, name, namespace, resource_path
+
+
+def _raise_unsupported_resource_kind(kind: str, object_index: int | None = None) -> None:
+	prefix = f"Manifest object #{object_index} " if object_index is not None else ""
+	frappe.throw(
+		f"{prefix}uses unsupported resource kind '{kind}'. "
+		"Service Bundle only supports fully managed resource kinds."
+	)
+
+
+def _format_api_exception(exc: ApiException) -> str:
+	return str(getattr(exc, "reason", "") or str(exc))

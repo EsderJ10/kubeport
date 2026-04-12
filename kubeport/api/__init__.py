@@ -11,6 +11,8 @@ from kubernetes import client
 
 from kubeport.utils.k8s_client import get_k8s_api_client
 
+_K8S_API_REQUEST_TIMEOUT_SECONDS = 15.0
+
 
 @frappe.whitelist()
 def get_cluster_namespaces(cluster_name: str) -> list[str]:
@@ -31,7 +33,9 @@ def get_cluster_namespaces(cluster_name: str) -> list[str]:
 	try:
 		api_client = get_k8s_api_client(cluster_name)
 		v1 = client.CoreV1Api(api_client=api_client)
-		namespaces = v1.list_namespace()
+		namespaces = v1.list_namespace(
+			_request_timeout=_K8S_API_REQUEST_TIMEOUT_SECONDS,
+		)
 		return sorted(ns.metadata.name for ns in namespaces.items)
 	except Exception as e:
 		frappe.log_error(

@@ -10,7 +10,7 @@ Deploys a set of raw Kubernetes resource manifests to a cluster.
 import frappe
 from frappe.model.document import Document
 
-from kubeport.utils.k8s_resources import parse_manifest_objects
+from kubeport.utils.k8s_resources import load_managed_manifest_objects
 
 
 class ServiceBundle(Document):
@@ -30,10 +30,10 @@ class ServiceBundle(Document):
 	# end: auto-generated types
 
 	def validate(self):
-		"""Validate that the content field contains parsable manifests."""
+		"""Validate that the content field contains managed Kubernetes manifests."""
 		if self.content:
 			try:
-				parse_manifest_objects(self.content)
+				load_managed_manifest_objects(self.content)
 			except Exception as e:
 				frappe.throw(f"Invalid manifest content: {e}")
 

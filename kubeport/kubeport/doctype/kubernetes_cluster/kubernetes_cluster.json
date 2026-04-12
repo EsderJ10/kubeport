@@ -101,8 +101,8 @@
   },
   {
    "default": "0",
-   "depends_on": "eval:doc.auth_method === 'Kubeconfig'",
-   "description": "Enable only for local development clusters (K3d, Kind, Minikube). Never enable in production.",
+   "depends_on": "eval:['Kubeconfig', 'Bearer Token'].includes(doc.auth_method)",
+   "description": "Enable only for local development clusters (K3d, Kind, Minikube) or IP-based API endpoints whose certificate does not match the configured address. Never enable in production.",
    "fieldname": "skip_tls_verify",
    "fieldtype": "Check",
    "label": "Skip TLS Verification (Development Only)"

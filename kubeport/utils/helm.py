@@ -17,6 +17,7 @@ Output parsing:
 - Commands that produce text (e.g. ``helm show values``) return raw strings
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -249,6 +250,17 @@ def _helm_kubeconfig(cluster_name: str):
 
 	if auth_method == "Kubeconfig":
 		content = cluster_doc.kubeconfig or ""
+		if content and cluster_doc.skip_tls_verify:
+			try:
+				kc_dict = yaml.safe_load(content)
+				for c in kc_dict.get("clusters", []):
+					if "cluster" in c:
+						c["cluster"]["insecure-skip-tls-verify"] = True
+						c["cluster"].pop("certificate-authority-data", None)
+						c["cluster"].pop("certificate-authority", None)
+				content = yaml.dump(kc_dict, default_flow_style=False)
+			except Exception:
+				pass
 	elif auth_method == "Bearer Token":
 		content = _build_kubeconfig_from_token(cluster_doc)
 	else:
@@ -307,10 +319,12 @@ def _build_kubeconfig_from_token(cluster_doc) -> str:
 		}],
 	}
 
-	# Add CA certificate if present
-	if cluster_doc.ca_certificate:
+	# Keep Helm TLS behavior aligned with the Python Kubernetes client.
+	if cluster_doc.skip_tls_verify:
+		kubeconfig["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True
+	elif cluster_doc.ca_certificate:
 		kubeconfig["clusters"][0]["cluster"]["certificate-authority-data"] = (
-			cluster_doc.ca_certificate
+			base64.b64encode(cluster_doc.ca_certificate.encode("utf-8")).decode("ascii")
 		)
 	else:
 		kubeconfig["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True

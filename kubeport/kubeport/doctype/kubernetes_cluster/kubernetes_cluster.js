@@ -15,6 +15,11 @@ frappe.ui.form.on('Kubernetes Cluster', {
                 __('In-Cluster auth auto-detects credentials from the Kubernetes pod environment. No manual configuration needed.'),
                 'blue'
             );
+        } else if (frm.doc.status === 'Pending' && !frm.is_new()) {
+            frm.set_intro(
+                __('Discovery is live and read-only. Use "Test Connection" to persist this cluster status as Connected or Error.'),
+                'blue'
+            );
         } else if (frm.doc.auth_method === 'Kubeconfig' && !frm.doc.kubeconfig) {
             frm.set_intro(
                 __('Click "Import Kubeconfig" to upload a kubeconfig file and pick a context, or paste the YAML manually below.'),

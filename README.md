@@ -1,44 +1,71 @@
 ### Kubeport
 
-Kubeport is a Frappe app that acts as a Kubernetes control plane inside the Frappe UI. It manages cluster credentials, Helm releases, raw manifest execution, and live discovery of Helm benches and Frappe sites.
+Kubeport is a Frappe app that acts as a Kubernetes control plane inside the Frappe UI. It manages cluster connectivity, Helm repositories, Helm releases, and raw Kubernetes manifests while keeping live cluster discovery separate from persisted desired state.
 
-### What It Does
+### Current State
 
-- Manage `Kubernetes Cluster` records and connect to real clusters through kubeconfig or token-based auth.
-- Deploy and uninstall Helm releases through background jobs.
-- Execute raw Kubernetes commands from the UI.
-- Discover Helm releases live from the cluster.
-- Discover Frappe sites live from supported Helm releases without persisting discovered state to MariaDB.
+The control plane is functional in these areas:
 
-### Live Discovery Model
+- `Kubernetes Cluster` stores cluster credentials and exposes live discovery in the form UI.
+- `Helm Repository` syncs chart metadata from Helm repos into MariaDB.
+- `Helm Chart` stores chart metadata and available versions discovered from repositories.
+- `Helm Release` persists desired release state and deploys or uninstalls via background jobs.
+- `Service Bundle` persists raw manifest bundles and applies or deletes them via the Kubernetes API.
+- Reconciliation sweeps compare desired state with live cluster state and mark drift as `Degraded`.
 
-Discovery is read-only and cluster-scoped.
+The current milestone is robustness, especially around discovery and asynchronous cluster operations:
 
-- Helm releases shown in the `Kubernetes Cluster` form come from live cluster queries.
-- Frappe sites are discovered per release by inspecting running workload pods and listing `/home/frappe/frappe-bench/sites`.
-- Discovery returns partial results when possible. A cluster can show releases even when one or more releases fail site discovery.
-- Discovery does not write child rows or cache site state in the database.
+- Discovery is live, read-only, and cluster-scoped.
+- Release discovery tolerates partial failures and still returns usable data.
+- Site discovery only targets running Frappe workload pods.
+- Pod lookup prefers stable labels and falls back to namespace scans when charts are inconsistent.
+- Background workers guard against stale duplicate work by re-checking document status before acting.
+- Cluster-mutating work is pushed off the web thread into long workers.
 
-Current site discovery behavior for official `erpnext` chart releases:
+### What We Have Achieved
 
-- Release pod matching first tries the Helm label `app.kubernetes.io/instance=<release>`.
-- If that selector misses workload pods, discovery falls back to a namespace scan and matches pods by release labels and pod-name prefix.
-- Only running Frappe workload pods are valid discovery targets.
-- `mariadb`, `valkey`, and other infra-only pods are ignored for site discovery.
+- Multi-auth Kubernetes connectivity:
+  - kubeconfig
+  - bearer token
+  - in-cluster service account auth
+- Dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
+- Live namespace discovery for cluster-backed forms.
+- Browser-side kubeconfig import, context parsing, and context extraction.
+- Helm repository registration and chart sync.
+- Helm chart metadata and default values retrieval.
+- Helm release deploy and uninstall workflows through background jobs.
+- Raw manifest deployment through `Service Bundle`.
+- Periodic reconciliation for Helm releases and Service Bundles.
+- Legacy migration from `Kubernetes Manifest` to `Service Bundle`.
+- Cleanup patching for removed legacy DocTypes.
 
-### Important Operational Notes
+### What Is Left To Do
 
-- A Helm release being visible in discovery does not mean its Frappe workloads are ready.
-- If all Frappe workload pods for a release are `Pending`, Kubeport will not discover sites for that release.
-- If only infra pods are running, Kubeport will report a partial error instead of inventing site data.
-- Release deployment and uninstall run in background jobs. Do not trigger duplicate deploys while a release is already `In Progress` or `Uninstalling`.
+The main gaps still visible in the codebase are:
 
-Common causes of zero discovered sites for a Frappe release:
+- Discovery is observational only. There is no higher-level workflow yet that turns discovered benches or sites into first-class persisted objects beyond existing desired-state records.
+- Site discovery is intentionally narrow and currently recognizes official `erpnext` chart releases only.
+- Service Bundle support is limited to a fixed allowlist of built-in Kubernetes resource kinds; CRDs and arbitrary custom resources are not supported.
+- Health reporting is still coarse:
+  - Helm releases rely mostly on `helm status`
+  - Service Bundles only check resource existence
+  - workload readiness, events, and pod-level diagnostics are not surfaced deeply in-app
+- Some modules still have thin or placeholder tests, especially around `Helm Repository`, `Helm Chart`, and broader integration flows.
+- There is no documented operator guide yet for running Kubeport inside Kubernetes with the required service-account RBAC and Helm binary packaging.
 
-- the release has no running Frappe workload pod yet
-- only database/cache pods are running
-- the chart created pods with delayed scheduling because of storage or node constraints
-- the site creation job never completed, so there is no site directory to discover
+### Codebase Map
+
+- DocTypes: `kubeport/kubeport/doctype/`
+- API endpoints: `kubeport/api/`
+- Kubernetes and Helm helpers: `kubeport/utils/`
+- Background tasks: `kubeport/tasks/`
+- Tests: `kubeport/tests/` and DocType-local `test_*.py`
+- Patches: `kubeport/patches/`
+
+### Additional Docs
+
+- [Control Plane State](docs/control-plane-state.md)
+- [Codebase Summary](docs/codebase-summary.md)
 
 ### Installation
 
@@ -59,16 +86,6 @@ Project details:
 - Build backend: `flit`
 - Main Python dependencies: `kubernetes`, `urllib3`, `PyYAML`
 
-Useful repository locations:
-
-- DocTypes: `kubeport/kubeport/doctype/`
-- Whitelisted API methods: `kubeport/api/`
-- Kubernetes and Helm helpers: `kubeport/utils/`
-- Background jobs: `kubeport/tasks/`
-- Scheduler hooks: `kubeport/hooks.py`
-
-### Quality Checks
-
 Enable pre-commit in your Bench checkout:
 
 ```bash
@@ -82,27 +99,26 @@ Formatting and linting tools used by the project:
 - `ruff`
 - `prettier`
 - `eslint`
-- `pyupgrade`
 
 ### Tests
 
-Prefer running targeted app tests through Bench:
+Prefer targeted app tests through Bench:
 
 ```bash
 bench --site <site> run-tests --app kubeport --doctype <doctype>
 ```
 
-When the full Bench test environment is unavailable, use targeted syntax checks and focused unit coverage near the changed module.
+When the full Bench environment is unavailable, use focused unit tests and syntax checks near the changed module.
 
 ### Troubleshooting Discovery
 
 If discovery shows releases but zero sites:
 
-1. Check whether the release is a supported Frappe chart release.
-2. Check pod state in the target namespace.
-3. Confirm at least one Frappe workload pod is `Running`.
-4. Inspect pending pod events and PVC state if pods are stuck.
-5. Confirm the site creation job completed successfully for the chart values you applied.
+1. Confirm the release is an official supported Frappe chart release.
+2. Check the target namespace for running workload pods.
+3. Verify the release has at least one running Frappe pod, not only infra pods.
+4. Inspect pending pod events and PVC state if workloads are stuck.
+5. Confirm site creation completed inside the workload before expecting discovery.
 
 Typical cluster-side commands:
 

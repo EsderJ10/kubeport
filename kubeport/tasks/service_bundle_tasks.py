@@ -8,7 +8,11 @@ Service Bundle document.
 import frappe
 
 from kubeport.utils.k8s_client import get_k8s_api_client
-from kubeport.utils.k8s_resources import apply_resource, delete_resource, parse_manifest_objects
+from kubeport.utils.k8s_resources import (
+	apply_resource,
+	delete_resource,
+	load_managed_manifest_objects,
+)
 
 
 def apply_bundle_task(bundle_name: str):
@@ -21,7 +25,7 @@ def apply_bundle_task(bundle_name: str):
 
 	try:
 		api_client = get_k8s_api_client(doc.cluster)
-		manifest_data = parse_manifest_objects(doc.content)
+		manifest_data = load_managed_manifest_objects(doc.content)
 		namespace = doc.namespace or "default"
 
 		for k8s_object in manifest_data:
@@ -56,7 +60,7 @@ def delete_bundle_task(bundle_name: str):
 
 	try:
 		api_client = get_k8s_api_client(doc.cluster)
-		manifest_data = parse_manifest_objects(doc.content)
+		manifest_data = load_managed_manifest_objects(doc.content)
 
 		for k8s_object in manifest_data:
 			delete_resource(api_client, k8s_object, doc.namespace or "default")

@@ -42,6 +42,13 @@ Kubeport is a Frappe app for managing Kubernetes clusters, Helm releases, and ra
 - Scheduled jobs are declared in `hooks.py`.
 - Discovery is read-only and should not persist discovered cluster state into MariaDB.
 
+## Documentation
+
+- Keep `README.md` aligned with the actual shipped feature set, not aspirational plans.
+- Use `docs/control-plane-state.md` for the current control-plane status, achieved work, open gaps, and robustness milestone notes.
+- Use `docs/codebase-summary.md` for repository architecture and module-level summaries.
+- When a milestone changes discovery, background-task behavior, or desired-state semantics, update these docs in the same change.
+
 ## Current Feature Shape
 
 - `Kubernetes Cluster` owns cluster connectivity and live discovery UI.
