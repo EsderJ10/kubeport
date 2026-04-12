@@ -12,6 +12,7 @@
   "column_break_meta",
   "status",
   "last_synced",
+  "sync_token",
   "section_break_auth",
   "repo_username",
   "column_break_auth",
@@ -61,6 +62,13 @@
    "fieldname": "last_synced",
    "fieldtype": "Datetime",
    "label": "Last Synced",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sync_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Sync Token",
    "read_only": 1
   },
   {

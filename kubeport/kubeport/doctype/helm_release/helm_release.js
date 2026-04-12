@@ -12,12 +12,14 @@ frappe.ui.form.on('Helm Release', {
             frm.page.set_indicator(frm.doc.status, status_map[frm.doc.status] || 'grey');
         }
 
-        // Listen for realtime status updates from background jobs
-        frappe.realtime.on('helm_release_status_update', (data) => {
-            if (data.release_name === frm.doc.name) {
-                frm.reload_doc();
-            }
-        });
+        if (!frm.__helm_release_status_listener_bound) {
+            frm.__helm_release_status_listener_bound = true;
+            frappe.realtime.on('helm_release_status_update', (data) => {
+                if (data.release_name === frm.doc.name) {
+                    frm.reload_doc();
+                }
+            });
+        }
     },
 
     chart: function(frm) {

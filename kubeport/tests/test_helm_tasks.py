@@ -2,14 +2,95 @@
 # See license.txt
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from frappe.tests import UnitTestCase
 
-from kubeport.tasks.helm_tasks import install_or_upgrade_release
+from kubeport.tasks.helm_tasks import install_or_upgrade_release, sync_repo_charts
 
 
 class UnitTestHelmTasks(UnitTestCase):
+	@patch("kubeport.tasks.helm_tasks.frappe.logger")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_sync_repo_charts_skips_stale_repo_worker_execution(
+		self,
+		mock_get_value,
+		mock_get_doc,
+		mock_logger,
+	):
+		mock_get_value.return_value = "active-token"
+
+		sync_repo_charts("repo-a", "stale-token")
+
+		mock_get_doc.assert_not_called()
+		mock_logger.return_value.info.assert_called_once()
+
+	@patch("kubeport.tasks.helm_tasks.frappe.utils.now", return_value="2026-04-12 10:00:00")
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._sync_charts")
+	@patch("kubeport.tasks.helm_tasks.helm.repo_update")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_sync_repo_charts_updates_repo_only_when_worker_token_is_current(
+		self,
+		mock_get_value,
+		mock_get_doc,
+		mock_repo_update,
+		mock_sync_charts,
+		mock_publish_realtime,
+		_mock_now,
+	):
+		mock_get_value.side_effect = ["sync-token", "sync-token"]
+		doc = MagicMock()
+		doc.repo_name = "bitnami"
+		mock_get_doc.return_value = doc
+
+		sync_repo_charts("repo-a", "sync-token")
+
+		mock_get_doc.assert_called_once_with("Helm Repository", "repo-a")
+		mock_repo_update.assert_called_once_with("bitnami")
+		mock_sync_charts.assert_called_once_with(doc)
+		doc.db_set.assert_any_call("status", "Synced")
+		doc.db_set.assert_any_call("last_synced", "2026-04-12 10:00:00")
+		mock_publish_realtime.assert_called_once_with(
+			"helm_repo_sync_update",
+			{"repo_name": "repo-a", "status": "Synced"},
+			doctype="Helm Repository",
+			docname="repo-a",
+		)
+
+	@patch("kubeport.tasks.helm_tasks.frappe.logger")
+	@patch("kubeport.tasks.helm_tasks.frappe.log_error")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.rollback")
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks.helm.repo_update")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_sync_repo_charts_does_not_mark_error_when_worker_becomes_stale_after_failure(
+		self,
+		mock_get_value,
+		mock_get_doc,
+		mock_repo_update,
+		mock_publish_realtime,
+		mock_rollback,
+		mock_log_error,
+		mock_logger,
+	):
+		mock_get_value.side_effect = ["sync-token", "newer-token"]
+		doc = MagicMock()
+		doc.repo_name = "bitnami"
+		mock_get_doc.return_value = doc
+		mock_repo_update.side_effect = RuntimeError("helm repo update failed")
+
+		sync_repo_charts("repo-a", "sync-token")
+
+		mock_rollback.assert_called_once_with()
+		doc.db_set.assert_not_called()
+		mock_publish_realtime.assert_not_called()
+		mock_log_error.assert_not_called()
+		mock_logger.return_value.info.assert_called_once()
+
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
 	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
 	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")

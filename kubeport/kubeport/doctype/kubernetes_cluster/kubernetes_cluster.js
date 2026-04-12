@@ -370,12 +370,15 @@ function _show_context_picker(frm, kubeconfig_content) {
             contexts.forEach(function(ctx, idx) {
                 const is_current = ctx.is_current ? '*' : '';
                 const row_class = ctx.is_current ? 'font-weight-bold' : '';
+                const normalized_note = ctx.server_was_normalized
+                    ? `<div class="text-muted small">${__('Imported from {0}', [frappe.utils.escape_html(ctx.original_server)])}</div>`
+                    : '';
                 table_html += `
                     <tr data-idx="${idx}" class="context-row ${row_class}"
                         style="transition: background 0.15s;">
                         <td><code>${frappe.utils.escape_html(ctx.context_name)}</code></td>
                         <td>${frappe.utils.escape_html(ctx.cluster_name)}</td>
-                        <td><code>${frappe.utils.escape_html(ctx.server)}</code></td>
+                        <td><code>${frappe.utils.escape_html(ctx.server)}</code>${normalized_note}</td>
                         <td style="text-align: center; font-size: 1.2em;">${is_current}</td>
                     </tr>
                 `;
@@ -418,18 +421,28 @@ function _show_context_picker(frm, kubeconfig_content) {
                         freeze: true,
                         freeze_message: __('Extracting context...'),
                         callback: function(r) {
-                            if (!r.message) return;
+                            if (!r.message || !r.message.kubeconfig) return;
+
+                            const payload = r.message;
 
                             // Hydrate the DocType
-                            frm.set_value('kubeconfig', r.message);
+                            frm.set_value('kubeconfig', payload.kubeconfig);
                             frm.set_value('kubeconfig_context', ctx.context_name);
                             frm.set_value('cluster_name', display_name);
 
                             frm.dirty();
                             context_dialog.hide();
 
+                            let alert_message = __('Context "{0}" imported as "{1}". Save the document to persist.', [ctx.context_name, display_name]);
+                            if (payload.server_was_normalized) {
+                                alert_message += ' ' + __('Server rewritten from "{0}" to "{1}" for container reachability.', [
+                                    payload.original_server,
+                                    payload.server
+                                ]);
+                            }
+
                             frappe.show_alert({
-                                message: __('Context "{0}" imported as "{1}". Save the document to persist.', [ctx.context_name, display_name]),
+                                message: alert_message,
                                 indicator: 'green'
                             }, 5);
                         }

@@ -28,9 +28,8 @@ frappe.ui.form.on('Helm Chart', {
                 });
             }, __('Actions'));
 
-            // Show version count
             if (frm.doc.versions && frm.doc.versions.length) {
-                frm.dashboard.add_indicator(
+                frm.set_intro(
                     __('{0} Versions Available', [frm.doc.versions.length]),
                     'blue'
                 );

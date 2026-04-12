@@ -16,6 +16,7 @@ Each task follows the pattern:
 
 import fnmatch
 import re
+import secrets
 
 import frappe
 
@@ -31,12 +32,15 @@ _UNINSTALLING_WORKER_STATUS = "Uninstalling"
 # ---------------------------------------------------------------------------
 
 
-def add_and_sync_repo(repo_name: str):
+def add_and_sync_repo(repo_name: str, sync_token: str):
 	"""Register a Helm repo and trigger a chart index sync.
 
 	Called automatically when a new Helm Repository document is created
 	(via ``after_insert``).
 	"""
+	if not _repo_sync_token_matches(repo_name, sync_token):
+		return
+
 	doc = frappe.get_doc("Helm Repository", repo_name)
 
 	try:
@@ -51,6 +55,9 @@ def add_and_sync_repo(repo_name: str):
 
 		# Sync charts into the database
 		_sync_charts(doc)
+		if not _repo_sync_token_matches(repo_name, sync_token):
+			frappe.db.rollback()
+			return
 
 		doc.db_set("status", "Synced")
 		doc.db_set("last_synced", frappe.utils.now())
@@ -63,6 +70,9 @@ def add_and_sync_repo(repo_name: str):
 		)
 
 	except Exception as e:
+		frappe.db.rollback()
+		if not _repo_sync_token_matches(repo_name, sync_token):
+			return
 		doc.db_set("status", "Error")
 		frappe.log_error(
 			title=f"Helm Repo Add Failed: {repo_name}",
@@ -76,11 +86,14 @@ def add_and_sync_repo(repo_name: str):
 		)
 
 
-def sync_repo_charts(repo_name: str):
+def sync_repo_charts(repo_name: str, sync_token: str):
 	"""Update a repo's chart index and sync new charts to the database.
 
 	Called by the "Sync Charts" button and the daily scheduler.
 	"""
+	if not _repo_sync_token_matches(repo_name, sync_token):
+		return
+
 	doc = frappe.get_doc("Helm Repository", repo_name)
 
 	try:
@@ -89,6 +102,9 @@ def sync_repo_charts(repo_name: str):
 
 		# Sync charts
 		_sync_charts(doc)
+		if not _repo_sync_token_matches(repo_name, sync_token):
+			frappe.db.rollback()
+			return
 
 		doc.db_set("status", "Synced")
 		doc.db_set("last_synced", frappe.utils.now())
@@ -101,6 +117,9 @@ def sync_repo_charts(repo_name: str):
 		)
 
 	except Exception as e:
+		frappe.db.rollback()
+		if not _repo_sync_token_matches(repo_name, sync_token):
+			return
 		doc.db_set("status", "Error")
 		frappe.log_error(
 			title=f"Helm Repo Sync Failed: {repo_name}",
@@ -126,7 +145,10 @@ def sync_all_repos():
 
 	for repo_name in repos:
 		try:
-			sync_repo_charts(repo_name)
+			sync_token = secrets.token_hex(16)
+			frappe.db.set_value("Helm Repository", repo_name, "status", "Syncing")
+			frappe.db.set_value("Helm Repository", repo_name, "sync_token", sync_token)
+			sync_repo_charts(repo_name, sync_token)
 		except Exception as e:
 			frappe.log_error(
 				title=f"Daily Sync Failed: {repo_name}",
@@ -289,6 +311,21 @@ def _truncate_status_detail(detail: str) -> str:
 	return detail[:_HELM_STATUS_DETAIL_LIMIT]
 
 
+def _repo_sync_token_matches(repo_name: str, sync_token: str) -> bool:
+	current_token = frappe.db.get_value("Helm Repository", repo_name, "sync_token")
+	if current_token == sync_token:
+		return True
+
+	frappe.logger("kubeport").info(
+		"Skipping stale repo sync worker for Helm Repository '%s' because token '%s' "
+		"no longer matches current token '%s'.",
+		repo_name,
+		sync_token,
+		current_token,
+	)
+	return False
+
+
 def _sync_charts(repo_doc):
 	"""Parse ``helm search repo`` output and upsert Helm Chart documents.
 
@@ -363,7 +400,6 @@ def _sync_charts(repo_doc):
 			})
 			new_chart.insert(ignore_permissions=True)
 
-	frappe.db.commit()
 
 
 def _parse_include_patterns(patterns_text: str | None) -> list[str]:

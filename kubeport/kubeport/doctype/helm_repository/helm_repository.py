@@ -8,6 +8,8 @@ Manages Helm chart repository registrations.  Adding a new repository
 automatically triggers ``helm repo add`` and a chart sync in the background.
 """
 
+import secrets
+
 import frappe
 from frappe.model.document import Document
 
@@ -28,6 +30,7 @@ class HelmRepository(Document):
 		repo_url: DF.Data
 		repo_username: DF.Data | None
 		status: DF.Literal["Pending", "Syncing", "Synced", "Error"]
+		sync_token: DF.Data | None
 	# end: auto-generated types
 
 	def validate(self):
@@ -39,18 +42,12 @@ class HelmRepository(Document):
 
 	def after_insert(self):
 		"""Auto-register repo in Helm and trigger first sync."""
-		self.db_set("status", "Syncing")
-		frappe.enqueue(
-			"kubeport.tasks.helm_tasks.add_and_sync_repo",
-			repo_name=self.name,
-			queue="long",
-			enqueue_after_commit=True,
-		)
-		frappe.msgprint(
-			f"Repository '{self.repo_name}' is being registered. "
-			"Charts will be synced automatically.",
-			alert=True,
-			indicator="blue",
+		self._enqueue_sync_job(
+			task_path="kubeport.tasks.helm_tasks.add_and_sync_repo",
+			message=(
+				f"Repository '{self.repo_name}' is being registered. "
+				"Charts will be synced automatically."
+			),
 		)
 
 	def on_trash(self):
@@ -65,15 +62,24 @@ class HelmRepository(Document):
 	@frappe.whitelist()
 	def sync_charts(self):
 		"""Manual sync trigger — re-fetches chart index and upserts Helm Chart docs."""
+		self._enqueue_sync_job(
+			task_path="kubeport.tasks.helm_tasks.sync_repo_charts",
+			message="Chart sync has been queued. The chart list will update shortly.",
+		)
+
+	def _enqueue_sync_job(self, task_path: str, message: str) -> None:
+		sync_token = secrets.token_hex(16)
 		self.db_set("status", "Syncing")
+		self.db_set("sync_token", sync_token)
 		frappe.enqueue(
-			"kubeport.tasks.helm_tasks.sync_repo_charts",
+			task_path,
 			repo_name=self.name,
+			sync_token=sync_token,
 			queue="long",
 			enqueue_after_commit=True,
 		)
 		frappe.msgprint(
-			"Chart sync has been queued. The chart list will update shortly.",
+			message,
 			alert=True,
 			indicator="blue",
 		)

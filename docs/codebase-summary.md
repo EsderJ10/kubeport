@@ -48,6 +48,7 @@ Key behavior:
 - Validates auth-method-specific fields.
 - Supports connection testing.
 - Supports dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
+- Normalizes imported kubeconfig server endpoints when the source file points at local-only addresses that are not reachable from the app container.
 - The client-side form renders live discovery using async API calls.
 
 ### `Helm Repository`
@@ -59,6 +60,7 @@ Key behavior:
 - Auto-registers new repos with Helm.
 - Syncs charts in background jobs.
 - Tracks sync status and last sync timestamp.
+- Uses per-run sync tokens so stale repo workers cannot overwrite a newer sync.
 
 ### `Helm Chart`
 
@@ -98,6 +100,7 @@ Provides:
 - live namespace discovery
 - kubeconfig context parsing
 - kubeconfig context extraction
+- kubeconfig endpoint normalization metadata for import flows
 
 These APIs are form-supporting APIs, not long-running orchestration endpoints.
 
@@ -166,6 +169,7 @@ Responsibilities:
 
 Notable quality point:
 - release workers re-check status before acting, which reduces stale duplicate execution risk.
+- repo sync workers now re-check a per-run token and roll back partial writes when a newer sync supersedes them.
 
 ### `service_bundle_tasks.py`
 

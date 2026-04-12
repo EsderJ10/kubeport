@@ -11,12 +11,14 @@ frappe.ui.form.on('Service Bundle', {
             frm.page.set_indicator(frm.doc.status, status_map[frm.doc.status] || 'grey');
         }
 
-        // Listen for realtime status updates from background jobs
-        frappe.realtime.on('service_bundle_status_update', (data) => {
-            if (data.bundle_name === frm.doc.name) {
-                frm.reload_doc();
-            }
-        });
+        if (!frm.__service_bundle_status_listener_bound) {
+            frm.__service_bundle_status_listener_bound = true;
+            frappe.realtime.on('service_bundle_status_update', (data) => {
+                if (data.bundle_name === frm.doc.name) {
+                    frm.reload_doc();
+                }
+            });
+        }
     },
 
     cluster: function(frm) {

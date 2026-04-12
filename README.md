@@ -30,7 +30,7 @@ The current milestone is robustness, especially around discovery and asynchronou
   - in-cluster service account auth
 - Dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
 - Live namespace discovery for cluster-backed forms.
-- Browser-side kubeconfig import, context parsing, and context extraction.
+- Browser-side kubeconfig import, context parsing, context extraction, and local endpoint normalization for containerized dev setups.
 - Helm repository registration and chart sync.
 - Helm chart metadata and default values retrieval.
 - Helm release deploy and uninstall workflows through background jobs.
