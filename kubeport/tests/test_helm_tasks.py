@@ -6,7 +6,13 @@ from unittest.mock import MagicMock, patch
 
 from frappe.tests import UnitTestCase
 
-from kubeport.tasks.helm_tasks import install_or_upgrade_release, sync_repo_charts
+from kubeport.tasks.helm_tasks import (
+	_group_chart_inventory,
+	_sync_charts,
+	install_or_upgrade_release,
+	sync_repo_charts,
+	sync_all_repos,
+)
 
 
 class UnitTestHelmTasks(UnitTestCase):
@@ -244,7 +250,11 @@ class UnitTestHelmTasks(UnitTestCase):
 		})
 		mock_publish_realtime.assert_called_once_with(
 			"helm_release_status_update",
-			{"release_name": "bench-a", "status": "Degraded"},
+			{
+				"release_docname": "bench-a",
+				"release_name": "bench-a",
+				"status": "Degraded",
+			},
 			doctype="Helm Release",
 			docname="bench-a",
 		)
@@ -281,3 +291,131 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_set_helm_release_fields.assert_not_called()
 		mock_publish_realtime.assert_not_called()
 		mock_logger.return_value.info.assert_called_once()
+
+	@patch("kubeport.tasks.helm_tasks.frappe.enqueue")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.set_value")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_all")
+	@patch("kubeport.tasks.helm_tasks.secrets.token_hex", side_effect=["token-a", "token-b"])
+	def test_sync_all_repos_enqueues_background_sync_jobs(
+		self,
+		_mock_token_hex,
+		mock_get_all,
+		mock_set_value,
+		mock_enqueue,
+	):
+		mock_get_all.return_value = ["repo-a", "repo-b"]
+
+		sync_all_repos()
+
+		self.assertEqual(mock_set_value.call_count, 4)
+		mock_enqueue.assert_any_call(
+			"kubeport.tasks.helm_tasks.sync_repo_charts",
+			repo_name="repo-a",
+			sync_token="token-a",
+			queue="long",
+			enqueue_after_commit=True,
+		)
+		mock_enqueue.assert_any_call(
+			"kubeport.tasks.helm_tasks.sync_repo_charts",
+			repo_name="repo-b",
+			sync_token="token-b",
+			queue="long",
+			enqueue_after_commit=True,
+		)
+
+	def test_group_chart_inventory_sorts_versions_and_filters_duplicates(self):
+		grouped = _group_chart_inventory(
+			[
+				{
+					"name": "bitnami/nginx",
+					"version": "18.2.4",
+					"app_version": "1.2.0",
+					"description": "newest",
+				},
+				{
+					"name": "bitnami/nginx",
+					"version": "18.1.0",
+					"app_version": "1.1.0",
+					"description": "older",
+				},
+				{
+					"name": "bitnami/nginx",
+					"version": "18.2.4",
+					"app_version": "1.2.0",
+					"description": "duplicate",
+				},
+				{
+					"name": "bitnami/redis",
+					"version": "3.0.0",
+					"app_version": "7.0.0",
+					"description": "filtered",
+				},
+			],
+			["nginx"],
+		)
+
+		self.assertEqual(list(grouped), ["nginx"])
+		self.assertEqual(
+			[row["version"] for row in grouped["nginx"]],
+			["18.2.4", "18.1.0"],
+		)
+
+	@patch("kubeport.tasks.helm_tasks.frappe.delete_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_all")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.exists")
+	@patch("kubeport.tasks.helm_tasks.helm.search_repo_with_options")
+	def test_sync_charts_rebuilds_versions_and_removes_stale_charts(
+		self,
+		mock_search_repo,
+		mock_exists,
+		mock_get_doc,
+		mock_get_all,
+		mock_delete_doc,
+	):
+		repo_doc = SimpleNamespace(
+			name="bitnami",
+			repo_name="bitnami",
+			include_patterns="",
+		)
+		chart_doc = MagicMock()
+		chart_doc.latest_version = "18.1.0"
+		mock_search_repo.return_value = [
+			{
+				"name": "bitnami/nginx",
+				"version": "18.2.4",
+				"app_version": "1.2.0",
+				"description": "newest",
+			},
+			{
+				"name": "bitnami/nginx",
+				"version": "18.1.0",
+				"app_version": "1.1.0",
+				"description": "older",
+			},
+		]
+		mock_exists.side_effect = lambda doctype, name: name == "bitnami/nginx"
+		mock_get_doc.return_value = chart_doc
+		mock_get_all.return_value = ["bitnami/nginx", "bitnami/redis"]
+
+		_sync_charts(repo_doc)
+
+		mock_search_repo.assert_called_once_with(
+			"bitnami",
+			all_versions=True,
+			timeout=600,
+		)
+		chart_doc.set.assert_called_once_with("versions", [
+			{"version": "18.2.4", "app_version": "1.2.0", "description": "newest"},
+			{"version": "18.1.0", "app_version": "1.1.0", "description": "older"},
+		])
+		self.assertEqual(chart_doc.latest_version, "18.2.4")
+		self.assertEqual(chart_doc.latest_app_version, "1.2.0")
+		self.assertEqual(chart_doc.description, "newest")
+		self.assertEqual(chart_doc.default_values, "")
+		chart_doc.save.assert_called_once_with(ignore_permissions=True)
+		mock_delete_doc.assert_called_once_with(
+			"Helm Chart",
+			"bitnami/redis",
+			ignore_permissions=True,
+		)

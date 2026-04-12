@@ -15,6 +15,7 @@ The current milestone is robustness. Most of the meaningful recent work is about
   - bearer-token auth
   - in-cluster auth
 - Dev-only TLS verification bypass is available for kubeconfig and bearer-token clusters whose local certificates do not match the configured endpoint.
+- Bearer-token auth is now strict by default: operators must provide a CA certificate unless they explicitly enable the dev-only TLS bypass.
 - Connection testing hits the real Kubernetes API and updates the cluster record status.
 - Namespace lookup is live and reused by forms that need cluster namespaces.
 - Kubeconfig upload flows are browser-driven and allow context extraction without reading server-side files.
@@ -30,6 +31,7 @@ The current milestone is robustness. Most of the meaningful recent work is about
   - namespace
   - cluster
   - values
+- `Helm Release` identity is now scoped to `cluster/namespace/release_name`, which matches real Helm release scope more closely than a globally unique release name.
 - `Service Bundle` persists desired raw-manifest intent for supported Kubernetes resource kinds.
 
 ### Runtime Execution
@@ -39,6 +41,8 @@ The current milestone is robustness. Most of the meaningful recent work is about
 - Realtime events trigger form refreshes after worker updates.
 - Helm worker execution now uses targeted field reads and explicit updates, which is the correct direction for concurrency safety.
 - Helm repository sync jobs now use per-run tokens so stale workers cannot overwrite the newest sync attempt.
+- Helm repository sync now rebuilds chart/version inventory from `helm search repo --versions`, clears cached default values when the latest chart version changes, and prunes stale charts that disappeared upstream.
+- Service Bundle workers now use per-run operation tokens and a distinct `Deleting` state so stale apply/delete workers cannot overwrite the latest bundle intent.
 
 ### Live Discovery
 

@@ -15,7 +15,7 @@ frappe.ui.form.on('Helm Release', {
         if (!frm.__helm_release_status_listener_bound) {
             frm.__helm_release_status_listener_bound = true;
             frappe.realtime.on('helm_release_status_update', (data) => {
-                if (data.release_name === frm.doc.name) {
+                if (data.release_docname === frm.doc.name) {
                     frm.reload_doc();
                 }
             });

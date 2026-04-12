@@ -151,6 +151,7 @@ def sync_all_repos():
 				repo_name=repo_name,
 				sync_token=sync_token,
 				queue="long",
+				enqueue_after_commit=True,
 			)
 		except Exception as e:
 			frappe.log_error(
@@ -219,7 +220,11 @@ def install_or_upgrade_release(release_name: str):
 
 		frappe.publish_realtime(
 			"helm_release_status_update",
-			{"release_name": release_name, "status": doc_status},
+			{
+				"release_docname": release_name,
+				"release_name": release["release_name"],
+				"status": doc_status,
+			},
 			doctype="Helm Release",
 			docname=release_name,
 		)
@@ -235,7 +240,11 @@ def install_or_upgrade_release(release_name: str):
 		)
 		frappe.publish_realtime(
 			"helm_release_status_update",
-			{"release_name": release_name, "status": "Failed"},
+			{
+				"release_docname": release_name,
+				"release_name": release.get("release_name", release_name),
+				"status": "Failed",
+			},
 			doctype="Helm Release",
 			docname=release_name,
 		)
@@ -274,7 +283,11 @@ def uninstall_release(release_name: str):
 
 		frappe.publish_realtime(
 			"helm_release_status_update",
-			{"release_name": release_name, "status": "Draft"},
+			{
+				"release_docname": release_name,
+				"release_name": release["release_name"],
+				"status": "Draft",
+			},
 			doctype="Helm Release",
 			docname=release_name,
 		)
@@ -290,7 +303,11 @@ def uninstall_release(release_name: str):
 		)
 		frappe.publish_realtime(
 			"helm_release_status_update",
-			{"release_name": release_name, "status": "Failed"},
+			{
+				"release_docname": release_name,
+				"release_name": release.get("release_name", release_name),
+				"status": "Failed",
+			},
 			doctype="Helm Release",
 			docname=release_name,
 		)

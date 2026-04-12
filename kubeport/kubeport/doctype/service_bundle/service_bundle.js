@@ -4,7 +4,7 @@ frappe.ui.form.on('Service Bundle', {
             'Deployed': 'green',
             'Failed': 'red',
             'In Progress': 'blue',
-            'Deleting': 'orange',
+            'Deleting': 'blue',
             'Degraded': 'yellow',
             'Draft': 'orange'
         };
