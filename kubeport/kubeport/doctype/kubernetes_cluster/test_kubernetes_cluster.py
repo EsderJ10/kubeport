@@ -17,6 +17,21 @@ IGNORE_TEST_RECORD_DEPENDENCIES = []  # eg. ["User"]
 
 
 class UnitTestKubernetesCluster(UnitTestCase):
+	@patch("kubeport.kubeport.doctype.kubernetes_cluster.kubernetes_cluster.frappe.throw")
+	def test_validate_rejects_bearer_token_auth_without_ca_or_tls_bypass(self, mock_throw):
+		doc = object.__new__(KubernetesCluster)
+		doc.auth_method = "Bearer Token"
+		doc.api_server_url = "https://cluster.example"
+		doc.bearer_token = "secret"
+		doc.skip_tls_verify = 0
+		doc.ca_certificate = ""
+		mock_throw.side_effect = RuntimeError("Provide a CA certificate")
+
+		with self.assertRaisesRegex(RuntimeError, "Provide a CA certificate"):
+			doc.validate()
+
+		mock_throw.assert_called_once()
+
 	@patch("kubeport.kubeport.doctype.kubernetes_cluster.kubernetes_cluster.frappe.msgprint")
 	@patch("kubeport.kubeport.doctype.kubernetes_cluster.kubernetes_cluster.client.CoreV1Api")
 	@patch("kubeport.kubeport.doctype.kubernetes_cluster.kubernetes_cluster.get_k8s_api_client")

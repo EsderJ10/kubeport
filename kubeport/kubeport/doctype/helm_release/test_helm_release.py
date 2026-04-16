@@ -7,12 +7,19 @@ from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from kubeport.kubeport.doctype.helm_release.helm_release import (
 	HelmRelease,
+	build_release_docname,
 	_iter_storage_configs,
 	_validate_storage_access_modes,
 )
 
 
 class UnitTestHelmRelease(UnitTestCase):
+	def test_build_release_docname_scopes_release_identity_to_cluster_and_namespace(self):
+		self.assertEqual(
+			build_release_docname("cluster-a", "erp", "bench-a"),
+			"cluster-a/erp/bench-a",
+		)
+
 	def test_iter_storage_configs_finds_nested_persistence_blocks(self):
 		configs = _iter_storage_configs({
 			"persistence": {
@@ -74,6 +81,20 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		with self.assertRaisesRegex(RuntimeError, "already in progress"):
 			doc.deploy_release()
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	def test_validate_rejects_identity_changes_after_creation(self, mock_throw):
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+		doc.cluster = "cluster-b"
+		doc.namespace = "default"
+		doc.release_name = "bench-a"
+		doc.values = ""
+		doc.is_new = lambda: False
+		mock_throw.side_effect = RuntimeError("immutable after creation")
+
+		with self.assertRaisesRegex(RuntimeError, "immutable after creation"):
+			doc.validate()
 
 
 # On IntegrationTestCase, the doctype test records and all

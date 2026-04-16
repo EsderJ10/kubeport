@@ -103,9 +103,10 @@ def _client_from_bearer_token(cluster_doc) -> client.ApiClient:
 		ca_path = _write_ca_tempfile(cluster_doc.ca_certificate)
 		configuration.ssl_ca_cert = ca_path
 	else:
-		# No CA certificate — skip TLS verification (development only)
-		configuration.verify_ssl = False
-		urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+		frappe.throw(
+			"Bearer Token authentication requires a CA certificate unless "
+			"'Skip TLS Verification (Development Only)' is enabled."
+		)
 
 	return client.ApiClient(configuration=configuration)
 

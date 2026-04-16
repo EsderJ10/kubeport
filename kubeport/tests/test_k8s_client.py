@@ -101,3 +101,22 @@ users:
 		self.assertIsNone(configuration.ssl_ca_cert)
 		mock_write_ca_tempfile.assert_not_called()
 		mock_disable_warnings.assert_called_once()
+
+	@patch("kubeport.utils.k8s_client.frappe.throw")
+	def test_client_from_bearer_token_requires_ca_when_tls_verification_is_enabled(
+		self,
+		mock_throw,
+	):
+		cluster_doc = SimpleNamespace(
+			name="cluster-a",
+			api_server_url="https://cluster.example",
+			ca_certificate="",
+			skip_tls_verify=0,
+			get_password=lambda fieldname: "token-123",
+		)
+		mock_throw.side_effect = RuntimeError("CA certificate required")
+
+		with self.assertRaisesRegex(RuntimeError, "CA certificate required"):
+			_client_from_bearer_token(cluster_doc)
+
+		mock_throw.assert_called_once()

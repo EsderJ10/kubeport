@@ -141,7 +141,7 @@
   },
   {
    "depends_on": "eval:doc.auth_method === 'Bearer Token'",
-   "description": "PEM-encoded CA certificate for the API server. Leave empty to skip TLS verification (development only).",
+   "description": "PEM-encoded CA certificate for the API server. Required unless 'Skip TLS Verification (Development Only)' is enabled.",
    "fieldname": "ca_certificate",
    "fieldtype": "Code",
    "label": "CA Certificate",

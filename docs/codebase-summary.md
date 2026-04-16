@@ -48,6 +48,8 @@ Key behavior:
 - Validates auth-method-specific fields.
 - Supports connection testing.
 - Supports dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
+- Requires a CA certificate for bearer-token auth unless dev-only TLS bypass is explicitly enabled.
+- Normalizes imported kubeconfig server endpoints when the source file points at local-only addresses that are not reachable from the app container.
 - The client-side form renders live discovery using async API calls.
 
 ### `Helm Repository`
@@ -59,6 +61,8 @@ Key behavior:
 - Auto-registers new repos with Helm.
 - Syncs charts in background jobs.
 - Tracks sync status and last sync timestamp.
+- Uses per-run sync tokens so stale repo workers cannot overwrite a newer sync.
+- Rebuilds full chart/version inventory from the current repo index and prunes stale chart rows.
 
 ### `Helm Chart`
 
@@ -79,6 +83,7 @@ Key behavior:
 - Rejects unsafe `local-path` plus `ReadWriteMany` combinations.
 - Queues deploy and uninstall through background jobs.
 - Tracks release lifecycle state and Helm status detail.
+- Uses a composite document identity based on cluster, namespace, and release name.
 
 ### `Service Bundle`
 
@@ -89,6 +94,7 @@ Key behavior:
 - Validates supported manifest content.
 - Queues apply and delete through background jobs.
 - Tracks bundle lifecycle state.
+- Uses per-run operation tokens so stale apply/delete workers do not overwrite current bundle state.
 
 ## API Layer
 
@@ -98,6 +104,7 @@ Provides:
 - live namespace discovery
 - kubeconfig context parsing
 - kubeconfig context extraction
+- kubeconfig endpoint normalization metadata for import flows
 
 These APIs are form-supporting APIs, not long-running orchestration endpoints.
 
@@ -166,6 +173,7 @@ Responsibilities:
 
 Notable quality point:
 - release workers re-check status before acting, which reduces stale duplicate execution risk.
+- repo sync workers now re-check a per-run token and roll back partial writes when a newer sync supersedes them.
 
 ### `service_bundle_tasks.py`
 

@@ -10,31 +10,11 @@ frappe.ui.form.on('Helm Repository', {
             frm.page.set_indicator(frm.doc.status, status_map[frm.doc.status] || 'grey');
         }
 
-        // Show linked chart count
         if (!frm.is_new()) {
-            frappe.call({
-                method: 'frappe.client.get_count',
-                args: {
-                    doctype: 'Helm Chart',
-                    filters: { repository: frm.doc.name }
-                },
-                callback: function(r) {
-                    if (r.message) {
-                        frm.dashboard.add_indicator(
-                            __('{0} Charts Discovered', [r.message]),
-                            r.message > 0 ? 'green' : 'orange'
-                        );
-                    }
-                }
-            });
+            _load_chart_count(frm);
         }
 
-        // Listen for realtime sync updates
-        frappe.realtime.on('helm_repo_sync_update', (data) => {
-            if (data.repo_name === frm.doc.name) {
-                frm.reload_doc();
-            }
-        });
+        _bind_repo_sync_listener(frm);
     },
 
     sync_charts: function(frm) {
@@ -51,3 +31,37 @@ frappe.ui.form.on('Helm Repository', {
         });
     }
 });
+
+function _load_chart_count(frm) {
+    frappe.call({
+        method: 'frappe.client.get_count',
+        args: {
+            doctype: 'Helm Chart',
+            filters: { repository: frm.doc.name }
+        },
+        callback: function(r) {
+            if (r.message == null) {
+                return;
+            }
+
+            const chart_count = Number(r.message) || 0;
+            frm.set_intro(
+                __('{0} Charts Discovered', [chart_count]),
+                chart_count > 0 ? 'green' : 'orange'
+            );
+        }
+    });
+}
+
+function _bind_repo_sync_listener(frm) {
+    if (frm.__helm_repo_sync_listener_bound) {
+        return;
+    }
+
+    frm.__helm_repo_sync_listener_bound = true;
+    frappe.realtime.on('helm_repo_sync_update', (data) => {
+        if (data.repo_name === frm.doc.name) {
+            frm.reload_doc();
+        }
+    });
+}

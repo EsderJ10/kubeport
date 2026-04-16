@@ -12,6 +12,8 @@
   "namespace",
   "column_break_meta",
   "status",
+  "status_detail",
+  "operation_token",
   "section_break_content",
   "content",
   "section_break_actions",
@@ -57,7 +59,20 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
-   "options": "Draft\nIn Progress\nDeployed\nDegraded\nFailed",
+   "options": "Draft\nIn Progress\nDeleting\nDeployed\nDegraded\nFailed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "status_detail",
+   "fieldtype": "Small Text",
+   "label": "Status Detail",
+   "read_only": 1
+  },
+  {
+   "fieldname": "operation_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Operation Token",
    "read_only": 1
   },
   {

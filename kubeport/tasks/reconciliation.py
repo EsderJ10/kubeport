@@ -103,6 +103,12 @@ def _reconcile_service_bundles():
 			next_status = "Deployed" if is_healthy else "Degraded"
 			if bundle.status != next_status:
 				frappe.db.set_value("Service Bundle", bundle.name, "status", next_status)
+			frappe.db.set_value(
+				"Service Bundle",
+				bundle.name,
+				"status_detail",
+				"" if is_healthy else _truncate_status_detail(detail),
+			)
 
 			if not is_healthy:
 				frappe.log_error(
@@ -111,6 +117,12 @@ def _reconcile_service_bundles():
 				)
 		except Exception as e:
 			frappe.db.set_value("Service Bundle", bundle.name, "status", "Degraded")
+			frappe.db.set_value(
+				"Service Bundle",
+				bundle.name,
+				"status_detail",
+				_truncate_status_detail(f"Reconciliation error: {e}"),
+			)
 			frappe.log_error(
 				title=f"Reconciliation Error: Service Bundle {bundle.name}",
 				message=str(e),

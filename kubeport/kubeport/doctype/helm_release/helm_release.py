@@ -37,6 +37,16 @@ class HelmRelease(Document):
 
 	def validate(self):
 		"""Validate YAML syntax in the values field."""
+		if not self.is_new() and self.name != build_release_docname(
+			self.cluster,
+			self.namespace,
+			self.release_name,
+		):
+			frappe.throw(
+				"Cluster, namespace, and release name are immutable after creation. "
+				"Create a new Helm Release for a different identity."
+			)
+
 		if self.values:
 			try:
 				parsed = yaml.safe_load(self.values)
@@ -47,6 +57,13 @@ class HelmRelease(Document):
 				_validate_storage_access_modes(parsed)
 			except yaml.YAMLError as e:
 				frappe.throw(f"Invalid YAML in values: {e}")
+
+	def autoname(self):
+		self.name = build_release_docname(
+			self.cluster,
+			self.namespace,
+			self.release_name,
+		)
 
 	@frappe.whitelist()
 	def deploy_release(self):
@@ -146,6 +163,14 @@ def _validate_storage_access_modes(values: dict | None) -> None:
 			f"{path} uses storageClass 'local-path' with accessModes {access_modes}. "
 			"'local-path' only supports ReadWriteOnce on typical K3s/local-path setups."
 		)
+
+
+def build_release_docname(cluster: str | None, namespace: str | None, release_name: str | None) -> str:
+	return "/".join([
+		str(cluster or "").strip(),
+		str(namespace or "default").strip() or "default",
+		str(release_name or "").strip(),
+	])
 
 
 def _iter_storage_configs(

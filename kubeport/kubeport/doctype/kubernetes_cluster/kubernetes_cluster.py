@@ -41,6 +41,11 @@ class KubernetesCluster(Document):
 				frappe.throw("A Bearer Token is required when using Bearer Token auth.")
 			if not self.api_server_url.startswith("https://"):
 				frappe.throw("API Server URL must start with https://")
+			if not self.skip_tls_verify and not self.ca_certificate:
+				frappe.throw(
+					"Provide a CA certificate for Bearer Token auth, or explicitly enable "
+					"'Skip TLS Verification (Development Only)' for local development."
+				)
 
 		# In-Cluster requires no user-provided fields — the service account
 		# is auto-detected from the pod environment at connection time.

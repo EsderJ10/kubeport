@@ -8,9 +8,10 @@ The control plane is functional in these areas:
 
 - `Kubernetes Cluster` stores cluster credentials and exposes live discovery in the form UI.
 - `Helm Repository` syncs chart metadata from Helm repos into MariaDB.
+- Helm repository sync now rebuilds full chart/version inventory from the live repo index and prunes stale chart rows.
 - `Helm Chart` stores chart metadata and available versions discovered from repositories.
-- `Helm Release` persists desired release state and deploys or uninstalls via background jobs.
-- `Service Bundle` persists raw manifest bundles and applies or deletes them via the Kubernetes API.
+- `Helm Release` persists desired release state with identity scoped to cluster + namespace + release name, and deploys or uninstalls via background jobs.
+- `Service Bundle` persists raw manifest bundles and applies or deletes them via the Kubernetes API with stale-worker protection.
 - Reconciliation sweeps compare desired state with live cluster state and mark drift as `Degraded`.
 
 The current milestone is robustness, especially around discovery and asynchronous cluster operations:
@@ -29,8 +30,9 @@ The current milestone is robustness, especially around discovery and asynchronou
   - bearer token
   - in-cluster service account auth
 - Dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
+- Bearer-token auth now requires either a CA certificate or an explicit dev-only TLS bypass.
 - Live namespace discovery for cluster-backed forms.
-- Browser-side kubeconfig import, context parsing, and context extraction.
+- Browser-side kubeconfig import, context parsing, context extraction, and local endpoint normalization for containerized dev setups.
 - Helm repository registration and chart sync.
 - Helm chart metadata and default values retrieval.
 - Helm release deploy and uninstall workflows through background jobs.

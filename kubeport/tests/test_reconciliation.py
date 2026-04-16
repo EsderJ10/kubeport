@@ -75,7 +75,10 @@ class UnitTestReconciliation(UnitTestCase):
 
 		_reconcile_service_bundles()
 
-		mock_set_value.assert_called_once_with("Service Bundle", "bundle-a", "status", "Deployed")
+		self.assertEqual(mock_set_value.call_args_list, [
+			call("Service Bundle", "bundle-a", "status", "Deployed"),
+			call("Service Bundle", "bundle-a", "status_detail", ""),
+		])
 
 	@patch("kubeport.tasks.reconciliation.frappe.log_error")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
@@ -101,5 +104,13 @@ class UnitTestReconciliation(UnitTestCase):
 
 		_reconcile_service_bundles()
 
-		mock_set_value.assert_called_once_with("Service Bundle", "bundle-a", "status", "Degraded")
+		self.assertEqual(mock_set_value.call_args_list, [
+			call("Service Bundle", "bundle-a", "status", "Degraded"),
+			call(
+				"Service Bundle",
+				"bundle-a",
+				"status_detail",
+				"ConfigMap/demo not found in namespace default.",
+			),
+		])
 		mock_log_error.assert_called_once()

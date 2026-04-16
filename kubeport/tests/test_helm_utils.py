@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import yaml
 from frappe.tests import UnitTestCase
+from unittest.mock import patch
 
 from kubeport.utils.helm import _build_kubeconfig_from_token
 
@@ -42,3 +43,22 @@ class UnitTestHelmUtils(UnitTestCase):
 
 		self.assertTrue(cluster_config["insecure-skip-tls-verify"])
 		self.assertNotIn("certificate-authority-data", cluster_config)
+
+	@patch("kubeport.utils.helm.frappe.throw")
+	def test_build_kubeconfig_from_token_requires_ca_when_tls_verification_is_enabled(
+		self,
+		mock_throw,
+	):
+		cluster_doc = SimpleNamespace(
+			name="cluster-a",
+			api_server_url="https://cluster.example",
+			ca_certificate="",
+			skip_tls_verify=0,
+			get_password=lambda fieldname: "token-123",
+		)
+		mock_throw.side_effect = RuntimeError("CA certificate required")
+
+		with self.assertRaisesRegex(RuntimeError, "CA certificate required"):
+			_build_kubeconfig_from_token(cluster_doc)
+
+		mock_throw.assert_called_once()

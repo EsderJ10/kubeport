@@ -15,9 +15,11 @@ The current milestone is robustness. Most of the meaningful recent work is about
   - bearer-token auth
   - in-cluster auth
 - Dev-only TLS verification bypass is available for kubeconfig and bearer-token clusters whose local certificates do not match the configured endpoint.
+- Bearer-token auth is now strict by default: operators must provide a CA certificate unless they explicitly enable the dev-only TLS bypass.
 - Connection testing hits the real Kubernetes API and updates the cluster record status.
 - Namespace lookup is live and reused by forms that need cluster namespaces.
 - Kubeconfig upload flows are browser-driven and allow context extraction without reading server-side files.
+- Imported kubeconfig contexts now normalize clearly local-only API server endpoints such as `0.0.0.0` and `127.0.0.1` to a container-reachable gateway IP when possible.
 
 ### Desired-State Control Plane
 
@@ -29,6 +31,7 @@ The current milestone is robustness. Most of the meaningful recent work is about
   - namespace
   - cluster
   - values
+- `Helm Release` identity is now scoped to `cluster/namespace/release_name`, which matches real Helm release scope more closely than a globally unique release name.
 - `Service Bundle` persists desired raw-manifest intent for supported Kubernetes resource kinds.
 
 ### Runtime Execution
@@ -37,6 +40,9 @@ The current milestone is robustness. Most of the meaningful recent work is about
 - Raw manifest apply and delete operations run in background jobs.
 - Realtime events trigger form refreshes after worker updates.
 - Helm worker execution now uses targeted field reads and explicit updates, which is the correct direction for concurrency safety.
+- Helm repository sync jobs now use per-run tokens so stale workers cannot overwrite the newest sync attempt.
+- Helm repository sync now rebuilds chart/version inventory from `helm search repo --versions`, clears cached default values when the latest chart version changes, and prunes stale charts that disappeared upstream.
+- Service Bundle workers now use per-run operation tokens and a distinct `Deleting` state so stale apply/delete workers cannot overwrite the latest bundle intent.
 
 ### Live Discovery
 
@@ -63,6 +69,7 @@ The current milestone is robustness. Most of the meaningful recent work is about
 - Candidate pods are ranked so more stable targets like gunicorn/scheduler are preferred.
 - Release-level discovery failures are isolated and returned as partial errors instead of failing the whole cluster response.
 - Worker tasks skip stale jobs when the persisted document status no longer matches the queued operation.
+- Repo sync tasks roll back partial chart upserts before marking a sync as failed or stale.
 - Reconciliation can move documents back from `Degraded` to `Deployed` when live state recovers.
 
 ## What The Robustness Milestone Means In Practice
@@ -131,8 +138,10 @@ This is the concise record of work already reflected in the codebase:
 - Added `Kubernetes Cluster` as the cluster connectivity anchor.
 - Added multiple auth modes for Kubernetes access.
 - Added kubeconfig parsing and context extraction APIs.
+- Hardened kubeconfig import by normalizing local-only server endpoints for containerized development flows.
 - Added live namespace discovery APIs for forms.
 - Added Helm repository registration and background chart syncing.
+- Hardened Helm repository sync with per-run tokens and rollback on stale or failed workers.
 - Added chart metadata and version persistence.
 - Added Helm release desired-state docs with async deploy and uninstall.
 - Added manifest-bundle desired-state docs with async apply and delete.
