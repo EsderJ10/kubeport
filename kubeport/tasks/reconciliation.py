@@ -146,7 +146,7 @@ def _reconcile_frappe_sites():
 	in_progress = frappe.get_all(
 		"Frappe Site",
 		filters={"status": "In Progress"},
-		fields=["name", "cluster", "namespace", "creation_job_name"],
+		fields=["name", "cluster", "namespace", "creation_job_name", "bench_release", "site_name"],
 	)
 
 	for site in in_progress:
@@ -174,29 +174,44 @@ def _reconcile_frappe_sites():
 					docname=site.name,
 				)
 			elif failed > 0:
-				detail = _extract_job_failure_detail(
-					batch_v1=batch_v1,
-					core_v1=client.CoreV1Api(api_client=api_client),
-					job=job,
-					namespace=site.namespace or "default",
-				)
-				frappe.db.set_value("Frappe Site", site.name, "status", "Failed")
-				frappe.db.set_value(
-					"Frappe Site",
-					site.name,
-					"status_detail",
-					_truncate_status_detail(detail),
-				)
-				frappe.log_error(
-					title=f"Frappe Site Creation Failed: {site.name}",
-					message=detail,
-				)
-				frappe.publish_realtime(
-					"frappe_site_status_update",
-					{"site_docname": site.name, "status": "Failed"},
-					doctype="Frappe Site",
-					docname=site.name,
-				)
+				# The Job pod exited non-zero, but bench new-site can do this even on
+				# success (e.g. when --install-app triggers migrations that log warnings).
+				# Check ground truth first: does the site actually exist on the bench?
+				core_v1 = client.CoreV1Api(api_client=api_client)
+				if _site_exists_in_bench(site, core_v1):
+					# Site is present on the bench — Job exit code was a false negative.
+					frappe.db.set_value("Frappe Site", site.name, "status", "Active")
+					frappe.db.set_value("Frappe Site", site.name, "status_detail", "")
+					frappe.publish_realtime(
+						"frappe_site_status_update",
+						{"site_docname": site.name, "status": "Active"},
+						doctype="Frappe Site",
+						docname=site.name,
+					)
+				else:
+					# Site is genuinely absent — fetch pod logs for a useful error message.
+					detail = _extract_job_failure_detail(
+						core_v1=core_v1,
+						job=job,
+						namespace=site.namespace or "default",
+					)
+					frappe.db.set_value("Frappe Site", site.name, "status", "Failed")
+					frappe.db.set_value(
+						"Frappe Site",
+						site.name,
+						"status_detail",
+						_truncate_status_detail(detail),
+					)
+					frappe.log_error(
+						title=f"Frappe Site Creation Failed: {site.name}",
+						message=detail,
+					)
+					frappe.publish_realtime(
+						"frappe_site_status_update",
+						{"site_docname": site.name, "status": "Failed"},
+						doctype="Frappe Site",
+						docname=site.name,
+					)
 			# If neither succeeded nor failed, the Job is still running — leave status as-is.
 
 		except ApiException as e:
@@ -220,39 +235,89 @@ def _reconcile_frappe_sites():
 			)
 
 
+def _site_exists_in_bench(site: "frappe._dict", core_v1: "client.CoreV1Api") -> bool:
+	"""Return True if the site's site_config.json exists on the bench.
+
+	Uses the same exec-based discovery that the cluster discovery endpoint uses,
+	so this is the same ground truth as what the user sees in the discovery UI.
+	Returns False on any error so callers safely fall back to marking Failed.
+	"""
+	from kubeport.utils.discovery import _exec_list_sites, _select_site_discovery_pod
+
+	try:
+		release = frappe.get_doc("Helm Release", site.bench_release)
+		ref_pod = _select_site_discovery_pod(
+			core_v1=core_v1,
+			namespace=site.namespace or "default",
+			release_name=release.release_name,
+		)
+		existing_sites = _exec_list_sites(
+			core_v1=core_v1,
+			namespace=site.namespace or "default",
+			pod=ref_pod,
+		)
+		return site.site_name in existing_sites
+	except Exception as e:
+		frappe.logger("kubeport").warning(
+			"Could not verify site existence for '%s' after Job failure: %s",
+			site.name,
+			e,
+		)
+		return False
+
+
 def _extract_job_failure_detail(
-	batch_v1: "client.BatchV1Api",
 	core_v1: "client.CoreV1Api",
 	job: "client.V1Job",
 	namespace: str,
 ) -> str:
-	"""Extract a human-readable failure reason from the Job's pod(s)."""
+	"""Return a useful failure message from the Job pod's stdout log.
+
+	Kubernetes's terminated.reason is always "Error" for any non-zero exit and
+	terminated.message is empty unless terminationMessagePath is configured in
+	the pod spec (we did not set it).  Fetching the actual pod log gives a far
+	more actionable message — it contains the bench new-site output including the
+	real error from MariaDB / app install.
+	"""
 	if not job.metadata or not job.metadata.name:
 		return "Job failed (no metadata available)."
+
+	job_name = job.metadata.name
 
 	try:
 		pods = core_v1.list_namespaced_pod(
 			namespace=namespace,
-			label_selector=f"job-name={job.metadata.name}",
+			label_selector=f"job-name={job_name}",
 			_request_timeout=15,
 		)
 		for pod in (pods.items or []):
-			status = getattr(pod, "status", None)
-			if not status:
+			pod_name = pod.metadata.name if pod.metadata else None
+			if not pod_name:
 				continue
-			for cs in (status.container_statuses or []):
-				terminated = getattr(getattr(cs, "state", None), "terminated", None)
-				if terminated:
-					msg = getattr(terminated, "message", "") or ""
-					reason = getattr(terminated, "reason", "") or ""
-					exit_code = getattr(terminated, "exit_code", "")
-					parts = [p for p in [reason, msg] if p]
-					detail = ": ".join(parts) if parts else f"exit code {exit_code}"
-					return f"Job pod failed — {detail}"
+			try:
+				logs = core_v1.read_namespaced_pod_log(
+					name=pod_name,
+					namespace=namespace,
+					tail_lines=30,
+					_request_timeout=15,
+				)
+				if logs and logs.strip():
+					return f"bench new-site failed. Last 30 log lines:\n\n{logs.strip()}"
+			except Exception:
+				pass
+
+			# Log unavailable — fall back to exit code from container status
+			status = getattr(pod, "status", None)
+			if status:
+				for cs in (status.container_statuses or []):
+					terminated = getattr(getattr(cs, "state", None), "terminated", None)
+					if terminated:
+						exit_code = getattr(terminated, "exit_code", "unknown")
+						return f"Job pod exited with code {exit_code} and no readable logs."
 	except Exception:
 		pass
 
-	return f"Job '{job.metadata.name}' reported failure (could not extract pod detail)."
+	return f"Job '{job_name}' reported failure (could not retrieve pod logs)."
 
 
 def _set_helm_reconciliation_state(release_name: str, status: str, detail: str) -> None:
