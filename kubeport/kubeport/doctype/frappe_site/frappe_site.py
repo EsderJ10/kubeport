@@ -1,0 +1,106 @@
+# Copyright (c) 2026, Los Favs and contributors
+# For license information, please see license.txt
+
+"""
+Frappe Site Controller
+
+Manages ERPNext site creation on a running Frappe bench (ERPNext Helm release).
+Each document represents a single Frappe site and drives a one-shot Kubernetes
+Job that runs ``bench new-site`` inside the bench's workload containers.
+
+Desired state lives here in MariaDB.  The site is created asynchronously via a
+background task; reconciliation polls the Job status every 5 minutes to detect
+completion or failure.
+"""
+
+import secrets
+
+import frappe
+from frappe.model.document import Document
+
+
+class FrappeSite(Document):
+	# begin: auto-generated types
+	# This code is auto-generated. Do not modify anything in this block.
+
+	from typing import TYPE_CHECKING
+
+	if TYPE_CHECKING:
+		from frappe.types import DF
+
+		admin_password: DF.Password
+		bench_release: DF.Link
+		cluster: DF.Data | None
+		creation_job_name: DF.Data | None
+		db_root_password: DF.Password | None
+		db_root_secret: DF.Data | None
+		db_root_secret_key: DF.Data | None
+		db_type: DF.Literal["mariadb", "postgres"]
+		force_create: DF.Check
+		install_apps: DF.SmallText | None
+		namespace: DF.Data | None
+		operation_token: DF.Data | None
+		site_name: DF.Data
+		status: DF.Literal["Draft", "In Progress", "Active", "Failed"]
+		status_detail: DF.SmallText | None
+	# end: auto-generated types
+
+	def autoname(self):
+		self.name = f"{self.bench_release}/{self.site_name}"
+
+	def validate(self):
+		"""Populate derived fields from bench_release and guard identity immutability."""
+		if not self.is_new():
+			expected = f"{self.bench_release}/{self.site_name}"
+			if self.name != expected:
+				frappe.throw(
+					"Bench release and site name are immutable after creation. "
+					"Create a new Frappe Site document to change the identity."
+				)
+
+		if self.bench_release:
+			release = frappe.get_doc("Helm Release", self.bench_release)
+			self.cluster = release.cluster
+			self.namespace = release.namespace or "default"
+
+		if not self.db_root_password and not self.db_root_secret:
+			frappe.throw(
+				"Either DB Root Password or DB Root Secret must be provided. "
+				"DB Root Secret (referencing an existing Kubernetes Secret) is recommended."
+			)
+
+	@frappe.whitelist()
+	def create_site(self):
+		"""Submit a Kubernetes Job to create this site on the bench.
+
+		The job runs ``bench new-site`` inside the bench's scheduler pod.
+		Status transitions: Draft → In Progress → Active | Failed.
+		"""
+		if not self.bench_release:
+			frappe.throw("A bench release is required.")
+		if not self.site_name:
+			frappe.throw("A site name is required.")
+		if self.status == "In Progress":
+			frappe.throw("Site creation is already in progress.")
+		if self.status == "Active":
+			frappe.throw(
+				"This site already exists. Use Force Create if you need to recreate it."
+			)
+
+		operation_token = secrets.token_hex(16)
+		self.db_set("status", "In Progress")
+		self.db_set("status_detail", "")
+		self.db_set("operation_token", operation_token)
+		frappe.enqueue(
+			"kubeport.tasks.site_tasks.create_site_task",
+			site_docname=self.name,
+			operation_token=operation_token,
+			queue="long",
+			enqueue_after_commit=True,
+		)
+		frappe.msgprint(
+			f"Site creation for '{self.site_name}' has been queued. "
+			"Status will update automatically when the job completes.",
+			alert=True,
+			indicator="blue",
+		)
