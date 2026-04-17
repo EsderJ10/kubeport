@@ -19,7 +19,7 @@
   - `reconciliation.py` performs scheduled drift detection.
 - `kubeport/kubeport/doctype/`
   - Frappe document models and form scripts.
-  - Main DocTypes are `Kubernetes Cluster`, `Helm Repository`, `Helm Chart`, `Helm Release`, `Service Bundle`, and `Helm Chart Version`.
+  - Main DocTypes are `Kubernetes Cluster`, `Helm Repository`, `Helm Chart`, `Helm Release`, `Service Bundle`, `Frappe Site`, and `Helm Chart Version`.
 - `kubeport/tests/`
   - Cross-module unit tests for discovery, tasks, reconciliation, hooks, manifests, patches, and Helm utilities.
 - `kubeport/patches/`
@@ -96,6 +96,20 @@ Key behavior:
 - Tracks bundle lifecycle state.
 - Uses per-run operation tokens so stale apply/delete workers do not overwrite current bundle state.
 
+### `Frappe Site`
+
+Purpose:
+- Stores desired state for a Frappe site to be created on a running Frappe bench.
+
+Key behavior:
+- Links to a `Helm Release` (the target bench).
+- Stores site name, admin password, database credentials, and apps to install.
+- Queues site creation through background jobs.
+- Background job submits a Kubernetes Job that runs `bench new-site` with templated environment variables.
+- Reuses pod discovery logic from `kubeport.utils.discovery` to find a running bench pod and extract its image and volume mounts dynamically.
+- Reconciliation verifies site existence via exec-based discovery (checks for `site_config.json`) rather than trusting Job exit code.
+- Uses per-run operation tokens for concurrency safety.
+
 ## API Layer
 
 ### `kubeport.api.__init__`
@@ -116,6 +130,13 @@ Provides:
 - partial-error reporting in one response payload
 
 This is one of the most important files for the current control-plane UX.
+
+### `kubeport.api.site`
+
+Provides:
+- `get_site_job_logs(site_docname)` — fetches stdout from the site creation Job pod for display in the Frappe Site form.
+
+This read-only endpoint supports the creation workflow without blocking the form thread.
 
 ## Utility Layer
 
@@ -181,12 +202,28 @@ Responsibilities:
 - apply and delete raw manifests in background workers
 - update state and publish realtime events
 
+### `site_tasks.py`
+
+Responsibilities:
+- discover a live bench pod using existing discovery utilities
+- dynamically extract container image and sites PVC mount from the reference pod
+- construct and submit a Kubernetes Job that runs `bench new-site`
+- realtime event publication
+
+Notable quality point:
+- reuses `_select_site_discovery_pod` and `_exec_list_sites` from the discovery module so site creation behavior mirrors live discovery.
+- volumes and image are discovered dynamically from running pods, making the implementation resilient to chart version changes.
+
 ### `reconciliation.py`
 
 Responsibilities:
 - scheduled drift detection every five minutes
 - Helm release health checks through `helm status`
 - Service Bundle health checks through resource existence
+- Frappe site creation status verification through ground-truth site existence checks
+
+Notable quality point:
+- Frappe site reconciliation checks actual `site_config.json` existence on the bench (via exec-based discovery) rather than blindly trusting Job exit codes, which avoids false negatives when `--install-app` triggers non-fatal warnings.
 
 This file keeps the control plane honest after out-of-band cluster changes.
 
@@ -207,13 +244,14 @@ The strongest test coverage today is around:
 
 - discovery behavior
 - API timeout usage
-- reconciliation state transitions
+- reconciliation state transitions (including Frappe site status verification)
 - manifest validation
 - Helm worker concurrency safeguards
 - cleanup and migration patches
 
 The weakest coverage today is around:
 
+- Frappe site creation job submission and pod discovery (future work)
 - repository sync behavior end to end
 - chart metadata behavior end to end
 - broader integration flows across DocTypes and workers

@@ -12,7 +12,8 @@ The control plane is functional in these areas:
 - `Helm Chart` stores chart metadata and available versions discovered from repositories.
 - `Helm Release` persists desired release state with identity scoped to cluster + namespace + release name, and deploys or uninstalls via background jobs.
 - `Service Bundle` persists raw manifest bundles and applies or deletes them via the Kubernetes API with stale-worker protection.
-- Reconciliation sweeps compare desired state with live cluster state and mark drift as `Degraded`.
+- `Frappe Site` persists desired site intent (site name, admin password, apps to install) and submits Kubernetes Jobs that run `bench new-site` inside running benches.
+- Reconciliation sweeps compare desired state with live cluster state and mark drift as `Degraded`. Site creation status is verified against actual site existence on the bench (not just Job exit code) to avoid false negatives.
 
 The current milestone is robustness, especially around discovery and asynchronous cluster operations:
 
@@ -37,7 +38,8 @@ The current milestone is robustness, especially around discovery and asynchronou
 - Helm chart metadata and default values retrieval.
 - Helm release deploy and uninstall workflows through background jobs.
 - Raw manifest deployment through `Service Bundle`.
-- Periodic reconciliation for Helm releases and Service Bundles.
+- Periodic reconciliation for Helm releases, Service Bundles, and Frappe site creation Jobs.
+- Frappe site creation workflow: submit Kubernetes Jobs that run `bench new-site` inside running benches, with robust status tracking that checks actual site existence rather than trusting Job exit codes.
 - Legacy migration from `Kubernetes Manifest` to `Service Bundle`.
 - Cleanup patching for removed legacy DocTypes.
 
@@ -45,7 +47,8 @@ The current milestone is robustness, especially around discovery and asynchronou
 
 The main gaps still visible in the codebase are:
 
-- Discovery is observational only. There is no higher-level workflow yet that turns discovered benches or sites into first-class persisted objects beyond existing desired-state records.
+- Site lifecycle beyond creation. `Frappe Site` currently supports creation only. Future work includes: deletion (`bench drop-site`), migration (`bench migrate`), backup/restore.
+- Site discovery remains observational only — discovered sites are not automatically linked to `Frappe Site` documents.
 - Site discovery is intentionally narrow and currently recognizes official `erpnext` chart releases only.
 - Service Bundle support is limited to a fixed allowlist of built-in Kubernetes resource kinds; CRDs and arbitrary custom resources are not supported.
 - Health reporting is still coarse:

@@ -38,11 +38,13 @@ The current milestone is robustness. Most of the meaningful recent work is about
 
 - Helm installs, upgrades, uninstalls, repo add, and repo sync run in background jobs.
 - Raw manifest apply and delete operations run in background jobs.
+- Frappe site creation runs as a Kubernetes Job submitted directly (not via Helm) and is tracked through reconciliation.
 - Realtime events trigger form refreshes after worker updates.
 - Helm worker execution now uses targeted field reads and explicit updates, which is the correct direction for concurrency safety.
 - Helm repository sync jobs now use per-run tokens so stale workers cannot overwrite the newest sync attempt.
 - Helm repository sync now rebuilds chart/version inventory from `helm search repo --versions`, clears cached default values when the latest chart version changes, and prunes stale charts that disappeared upstream.
 - Service Bundle workers now use per-run operation tokens and a distinct `Deleting` state so stale apply/delete workers cannot overwrite the latest bundle intent.
+- Frappe site creation workers use per-run operation tokens for concurrency safety and detect site existence via exec-based discovery (the same ground truth that users see in cluster discovery).
 
 ### Live Discovery
 
@@ -70,6 +72,7 @@ The current milestone is robustness. Most of the meaningful recent work is about
 - Release-level discovery failures are isolated and returned as partial errors instead of failing the whole cluster response.
 - Worker tasks skip stale jobs when the persisted document status no longer matches the queued operation.
 - Repo sync tasks roll back partial chart upserts before marking a sync as failed or stale.
+- Frappe site creation status verification checks ground truth: whether `site_config.json` actually exists on the bench. If the site exists despite a non-zero Job exit code (common in ERPNext when `--install-app` migrations emit warnings), the site is correctly marked Active instead of Failed.
 - Reconciliation can move documents back from `Degraded` to `Deployed` when live state recovers.
 
 ## What The Robustness Milestone Means In Practice
@@ -152,6 +155,8 @@ This is the concise record of work already reflected in the codebase:
 - Implemented live site discovery for Frappe benches.
 - Hardened discovery with partial errors, infra-pod filtering, fallback pod matching, and running-workload checks.
 - Hardened workers with stale-job protection and targeted field reads.
+- Implemented Frappe site creation workflow via Kubernetes Jobs.
+- Implemented ground-truth-based reconciliation for site creation: verifies actual site existence to avoid false negatives on non-zero Job exit codes.
 - Added focused tests for discovery, tasks, reconciliation, manifest validation, Helm kubeconfig generation, hooks, and cleanup patches.
 
 ## Bottom Line
