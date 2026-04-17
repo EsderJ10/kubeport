@@ -2,7 +2,7 @@
 
 ## Project
 
-Kubeport is a Frappe app for managing Kubernetes clusters, Helm releases, and raw manifests from the Frappe UI. Treat it as a control plane: cluster state is queried live, while desired-state records remain in MariaDB.
+Kubeport is a Frappe app for managing Kubernetes clusters, Helm releases, and raw manifests (via Service Bundles) from the Frappe UI. Treat it as a control plane: cluster state is queried live, while desired-state records remain in MariaDB.
 
 ## Stack
 
@@ -51,8 +51,10 @@ Kubeport is a Frappe app for managing Kubernetes clusters, Helm releases, and ra
 
 ## Current Feature Shape
 
-- `Kubernetes Cluster` owns cluster connectivity and live discovery UI.
-- Live Helm release discovery is exposed through whitelisted API methods, not through persisted child rows.
+- `Kubernetes Cluster` owns cluster connectivity and live discovery UI. It supports kubeconfig endpoint normalization and dev-only TLS verification bypass for local environments.
+- Live Helm release discovery is exposed through whitelisted API methods (Live Query architecture), not through persisted child rows or Virtual DocTypes.
+- `Helm Release` identity is scoped to `cluster/namespace/release_name` to accurately reflect real Helm release scope.
+- `Service Bundle` persists desired raw-manifest intent for supported Kubernetes resource kinds, replacing legacy manifest models.
 - Frappe site discovery should be treated as cluster-scoped, live, and non-blocking.
 - For this codebase, prefer async form calls plus client rendering over framework features that load external data during document fetch.
 - Cluster discovery returns a payload with `benches`, `sites`, and `errors`; partial release-level failures are expected and should not fail the whole response.
@@ -77,6 +79,7 @@ Kubeport is a Frappe app for managing Kubernetes clusters, Helm releases, and ra
 - Long-running or failure-prone external calls should degrade gracefully and return partial results when possible.
 - When adding a new API or form behavior, update or add tests close to the changed module.
 - Prefer background jobs for Helm operations and other external calls that can block web requests.
+- Background workers (e.g., Helm syncs, Service Bundle applies) must use per-run operation/sync tokens to defend against duplicate execution or stale jobs overwriting newer intent.
 - Avoid duplicate release actions while a release is already `In Progress` or `Uninstalling`.
-- When reading `Helm Release` state inside background tasks, prefer targeted field reads and explicit updates over broad document reloads when concurrency matters.
+- When reading `Helm Release` or `Service Bundle` state inside background tasks, prefer targeted field reads and explicit updates over broad document reloads when concurrency matters.
 - For discovery and deploy bugs, document whether the root cause is code-path related or a real cluster/runtime problem. Do not blur those two classes of failure.
