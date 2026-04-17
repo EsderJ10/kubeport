@@ -301,9 +301,15 @@ def _job_name(site_name: str, token: str) -> str:
 
 
 def _safe_label_value(value: str) -> str:
-	"""Truncate and sanitize a string for use as a K8s label value (max 63 chars)."""
-	sanitized = re.sub(r"[^a-zA-Z0-9._/-]", "-", value)
-	return sanitized[:63].strip("-.")
+	"""Truncate and sanitize a string for use as a K8s label value (max 63 chars).
+
+	K8s label values allow only alphanumerics, '-', '_', and '.' — slashes and
+	other characters (including the '/' that appear in Frappe docnames) are
+	replaced with '-'.
+	"""
+	sanitized = re.sub(r"[^a-zA-Z0-9._-]", "-", value)
+	sanitized = re.sub(r"-+", "-", sanitized).strip("-.")
+	return sanitized[:63]
 
 
 def _parse_install_apps(raw: str | None) -> list[str]:
