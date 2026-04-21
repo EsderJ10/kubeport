@@ -13,10 +13,18 @@ background task; reconciliation polls the Job status every 5 minutes to detect
 completion or failure.
 """
 
+import re
 import secrets
 
 import frappe
 from frappe.model.document import Document
+
+# Frappe app names are python module names: lowercase, start with a letter,
+# only letters/digits/underscore. We also allow ``-`` because a few published
+# apps on PyPI use it. No other characters are permitted — ``install_apps`` is
+# interpolated into a shell command, so accepting shell metacharacters here
+# would create an injection path in the site-creation Job.
+_APP_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 class FrappeSite(Document):
@@ -32,6 +40,7 @@ class FrappeSite(Document):
 		bench_release: DF.Link
 		cluster: DF.Data | None
 		creation_job_name: DF.Data | None
+		creation_job_token: DF.Data | None
 		db_root_password: DF.Password | None
 		db_root_secret: DF.Data | None
 		db_root_secret_key: DF.Data | None
@@ -44,9 +53,6 @@ class FrappeSite(Document):
 		status: DF.Literal["Draft", "In Progress", "Active", "Failed"]
 		status_detail: DF.SmallText | None
 	# end: auto-generated types
-
-	def autoname(self):
-		self.name = f"{self.bench_release}/{self.site_name}"
 
 	def validate(self):
 		"""Populate derived fields from bench_release and guard identity immutability."""
@@ -68,6 +74,22 @@ class FrappeSite(Document):
 				"Either DB Root Password or DB Root Secret must be provided. "
 				"DB Root Secret (referencing an existing Kubernetes Secret) is recommended."
 			)
+
+		self._validate_install_apps()
+
+	def _validate_install_apps(self):
+		if not self.install_apps:
+			return
+		for raw_line in self.install_apps.splitlines():
+			app = raw_line.strip()
+			if not app:
+				continue
+			if not _APP_NAME_RE.match(app):
+				frappe.throw(
+					f"Invalid app name '{app}' in Install Apps. "
+					"App names must start with a lowercase letter and contain only "
+					"lowercase letters, digits, underscores, or hyphens."
+				)
 
 	@frappe.whitelist()
 	def create_site(self):
@@ -91,6 +113,11 @@ class FrappeSite(Document):
 		self.db_set("status", "In Progress")
 		self.db_set("status_detail", "")
 		self.db_set("operation_token", operation_token)
+		# Reset the job-launching token; the worker sets it again once the Job
+		# is actually submitted.  Clearing here prevents a stale reconciliation
+		# from matching on a fresh operation_token.
+		self.db_set("creation_job_token", "")
+		self.db_set("creation_job_name", "")
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.create_site_task",
 			site_docname=self.name,
@@ -103,4 +130,46 @@ class FrappeSite(Document):
 			"Status will update automatically when the job completes.",
 			alert=True,
 			indicator="blue",
+		)
+
+	@frappe.whitelist()
+	def cancel_site(self):
+		"""Cancel an in-progress site creation: delete the Job and mark Failed.
+
+		Only valid while status is ``In Progress``.  Rotates the operation
+		token so any concurrent worker or reconciler holding the old token
+		is a no-op.
+		"""
+		if self.status != "In Progress":
+			frappe.throw("Cancel is only available while a site creation is in progress.")
+
+		job_name = self.creation_job_name
+		# Rotate the token before enqueueing so any in-flight worker sees a
+		# mismatch and exits cleanly.
+		self.db_set("operation_token", secrets.token_hex(16))
+		user = frappe.session.user or "unknown"
+		self.db_set("status", "Failed")
+		self.db_set("status_detail", f"Cancelled by {user}.")
+		self.db_set("creation_job_token", "")
+
+		if job_name:
+			frappe.enqueue(
+				"kubeport.tasks.site_tasks.cancel_site_task",
+				cluster=self.cluster,
+				namespace=self.namespace or "default",
+				job_name=job_name,
+				queue="short",
+				enqueue_after_commit=True,
+			)
+
+		frappe.publish_realtime(
+			"frappe_site_status_update",
+			{"site_docname": self.name, "status": "Failed"},
+			doctype="Frappe Site",
+			docname=self.name,
+		)
+		frappe.msgprint(
+			f"Cancellation requested for '{self.site_name}'.",
+			alert=True,
+			indicator="orange",
 		)

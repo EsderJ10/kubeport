@@ -11,6 +11,8 @@ Covers three DocTypes:
 - **Frappe Site** — polls Kubernetes Job status for in-progress site creations
 """
 
+from typing import Any
+
 import frappe
 
 from kubeport.utils.k8s_resources import check_resources_exist
@@ -86,49 +88,80 @@ def _reconcile_helm_releases():
 
 
 def _reconcile_service_bundles():
-	"""Check all Deployed Service Bundles for resource drift."""
+	"""Check all Deployed Service Bundles for resource drift.
+
+	Groups bundles by cluster so only one ``ApiClient`` is built per cluster
+	per reconciliation tick.
+	"""
+	from collections import defaultdict
+
+	from kubeport.utils.k8s_client import get_k8s_api_client
+
 	deployed_bundles = frappe.get_all(
 		"Service Bundle",
 		filters={"status": ["in", _HEALTHY_RELEASE_STATUSES]},
 		fields=["name", "cluster", "namespace", "content", "status"],
 	)
 
+	by_cluster: dict[str, list["frappe._dict"]] = defaultdict(list)
 	for bundle in deployed_bundles:
-		try:
-			is_healthy, detail = check_resources_exist(
-				cluster_name=bundle.cluster,
-				manifest_json=bundle.content,
-				namespace=bundle.namespace or "default",
-				doctype="Service Bundle",
-				docname=bundle.name,
-			)
-			next_status = "Deployed" if is_healthy else "Degraded"
-			if bundle.status != next_status:
-				frappe.db.set_value("Service Bundle", bundle.name, "status", next_status)
-			frappe.db.set_value(
-				"Service Bundle",
-				bundle.name,
-				"status_detail",
-				"" if is_healthy else _truncate_status_detail(detail),
-			)
+		by_cluster[bundle.cluster].append(bundle)
 
-			if not is_healthy:
-				frappe.log_error(
-					title=f"State Drift Detected: Service Bundle {bundle.name}",
-					message=detail,
-				)
+	for cluster_name, bundles in by_cluster.items():
+		try:
+			api_client = get_k8s_api_client(cluster_name)
 		except Exception as e:
-			frappe.db.set_value("Service Bundle", bundle.name, "status", "Degraded")
-			frappe.db.set_value(
-				"Service Bundle",
-				bundle.name,
-				"status_detail",
-				_truncate_status_detail(f"Reconciliation error: {e}"),
-			)
-			frappe.log_error(
-				title=f"Reconciliation Error: Service Bundle {bundle.name}",
-				message=str(e),
-			)
+			for bundle in bundles:
+				frappe.db.set_value("Service Bundle", bundle.name, "status", "Degraded")
+				frappe.db.set_value(
+					"Service Bundle",
+					bundle.name,
+					"status_detail",
+					_truncate_status_detail(f"Reconciliation error: {e}"),
+				)
+				frappe.log_error(
+					title=f"Reconciliation Error: Service Bundle {bundle.name}",
+					message=str(e),
+				)
+			continue
+
+		for bundle in bundles:
+			try:
+				is_healthy, detail = check_resources_exist(
+					cluster_name=bundle.cluster,
+					manifest_json=bundle.content,
+					namespace=bundle.namespace or "default",
+					doctype="Service Bundle",
+					docname=bundle.name,
+					api_client=api_client,
+				)
+				next_status = "Deployed" if is_healthy else "Degraded"
+				if bundle.status != next_status:
+					frappe.db.set_value("Service Bundle", bundle.name, "status", next_status)
+				frappe.db.set_value(
+					"Service Bundle",
+					bundle.name,
+					"status_detail",
+					"" if is_healthy else _truncate_status_detail(detail),
+				)
+
+				if not is_healthy:
+					frappe.log_error(
+						title=f"State Drift Detected: Service Bundle {bundle.name}",
+						message=detail,
+					)
+			except Exception as e:
+				frappe.db.set_value("Service Bundle", bundle.name, "status", "Degraded")
+				frappe.db.set_value(
+					"Service Bundle",
+					bundle.name,
+					"status_detail",
+					_truncate_status_detail(f"Reconciliation error: {e}"),
+				)
+				frappe.log_error(
+					title=f"Reconciliation Error: Service Bundle {bundle.name}",
+					message=str(e),
+				)
 
 
 def _reconcile_frappe_sites():
@@ -137,7 +170,13 @@ def _reconcile_frappe_sites():
 	Transitions sites to Active (job succeeded) or Failed (job failed).
 	Sites whose Job has already been cleaned up by ttlSecondsAfterFinished
 	are left as-is so a human can investigate; a warning is logged.
+
+	All status writes re-check ``operation_token`` against ``creation_job_token``
+	so that a concurrent re-creation (e.g. user clicked Force Create again)
+	cannot be overwritten by the old Job's terminal state.
 	"""
+	from collections import defaultdict
+
 	from kubernetes import client
 	from kubernetes.client.rest import ApiException
 
@@ -146,117 +185,165 @@ def _reconcile_frappe_sites():
 	in_progress = frappe.get_all(
 		"Frappe Site",
 		filters={"status": "In Progress"},
-		fields=["name", "cluster", "namespace", "creation_job_name", "bench_release", "site_name"],
+		fields=[
+			"name", "cluster", "namespace",
+			"creation_job_name", "creation_job_token",
+			"bench_release", "site_name",
+		],
 	)
 
+	# Group by cluster so we only build one ApiClient per cluster per tick.
+	by_cluster: dict[str, list["frappe._dict"]] = defaultdict(list)
 	for site in in_progress:
-		if not site.creation_job_name:
-			continue
+		if site.creation_job_name:
+			by_cluster[site.cluster].append(site)
 
+	for cluster_name, sites in by_cluster.items():
 		try:
-			api_client = get_k8s_api_client(site.cluster)
-			batch_v1 = client.BatchV1Api(api_client=api_client)
-			job = batch_v1.read_namespaced_job(
-				name=site.creation_job_name,
-				namespace=site.namespace or "default",
-			)
-
-			succeeded = (job.status.succeeded or 0) if job.status else 0
-			failed = (job.status.failed or 0) if job.status else 0
-
-			if succeeded > 0:
-				frappe.db.set_value("Frappe Site", site.name, "status", "Active")
-				frappe.db.set_value("Frappe Site", site.name, "status_detail", "")
-				frappe.publish_realtime(
-					"frappe_site_status_update",
-					{"site_docname": site.name, "status": "Active"},
-					doctype="Frappe Site",
-					docname=site.name,
-				)
-			elif failed > 0:
-				# The Job pod exited non-zero, but bench new-site can do this even on
-				# success (e.g. when --install-app triggers migrations that log warnings).
-				# Check ground truth first: does the site actually exist on the bench?
-				core_v1 = client.CoreV1Api(api_client=api_client)
-				if _site_exists_in_bench(site, core_v1):
-					# Site is present on the bench — Job exit code was a false negative.
-					frappe.db.set_value("Frappe Site", site.name, "status", "Active")
-					frappe.db.set_value("Frappe Site", site.name, "status_detail", "")
-					frappe.publish_realtime(
-						"frappe_site_status_update",
-						{"site_docname": site.name, "status": "Active"},
-						doctype="Frappe Site",
-						docname=site.name,
-					)
-				else:
-					# Site is genuinely absent — fetch pod logs for a useful error message.
-					detail = _extract_job_failure_detail(
-						core_v1=core_v1,
-						job=job,
-						namespace=site.namespace or "default",
-					)
-					frappe.db.set_value("Frappe Site", site.name, "status", "Failed")
-					frappe.db.set_value(
-						"Frappe Site",
-						site.name,
-						"status_detail",
-						_truncate_status_detail(detail),
-					)
-					frappe.log_error(
-						title=f"Frappe Site Creation Failed: {site.name}",
-						message=detail,
-					)
-					frappe.publish_realtime(
-						"frappe_site_status_update",
-						{"site_docname": site.name, "status": "Failed"},
-						doctype="Frappe Site",
-						docname=site.name,
-					)
-			# If neither succeeded nor failed, the Job is still running — leave status as-is.
-
-		except ApiException as e:
-			if e.status == 404:
-				# Job was cleaned up (ttlSecondsAfterFinished elapsed) before we read it.
-				frappe.logger("kubeport").warning(
-					"Creation Job '%s' for Frappe Site '%s' no longer exists "
-					"(likely cleaned up by TTL). Site status left as 'In Progress'.",
-					site.creation_job_name,
-					site.name,
-				)
-			else:
+			api_client = get_k8s_api_client(cluster_name)
+		except Exception as e:
+			for site in sites:
 				frappe.log_error(
 					title=f"Frappe Site Reconciliation Error: {site.name}",
 					message=str(e),
 				)
-		except Exception as e:
-			frappe.log_error(
-				title=f"Frappe Site Reconciliation Error: {site.name}",
-				message=str(e),
-			)
+			continue
+
+		batch_v1 = client.BatchV1Api(api_client=api_client)
+		core_v1 = client.CoreV1Api(api_client=api_client)
+
+		for site in sites:
+			try:
+				job = batch_v1.read_namespaced_job(
+					name=site.creation_job_name,
+					namespace=site.namespace or "default",
+				)
+
+				succeeded = (job.status.succeeded or 0) if job.status else 0
+				failed = (job.status.failed or 0) if job.status else 0
+
+				if succeeded > 0:
+					_finalize_site_status(site, "Active", "")
+				elif failed > 0:
+					# The Job pod exited non-zero, but bench new-site can do this even on
+					# success (e.g. when --install-app triggers migrations that log warnings).
+					# Check ground truth first: does the site actually exist on the bench?
+					if _site_exists_in_bench(site, core_v1):
+						_finalize_site_status(site, "Active", "")
+					else:
+						detail = _extract_job_failure_detail(
+							core_v1=core_v1,
+							job=job,
+							namespace=site.namespace or "default",
+						)
+						if _finalize_site_status(site, "Failed", _truncate_status_detail(detail)):
+							frappe.log_error(
+								title=f"Frappe Site Creation Failed: {site.name}",
+								message=detail,
+							)
+				# If neither succeeded nor failed, the Job is still running — leave status as-is.
+
+			except ApiException as e:
+				if e.status == 404:
+					# Job was cleaned up (ttlSecondsAfterFinished elapsed) before we read it.
+					frappe.logger("kubeport").warning(
+						"Creation Job '%s' for Frappe Site '%s' no longer exists "
+						"(likely cleaned up by TTL). Site status left as 'In Progress'.",
+						site.creation_job_name,
+						site.name,
+					)
+				else:
+					frappe.log_error(
+						title=f"Frappe Site Reconciliation Error: {site.name}",
+						message=str(e),
+					)
+			except Exception as e:
+				frappe.log_error(
+					title=f"Frappe Site Reconciliation Error: {site.name}",
+					message=str(e),
+				)
+
+
+def _finalize_site_status(
+	site: "frappe._dict",
+	next_status: str,
+	detail: str,
+) -> bool:
+	"""Write a terminal status for a Frappe Site, guarded by the operation token.
+
+	Returns True if the transition was applied, False if it was skipped
+	because a concurrent operation has superseded this Job.
+	"""
+	current = frappe.db.get_value(
+		"Frappe Site",
+		site.name,
+		["operation_token", "status"],
+		as_dict=True,
+	)
+	if not current or current.get("status") != "In Progress":
+		return False
+	if current.get("operation_token") != site.creation_job_token:
+		frappe.logger("kubeport").info(
+			"Skipping stale reconciliation for Frappe Site '%s' — current "
+			"operation_token does not match the token that launched job '%s'.",
+			site.name,
+			site.creation_job_name,
+		)
+		return False
+
+	frappe.db.set_value("Frappe Site", site.name, "status", next_status)
+	frappe.db.set_value("Frappe Site", site.name, "status_detail", detail)
+	frappe.publish_realtime(
+		"frappe_site_status_update",
+		{"site_docname": site.name, "status": next_status},
+		doctype="Frappe Site",
+		docname=site.name,
+	)
+	return True
 
 
 def _site_exists_in_bench(site: "frappe._dict", core_v1: "client.CoreV1Api") -> bool:
-	"""Return True if the site's site_config.json exists on the bench.
+	"""Return True if the site is both present and functional on the bench.
 
-	Uses the same exec-based discovery that the cluster discovery endpoint uses,
-	so this is the same ground truth as what the user sees in the discovery UI.
-	Returns False on any error so callers safely fall back to marking Failed.
+	A presence-only check (``site_config.json`` exists) is insufficient:
+	``bench new-site`` writes that file after creating the database but
+	**before** running the framework schema install or per-app installs.
+	A Job that fails during those later stages would leave a broken site
+	that still looks "present" to a directory scan.
+
+	We therefore run a two-stage ground-truth check:
+
+	1. Fast: the site directory exists (reuses the discovery helper).
+	2. Strong: ``bench --site <name> list-apps`` exits 0 inside the bench
+	   pod, which requires a reachable DB and populated framework schema.
+
+	Any failure along the way returns False so callers safely fall back
+	to the ``Failed`` branch.
 	"""
 	from kubeport.utils.discovery import _exec_list_sites, _select_site_discovery_pod
 
 	try:
 		release = frappe.get_doc("Helm Release", site.bench_release)
+		namespace = site.namespace or "default"
 		ref_pod = _select_site_discovery_pod(
 			core_v1=core_v1,
-			namespace=site.namespace or "default",
+			namespace=namespace,
 			release_name=release.release_name,
 		)
 		existing_sites = _exec_list_sites(
 			core_v1=core_v1,
-			namespace=site.namespace or "default",
+			namespace=namespace,
 			pod=ref_pod,
 		)
-		return site.site_name in existing_sites
+		if site.site_name not in existing_sites:
+			return False
+
+		return _exec_bench_site_functional(
+			core_v1=core_v1,
+			namespace=namespace,
+			pod=ref_pod,
+			site_name=site.site_name,
+		)
 	except Exception as e:
 		frappe.logger("kubeport").warning(
 			"Could not verify site existence for '%s' after Job failure: %s",
@@ -264,6 +351,68 @@ def _site_exists_in_bench(site: "frappe._dict", core_v1: "client.CoreV1Api") -> 
 			e,
 		)
 		return False
+
+
+def _exec_bench_site_functional(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	pod: "client.V1Pod",
+	site_name: str,
+) -> bool:
+	"""Return True iff ``bench --site <name> list-apps`` exits 0 inside the pod.
+
+	That bench subcommand opens a DB connection and reads the installed-app
+	list from the framework schema. A zero exit is a tight proxy for "the
+	site is usable": it requires both a reachable DB and a populated schema.
+
+	We gate success on an ``__OK__`` sentinel instead of parsing the command
+	output because the kubernetes stream API does not expose the remote exit
+	code without switching to the WebSocket client.
+	"""
+	from kubernetes.stream import stream
+
+	metadata = getattr(pod, "metadata", None)
+	spec = getattr(pod, "spec", None)
+	if not metadata or not metadata.name:
+		return False
+
+	container_name = ""
+	if spec and spec.containers:
+		container_name = spec.containers[0].name or ""
+
+	# Positional arg ``$1`` keeps site_name out of any direct shell-expansion
+	# context: the value is bound by the exec layer, not interpolated by the
+	# caller.  The sentinel lets us distinguish a zero exit from noisy output.
+	command = [
+		"sh",
+		"-lc",
+		'bench --site "$1" list-apps >/dev/null 2>&1 && echo __OK__ || echo __FAIL__',
+		"sh",
+		site_name,
+	]
+	exec_kwargs: dict[str, Any] = {
+		"name": metadata.name,
+		"namespace": namespace,
+		"command": command,
+		"stderr": True,
+		"stdin": False,
+		"stdout": True,
+		"tty": False,
+		"_request_timeout": 30.0,
+	}
+	if container_name:
+		exec_kwargs["container"] = container_name
+
+	try:
+		output = stream(core_v1.connect_get_namespaced_pod_exec, **exec_kwargs)
+	except Exception as e:
+		frappe.logger("kubeport").warning(
+			"bench list-apps exec failed for site '%s' in namespace '%s': %s",
+			site_name, namespace, e,
+		)
+		return False
+
+	return "__OK__" in (output or "")
 
 
 def _extract_job_failure_detail(

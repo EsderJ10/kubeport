@@ -15,6 +15,7 @@
   "status",
   "status_detail",
   "creation_job_name",
+  "creation_job_token",
   "operation_token",
   "section_break_credentials",
   "admin_password",
@@ -26,7 +27,9 @@
   "db_root_secret",
   "db_root_secret_key",
   "section_break_actions",
-  "create_site_btn"
+  "create_site_btn",
+  "view_job_logs_btn",
+  "cancel_site_btn"
  ],
  "fields": [
   {
@@ -89,6 +92,13 @@
    "fieldtype": "Data",
    "hidden": 1,
    "label": "Creation Job Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "creation_job_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Creation Job Token",
    "read_only": 1
   },
   {
@@ -163,6 +173,16 @@
    "fieldname": "create_site_btn",
    "fieldtype": "Button",
    "label": "Create Site"
+  },
+  {
+   "fieldname": "view_job_logs_btn",
+   "fieldtype": "Button",
+   "label": "View Job Logs"
+  },
+  {
+   "fieldname": "cancel_site_btn",
+   "fieldtype": "Button",
+   "label": "Cancel Creation"
   }
  ],
  "grid_page_length": 50,

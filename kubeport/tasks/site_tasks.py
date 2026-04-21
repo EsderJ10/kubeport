@@ -34,6 +34,10 @@ from kubeport.utils.k8s_resources import apply_resource
 
 _STATUS_DETAIL_LIMIT = 500
 _JOB_TTL_SECONDS = 7200  # 2 h — enough for reconciliation (5-min cadence) to read result
+# Duplicated from frappe_site.py on purpose: if a malformed value ever reaches
+# the worker (direct DB write, schema import, etc.), we must not interpolate
+# shell metacharacters into the bench command string.
+_APP_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def create_site_task(site_docname: str, operation_token: str):
@@ -64,8 +68,7 @@ def create_site_task(site_docname: str, operation_token: str):
 			release_name=release_name,
 		)
 
-		image = _extract_image(ref_pod)
-		sites_volume, sites_mount = _extract_sites_volume(api_client, ref_pod)
+		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
 
 		job_name = _job_name(doc.site_name, operation_token)
 		install_apps = _parse_install_apps(doc.install_apps)
@@ -78,7 +81,6 @@ def create_site_task(site_docname: str, operation_token: str):
 			namespace=namespace,
 			site_docname=site_docname,
 			site_name=doc.site_name,
-			image=image,
 			db_type=db_type,
 			install_apps=install_apps,
 			force_create=bool(doc.force_create),
@@ -86,8 +88,7 @@ def create_site_task(site_docname: str, operation_token: str):
 			db_root_password=db_root_password,
 			db_root_secret=doc.db_root_secret or "",
 			db_root_secret_key=doc.db_root_secret_key or "mariadb-root-password",
-			sites_volume=sites_volume,
-			sites_mount=sites_mount,
+			ref_spec=ref_spec,
 		)
 
 		apply_resource(api_client, job_manifest, namespace)
@@ -96,6 +97,7 @@ def create_site_task(site_docname: str, operation_token: str):
 			return
 
 		doc.db_set("creation_job_name", job_name)
+		doc.db_set("creation_job_token", operation_token)
 		frappe.publish_realtime(
 			"frappe_site_status_update",
 			{"site_docname": site_docname, "status": "In Progress", "job_name": job_name},
@@ -121,6 +123,37 @@ def create_site_task(site_docname: str, operation_token: str):
 		)
 
 
+def cancel_site_task(cluster: str, namespace: str, job_name: str):
+	"""Background task: best-effort delete the site-creation Job.
+
+	Called from ``FrappeSite.cancel_site``.  Document status has already
+	been rotated to Failed before enqueue, so any outcome here (success,
+	404, or error) is purely about cluster cleanup.
+	"""
+	from kubernetes.client.rest import ApiException
+
+	try:
+		api_client = get_k8s_api_client(cluster)
+		batch_v1 = client.BatchV1Api(api_client=api_client)
+		batch_v1.delete_namespaced_job(
+			name=job_name,
+			namespace=namespace,
+			propagation_policy="Background",
+		)
+	except ApiException as e:
+		if e.status == 404:
+			return
+		frappe.log_error(
+			title=f"Frappe Site Cancel: failed to delete Job '{job_name}'",
+			message=str(e),
+		)
+	except Exception as e:
+		frappe.log_error(
+			title=f"Frappe Site Cancel: failed to delete Job '{job_name}'",
+			message=str(e),
+		)
+
+
 # ---------------------------------------------------------------------------
 # Job manifest builders
 # ---------------------------------------------------------------------------
@@ -130,7 +163,6 @@ def _build_job_manifest(
 	namespace: str,
 	site_docname: str,
 	site_name: str,
-	image: str,
 	db_type: str,
 	install_apps: list[str],
 	force_create: bool,
@@ -138,11 +170,10 @@ def _build_job_manifest(
 	db_root_password: str,
 	db_root_secret: str,
 	db_root_secret_key: str,
-	sites_volume: dict[str, Any],
-	sites_mount: dict[str, Any],
+	ref_spec: dict[str, Any],
 ) -> dict[str, Any]:
 	bench_cmd = _bench_new_site_command(site_name, install_apps, force_create)
-	env = _build_env(
+	site_env = _build_env(
 		site_name=site_name,
 		db_type=db_type,
 		admin_password=admin_password,
@@ -150,6 +181,31 @@ def _build_job_manifest(
 		db_root_secret=db_root_secret,
 		db_root_secret_key=db_root_secret_key,
 	)
+	# Merge reference-pod env with our site-specific env. Our keys win on
+	# collision (explicit values override bench-chart defaults like SITE_NAME).
+	env = _merge_env(ref_spec.get("container_env") or [], site_env)
+
+	container: dict[str, Any] = {
+		"name": "create-site",
+		"image": ref_spec["image"],
+		"command": ["bash", "-c"],
+		"args": [bench_cmd],
+		"env": env,
+		"volumeMounts": ref_spec.get("volume_mounts") or [],
+	}
+	if ref_spec.get("container_env_from"):
+		container["envFrom"] = ref_spec["container_env_from"]
+	if ref_spec.get("container_resources"):
+		container["resources"] = ref_spec["container_resources"]
+	if ref_spec.get("container_security_context"):
+		container["securityContext"] = ref_spec["container_security_context"]
+
+	pod_spec: dict[str, Any] = {
+		"restartPolicy": "Never",
+		"containers": [container],
+		"volumes": ref_spec.get("volumes") or [],
+	}
+	pod_spec.update(ref_spec.get("pod_level") or {})
 
 	return {
 		"apiVersion": "batch/v1",
@@ -165,24 +221,19 @@ def _build_job_manifest(
 		"spec": {
 			"backoffLimit": 0,
 			"ttlSecondsAfterFinished": _JOB_TTL_SECONDS,
-			"template": {
-				"spec": {
-					"restartPolicy": "Never",
-					"containers": [
-						{
-							"name": "create-site",
-							"image": image,
-							"command": ["bash", "-c"],
-							"args": [bench_cmd],
-							"env": env,
-							"volumeMounts": [sites_mount],
-						}
-					],
-					"volumes": [sites_volume],
-				}
-			},
+			"template": {"spec": pod_spec},
 		},
 	}
+
+
+def _merge_env(
+	base: list[dict[str, Any]],
+	overrides: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+	override_names = {entry.get("name") for entry in overrides if entry.get("name")}
+	merged = [entry for entry in base if entry.get("name") not in override_names]
+	merged.extend(overrides)
+	return merged
 
 
 def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool) -> str:
@@ -241,53 +292,108 @@ def _build_env(
 # Pod inspection helpers
 # ---------------------------------------------------------------------------
 
-def _extract_image(pod: client.V1Pod) -> str:
-	spec = getattr(pod, "spec", None)
-	if spec and spec.containers:
-		image = spec.containers[0].image
-		if image:
-			return image
-	raise RuntimeError("Could not determine container image from reference pod.")
+# Pod-level fields we lift from the reference bench pod onto the Job's pod
+# template.  These are essential for the Job to schedule and run the same way
+# the bench workload does (auth to DB via ServiceAccount, pull private images,
+# land on the same node as a RWO sites PVC, etc.).  Field names are Python
+# attribute names on V1PodSpec; the manifest keys are derived via
+# _to_camel_case so they match the JSON K8s API contract.
+_POD_LEVEL_FIELDS = (
+	"service_account_name",
+	"image_pull_secrets",
+	"security_context",
+	"node_selector",
+	"tolerations",
+	"affinity",
+	"priority_class_name",
+	"runtime_class_name",
+)
 
 
-def _extract_sites_volume(
+def _clone_reference_pod_spec(
 	api_client: client.ApiClient,
 	pod: client.V1Pod,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-	"""Return (volume_dict, volume_mount_dict) for the sites directory."""
+) -> dict[str, Any]:
+	"""Lift the fields needed to reproduce the bench's runtime context on the Job.
+
+	Returns a dict describing the image, the container the sites volume is
+	mounted on, its env/envFrom/resources/securityContext, the subset of
+	volumes the container actually references, and whitelisted pod-level
+	fields (serviceAccountName, imagePullSecrets, securityContext, etc.).
+
+	Raises ``RuntimeError`` if the reference pod has no spec or the sites
+	volume is not mounted on any container — without the sites volume the
+	Job cannot run ``bench new-site``.
+	"""
 	spec = getattr(pod, "spec", None)
 	if not spec:
 		raise RuntimeError("Reference pod has no spec.")
 
-	sites_mount_obj = None
+	ref_container = _pick_sites_container(spec)
+
+	image = ref_container.image
+	if not image:
+		raise RuntimeError("Could not determine container image from reference pod.")
+
+	volume_mounts = _sanitize_list(api_client, ref_container.volume_mounts)
+	referenced_vol_names = {vm.get("name") for vm in volume_mounts if vm.get("name")}
+	volumes = [
+		vol for vol in _sanitize_list(api_client, spec.volumes)
+		if vol.get("name") in referenced_vol_names
+	]
+
+	pod_level: dict[str, Any] = {}
+	for attr in _POD_LEVEL_FIELDS:
+		value = getattr(spec, attr, None)
+		if value in (None, [], {}):
+			continue
+		serialized = api_client.sanitize_for_serialization(value)
+		if serialized in (None, [], {}):
+			continue
+		pod_level[_to_camel_case(attr)] = serialized
+
+	return {
+		"image": image,
+		"pod_level": pod_level,
+		"container_env": _sanitize_list(api_client, ref_container.env),
+		"container_env_from": _sanitize_list(api_client, ref_container.env_from),
+		"container_resources": (
+			api_client.sanitize_for_serialization(ref_container.resources)
+			if ref_container.resources else None
+		),
+		"container_security_context": (
+			api_client.sanitize_for_serialization(ref_container.security_context)
+			if ref_container.security_context else None
+		),
+		"volume_mounts": volume_mounts,
+		"volumes": volumes,
+	}
+
+
+def _pick_sites_container(spec: client.V1PodSpec) -> client.V1Container:
 	for container in (spec.containers or []):
 		for vm in (container.volume_mounts or []):
 			if vm.mount_path == FRAPPE_BENCH_SITES_PATH:
-				sites_mount_obj = vm
-				break
-		if sites_mount_obj:
-			break
+				return container
+	raise RuntimeError(
+		f"No volume mount for '{FRAPPE_BENCH_SITES_PATH}' found on reference pod. "
+		"Cannot construct site creation job without the sites volume."
+	)
 
-	if not sites_mount_obj:
-		raise RuntimeError(
-			f"No volume mount for '{FRAPPE_BENCH_SITES_PATH}' found on reference pod. "
-			"Cannot construct site creation job without the sites volume."
-		)
 
-	sites_volume_obj = None
-	for vol in (spec.volumes or []):
-		if vol.name == sites_mount_obj.name:
-			sites_volume_obj = vol
-			break
+def _sanitize_list(
+	api_client: client.ApiClient,
+	items: Any,
+) -> list[dict[str, Any]]:
+	if not items:
+		return []
+	serialized = api_client.sanitize_for_serialization(items) or []
+	return [entry for entry in serialized if isinstance(entry, dict)]
 
-	if not sites_volume_obj:
-		raise RuntimeError(
-			f"Volume '{sites_mount_obj.name}' referenced by sites mount not found in pod spec."
-		)
 
-	volume_dict = api_client.sanitize_for_serialization(sites_volume_obj)
-	mount_dict = api_client.sanitize_for_serialization(sites_mount_obj)
-	return volume_dict, mount_dict
+def _to_camel_case(snake: str) -> str:
+	head, *tail = snake.split("_")
+	return head + "".join(part.capitalize() for part in tail)
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +401,16 @@ def _extract_sites_volume(
 # ---------------------------------------------------------------------------
 
 def _job_name(site_name: str, token: str) -> str:
+	"""Build a K8s-safe Job name from the site name and operation token.
+
+	The token suffix makes the name per-operation unique so a retry on a
+	new operation_token produces a fresh Job instead of server-side-applying
+	over a previous one.  12 hex chars ≈ 48 bits of entropy — more than
+	enough to avoid accidental collisions across the token prefix.
+	"""
 	slug = re.sub(r"[^a-z0-9-]", "-", site_name.lower())
 	slug = re.sub(r"-+", "-", slug).strip("-")[:40]
-	return f"ks-{slug}-{token[:8]}"
+	return f"ks-{slug}-{token[:12]}"
 
 
 def _safe_label_value(value: str) -> str:
@@ -315,7 +428,15 @@ def _safe_label_value(value: str) -> str:
 def _parse_install_apps(raw: str | None) -> list[str]:
 	if not raw:
 		return []
-	return [app.strip() for app in raw.splitlines() if app.strip()]
+	apps: list[str] = []
+	for line in raw.splitlines():
+		app = line.strip()
+		if not app:
+			continue
+		if not _APP_NAME_RE.match(app):
+			raise ValueError(f"Invalid app name '{app}' in install_apps.")
+		apps.append(app)
+	return apps
 
 
 def _truncate(detail: str) -> str:
