@@ -1,7 +1,8 @@
 # Kubeport Changelog
 
-A decision log for future agents and contributors. Each entry records what changed, why the 
-approach was chosen, and what alternatives were rejected.
+Architecture decision log for contributors and agents. Each entry records what changed, why the approach was chosen, and what alternatives were rejected.
+
+**Format**: Entries are ordered newest-first. Each entry includes Context (the problem or need), the Decision (what was chosen and why), Rejected Alternatives (what was not chosen and why), and Implementation Details (how it was built).
 
 ---
 

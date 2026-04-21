@@ -1,80 +1,58 @@
-### Kubeport
+# Kubeport
 
-Kubeport is a Frappe app that acts as a Kubernetes control plane inside the Frappe UI. It manages cluster connectivity, Helm repositories, Helm releases, and raw Kubernetes manifests while keeping live cluster discovery separate from persisted desired state.
+A Frappe application that provides a Kubernetes control plane inside the Frappe/ERPNext UI. Kubeport manages cluster connectivity, Helm repositories, Helm releases, raw Kubernetes manifests, and Frappe site provisioning — all while keeping live cluster state separate from persisted desired state.
 
-### Current State
+## Overview
 
-The control plane is functional in these areas:
+Kubeport bridges the Frappe framework with Kubernetes by following a clear architectural principle: **desired state lives in MariaDB through Frappe DocTypes, while observed state is always queried live from the cluster**. This separation ensures that the UI never displays stale data and that cluster-mutating operations are always explicit, auditable, and asynchronous.
 
-- `Kubernetes Cluster` stores cluster credentials and exposes live discovery in the form UI.
-- `Helm Repository` syncs chart metadata from Helm repos into MariaDB.
-- Helm repository sync now rebuilds full chart/version inventory from the live repo index and prunes stale chart rows.
-- `Helm Chart` stores chart metadata and available versions discovered from repositories.
-- `Helm Release` persists desired release state with identity scoped to cluster + namespace + release name, and deploys or uninstalls via background jobs.
-- `Service Bundle` persists raw manifest bundles and applies or deletes them via the Kubernetes API with stale-worker protection.
-- `Frappe Site` persists desired site intent (site name, admin password, apps to install) and submits Kubernetes Jobs that run `bench new-site` inside running benches.
-- Reconciliation sweeps compare desired state with live cluster state and mark drift as `Degraded`. Site creation status is verified against actual site existence on the bench (not just Job exit code) to avoid false negatives.
+### Key Capabilities
 
-The current milestone is robustness, especially around discovery and asynchronous cluster operations:
+- **Cluster Connectivity** — connect to Kubernetes clusters via kubeconfig, bearer token, or in-cluster service account. Browser-side kubeconfig import with automatic endpoint normalization for containerized development.
+- **Helm Chart Catalog** — register Helm repositories and sync chart metadata (versions, default values) into the Frappe database with daily background refresh.
+- **Helm Release Management** — declare desired Helm releases (chart, version, namespace, values) and deploy or uninstall them through background jobs with idempotent `helm upgrade --install`.
+- **Raw Manifest Deployment** — define raw Kubernetes manifests in Service Bundles and apply or delete them via server-side apply, with a fixed allowlist of supported resource kinds.
+- **Frappe Site Provisioning** — create Frappe sites on running ERPNext benches by submitting Kubernetes Jobs that run `bench new-site`, with status verified through ground-truth site existence checks.
+- **Live Discovery** — cluster-scoped, read-only discovery of Helm releases and Frappe sites. Discovery results are rendered client-side and never persisted to the database.
+- **Reconciliation** — scheduled sweeps (every 5 minutes) compare desired state with live cluster state and flag drift as `Degraded`, with automatic recovery when live state returns to normal.
 
-- Discovery is live, read-only, and cluster-scoped.
-- Release discovery tolerates partial failures and still returns usable data.
-- Site discovery only targets running Frappe workload pods.
-- Pod lookup prefers stable labels and falls back to namespace scans when charts are inconsistent.
-- Background workers guard against stale duplicate work by re-checking document status before acting.
-- Cluster-mutating work is pushed off the web thread into long workers.
+## Architecture
 
-### What We Have Achieved
+```
+┌──────────────────────────────────────────────────────┐
+│                    Frappe UI                         │
+│  (Forms, Realtime Events, Client-Side Discovery)     │
+├──────────────┬───────────────────┬───────────────────┤
+│  API Layer   │  DocType Layer    │  Task Layer        │
+│  (read-only  │  (desired state   │  (background jobs, │
+│   queries)   │   in MariaDB)     │   cluster writes)  │
+├──────────────┴───────────────────┴───────────────────┤
+│              Utility Layer                           │
+│  (K8s client, Helm CLI wrapper, discovery helpers)   │
+├──────────────────────────────────────────────────────┤
+│         Kubernetes Cluster (live state)               │
+└──────────────────────────────────────────────────────┘
+```
 
-- Multi-auth Kubernetes connectivity:
-  - kubeconfig
-  - bearer token
-  - in-cluster service account auth
-- Dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
-- Bearer-token auth now requires either a CA certificate or an explicit dev-only TLS bypass.
-- Live namespace discovery for cluster-backed forms.
-- Browser-side kubeconfig import, context parsing, context extraction, and local endpoint normalization for containerized dev setups.
-- Helm repository registration and chart sync.
-- Helm chart metadata and default values retrieval.
-- Helm release deploy and uninstall workflows through background jobs.
-- Raw manifest deployment through `Service Bundle`.
-- Periodic reconciliation for Helm releases, Service Bundles, and Frappe site creation Jobs.
-- Frappe site creation workflow: submit Kubernetes Jobs that run `bench new-site` inside running benches, with robust status tracking that checks actual site existence rather than trusting Job exit codes.
-- Legacy migration from `Kubernetes Manifest` to `Service Bundle`.
-- Cleanup patching for removed legacy DocTypes.
+| Layer | Path | Responsibility |
+|---|---|---|
+| DocTypes | `kubeport/kubeport/doctype/` | Desired-state documents backed by MariaDB |
+| API | `kubeport/api/` | Whitelisted read-only endpoints for forms |
+| Utilities | `kubeport/utils/` | Stateless K8s and Helm integration helpers |
+| Tasks | `kubeport/tasks/` | Background jobs for all cluster-mutating work |
+| Tests | `kubeport/tests/`, `doctype/*/test_*.py` | Unit and integration tests |
+| Patches | `kubeport/patches/` | Schema migration and cleanup patches |
 
-### What Is Left To Do
+## Installation
 
-The main gaps still visible in the codebase are:
+### Prerequisites
 
-- Site lifecycle beyond creation. `Frappe Site` currently supports creation only. Future work includes: deletion (`bench drop-site`), migration (`bench migrate`), backup/restore.
-- Site discovery remains observational only — discovered sites are not automatically linked to `Frappe Site` documents.
-- Site discovery is intentionally narrow and currently recognizes official `erpnext` chart releases only.
-- Service Bundle support is limited to a fixed allowlist of built-in Kubernetes resource kinds; CRDs and arbitrary custom resources are not supported.
-- Health reporting is still coarse:
-  - Helm releases rely mostly on `helm status`
-  - Service Bundles only check resource existence
-  - workload readiness, events, and pod-level diagnostics are not surfaced deeply in-app
-- Some modules still have thin or placeholder tests, especially around `Helm Repository`, `Helm Chart`, and broader integration flows.
-- There is no documented operator guide yet for running Kubeport inside Kubernetes with the required service-account RBAC and Helm binary packaging.
+- A running [Frappe Bench](https://frappeframework.com/docs/user/en/bench) environment
+- Python 3.14+
+- [Helm 3](https://helm.sh/docs/intro/install/) CLI available on the server `PATH`
+- Access to a Kubernetes cluster (kubeconfig, bearer token, or in-cluster)
 
-### Codebase Map
-
-- DocTypes: `kubeport/kubeport/doctype/`
-- API endpoints: `kubeport/api/`
-- Kubernetes and Helm helpers: `kubeport/utils/`
-- Background tasks: `kubeport/tasks/`
-- Tests: `kubeport/tests/` and DocType-local `test_*.py`
-- Patches: `kubeport/patches/`
-
-### Additional Docs
-
-- [Control Plane State](docs/control-plane-state.md)
-- [Codebase Summary](docs/codebase-summary.md)
-
-### Installation
-
-Install into a Bench environment:
+### Install
 
 ```bash
 cd $PATH_TO_YOUR_BENCH
@@ -82,59 +60,70 @@ bench get-app $URL_OF_THIS_REPO --branch dev/jose
 bench install-app kubeport
 ```
 
-### Development
+## Development
 
-Project details:
+### Stack
 
-- Framework: Frappe / ERPNext app
-- Python: `3.14+`
-- Build backend: `flit`
-- Main Python dependencies: `kubernetes`, `urllib3`, `PyYAML`
+- **Framework**: Frappe / ERPNext app
+- **Build backend**: [flit](https://flit.pypa.io/)
+- **Python**: 3.14+ (tabs, double quotes, 110-char line length)
+- **Dependencies**: `kubernetes`, `urllib3`, `PyYAML`
 
-Enable pre-commit in your Bench checkout:
+### Pre-commit
+
+Enable pre-commit hooks in your Bench checkout:
 
 ```bash
 cd apps/kubeport
 pre-commit install
 ```
 
-Formatting and linting tools used by the project:
+### Formatting and Linting
 
-- `ruff format`
-- `ruff`
-- `prettier`
-- `eslint`
+| Tool | Scope |
+|---|---|
+| `ruff format` | Python formatting |
+| `ruff` | Python linting |
+| `prettier` | JavaScript / CSS formatting |
+| `eslint` | JavaScript linting |
 
-### Tests
+### Type Annotations
 
-Prefer targeted app tests through Bench:
+Python type annotations are enforced for all whitelisted API methods. Use `frappe.types.DF` for DocType field type hints. Configured via `export_python_type_annotations = True` in `hooks.py`.
+
+## Testing
+
+Run tests through Bench:
 
 ```bash
-bench --site <site> run-tests --app kubeport --doctype <doctype>
+bench --site <site> run-tests --app kubeport --doctype <DocType>
 ```
 
 When the full Bench environment is unavailable, use focused unit tests and syntax checks near the changed module.
 
-### Troubleshooting Discovery
+## Troubleshooting
 
-If discovery shows releases but zero sites:
+### Discovery Shows Releases but No Sites
 
-1. Confirm the release is an official supported Frappe chart release.
-2. Check the target namespace for running workload pods.
-3. Verify the release has at least one running Frappe pod, not only infra pods.
+1. Confirm the release is an official supported Frappe chart (currently `erpnext`).
+2. Check the target namespace for running workload pods — infra pods (MariaDB, Valkey) are not valid discovery targets.
+3. Verify the release has at least one **running** Frappe workload pod.
 4. Inspect pending pod events and PVC state if workloads are stuck.
 5. Confirm site creation completed inside the workload before expecting discovery.
-
-Typical cluster-side commands:
 
 ```bash
 kubectl get pods -n <namespace>
 kubectl describe pod -n <namespace> <pod-name>
 kubectl get pvc -n <namespace>
-kubectl describe pvc -n <namespace>
 kubectl get events -n <namespace> --sort-by=.lastTimestamp
 ```
 
-### License
+## Documentation
+
+- [Control Plane State](docs/control-plane-state.md) — current capabilities, open gaps, and robustness status
+- [Codebase Summary](docs/codebase-summary.md) — module-level architecture and component reference
+- [Changelog](CHANGELOG.md) — architecture decision log
+
+## License
 
 MIT

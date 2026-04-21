@@ -1,85 +1,59 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Quick-reference for Claude Code sessions. For the full set of rules, design invariants, and implementation patterns, see [`AGENTS.md`](AGENTS.md).
 
-## Project Overview
+## Project
 
-Kubeport is a Frappe app that acts as a Kubernetes control plane inside the Frappe/ERPNext UI. It manages clusters, Helm releases, and raw Kubernetes manifests (Service Bundles). The core architectural invariant: **desired state lives in MariaDB (DocTypes); observed state is always queried live from the cluster**.
+Kubeport is a Frappe app that acts as a Kubernetes control plane. **Desired state → MariaDB (DocTypes). Observed state → live cluster queries. Never mix them.**
 
 ## Commands
 
-**Linting and formatting:**
 ```bash
-ruff format          # Python formatting
-ruff                 # Python linting (line-length: 110, target: py314, tab indentation)
-prettier             # JS/CSS formatting
-eslint               # JavaScript linting
-```
+# Formatting and linting
+ruff format                  # Python formatting (tabs, double quotes, 110 chars)
+ruff                         # Python linting
+prettier                     # JS/CSS formatting
+eslint                       # JavaScript linting
 
-**Pre-commit setup** (required in a bench checkout):
-```bash
+# Pre-commit (required)
 cd apps/kubeport && pre-commit install
-```
 
-**Running tests** (requires a running Frappe bench with a site):
-```bash
+# Tests (requires running Frappe bench + site)
 bench --site <site> run-tests --app kubeport --doctype <DocType>
 ```
 
 ## Code Style
 
-- Indentation: **tabs** (not spaces)
-- Quote style: **double quotes**
-- Type annotations are required on all whitelisted API methods (`export_python_type_annotations = True` in `hooks.py`)
-- Use `frappe.types.DF` for DocType field type hints
+- **Indentation**: tabs
+- **Quotes**: double quotes
+- **Type annotations**: required on all whitelisted API methods (`frappe.types.DF` for DocType fields)
 
-## Architecture
+## Architecture at a Glance
 
-### Layer Map
-
-| Layer | Path | Responsibility |
+| Layer | Path | Notes |
 |---|---|---|
-| DocTypes (desired state) | `kubeport/kubeport/doctype/` | MariaDB-backed documents; one per resource kind |
-| API endpoints | `kubeport/api/` | Whitelisted, form-supporting, read-only queries |
-| K8s / Helm utilities | `kubeport/utils/` | Stateless clients and helpers |
-| Background tasks | `kubeport/tasks/` | All mutating cluster operations |
-| Scheduled jobs | `hooks.py` | Reconciliation (every 5 min), daily repo sync |
+| DocTypes | `kubeport/kubeport/doctype/` | Desired state in MariaDB |
+| API | `kubeport/api/` | Read-only whitelisted endpoints |
+| Utilities | `kubeport/utils/` | Stateless K8s + Helm helpers |
+| Tasks | `kubeport/tasks/` | All cluster-mutating work (background jobs) |
+| Scheduled | `hooks.py` | `*/5 * * * *` → reconciliation, daily → repo sync |
 
-### Key DocTypes
+## Critical Rules (see AGENTS.md for details)
 
-- **`Kubernetes Cluster`** — cluster credentials (kubeconfig, bearer token, in-cluster); live discovery UI rendered client-side via async form calls
-- **`Helm Repository` / `Helm Chart` / `Helm Chart Version`** — desired chart catalog state; synced in background
-- **`Helm Release`** — desired Helm release; identity scoped to `cluster/namespace/release_name`
-- **`Service Bundle`** — desired raw-manifest intent for supported Kubernetes resource kinds (replaces legacy `Kubernetes Manifest`)
+1. **All cluster mutations go through background jobs** — never from the web thread.
+2. **Discovery is read-only** — never persist discovered state to MariaDB.
+3. **Use operation/sync tokens** — background workers must re-check tokens before acting.
+4. **Targeted field updates in tasks** — use `db_set` / `frappe.db.set_value`, not `doc.reload()`.
+5. **Async form rendering** — use `frappe.xcall` + client-side rendering for external data, not `doc.onload`.
 
-### Critical Design Rules
+## Documentation
 
-**Async-first:** All cluster-mutating operations (Helm install/upgrade/uninstall, Service Bundle apply/delete) run in background jobs. Web threads only query.
+| File | Purpose |
+|---|---|
+| `README.md` | Shipped feature set (keep aligned with reality) |
+| `AGENTS.md` | Full agent rules, invariants, and patterns |
+| `docs/control-plane-state.md` | Capabilities, gaps, robustness notes |
+| `docs/codebase-summary.md` | Module-level architecture reference |
+| `CHANGELOG.md` | Architecture decision log |
 
-**Concurrency safety:** Background workers use per-run operation/sync tokens to prevent stale jobs from overwriting newer intent. Workers re-check document status before acting. Never block a new action while a release is `In Progress` or `Uninstalling` without token checks.
-
-**Discovery is read-only:** Discovery must never persist discovered cluster state into MariaDB. Return partial results and degrade gracefully on failure.
-
-**Discovery error taxonomy** — distinguish these cases explicitly:
-- No release pods found
-- Only infra pods found (mariadb, valkey, etc. — not valid exec targets)
-- Workload pods found but none running (cluster/runtime issue, not a code bug)
-- exec/listing failure inside a selected pod
-
-**Kubeconfig handling:** Kubeconfig is always imported browser-side; the server never reads from the local filesystem. The API normalizes endpoints for containerized dev environments (converts `0.0.0.0`/`127.0.0.1` to the gateway IP).
-
-**Field updates in tasks:** Prefer targeted field reads and explicit updates over broad `doc.reload()` calls when concurrency matters.
-
-### Scheduled Jobs (`hooks.py`)
-
-- `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_all_releases` (drift detection)
-- Daily → `kubeport.tasks.helm_tasks.sync_all_repos`
-
-## Documentation Files
-
-- `README.md` — current shipped feature set (keep aligned with reality, not aspirational plans)
-- `AGENTS.md` — agent-specific rules (subset of what's here)
-- `docs/control-plane-state.md` — current control-plane status, open gaps, robustness milestone notes
-- `docs/codebase-summary.md` — module-level architecture summaries
-
-When a change affects discovery, background-task behavior, or desired-state semantics, update these docs in the same commit.
+Update docs in the same commit when changes affect discovery, tasks, or state semantics.
