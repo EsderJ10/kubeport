@@ -48,9 +48,13 @@ The current milestone is **robustness** — making discovery, background executi
 
 - `Frappe Site` DocType links to a Helm Release (the target bench).
 - Background job discovers a running bench pod, dynamically extracts its container image and sites PVC mount, and submits a Kubernetes Job running `bench new-site`.
-- Reconciliation verifies actual site existence on the bench (via exec-based discovery checking for `site_config.json`) rather than trusting Job exit codes — avoids false negatives.
+- Reconciliation verifies actual site existence on the bench (via exec-based discovery checking for `site_config.json` and `bench list-apps`) rather than trusting Job exit codes — avoids false negatives.
+- **Credentials flow through a per-Job Kubernetes Secret, never as plaintext env vars.** The task creates a `{job_name}-creds` Secret carrying `ADMIN_PASSWORD` (and `DB_ROOT_PASSWORD` when the user chose the plaintext field), owner-referenced to the Job so it is garbage-collected alongside the Job's TTL cleanup. The Job reads both via `secretKeyRef`.
 - Supports both direct database root password and Kubernetes Secret references.
 - Per-run operation tokens for concurrency safety.
+- `on_trash` cascades deletion to any in-flight Kubernetes Job: rotating the operation token invalidates concurrent workers and `cancel_site_task` deletes the Job with `propagation_policy="Background"`, which also cleans up the creds Secret via owner-reference GC.
+- On Job TTL expiration before reconciliation reads the final status, reconciliation falls back to the same bench ground-truth probe used for the Job-failed branch, transitioning the site to Active or Failed instead of leaving it stuck in "In Progress".
+- Site names are validated to hostname-style labels (lowercase alphanumerics plus `.`, `-`, `_`, starting/ending alphanumeric) so they are safe for the `{bench_release}/{site_name}` docname, the K8s Job slug, and the bench environment.
 
 ### Live Discovery
 
@@ -112,8 +116,8 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Testing Depth
 
-- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches.
-- Weak coverage: Frappe Site job submission end-to-end, Helm Repository sync integration, Helm Chart metadata flows, broader cross-DocType integration tests.
+- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, Frappe Site creation task orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling.
+- Weak coverage: Helm Repository sync integration, Helm Chart metadata flows, broader cross-DocType integration tests.
 
 ### Operator Documentation
 

@@ -6,6 +6,51 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-04-22 — Frappe Site credentials move to per-Job Secret; orphan-Job cleanup on trash
+
+### Context
+
+The initial Frappe Site provisioning landed with two security/lifecycle gaps surfaced during pre-merge review:
+
+1. `ADMIN_PASSWORD` was injected as a plaintext env `value` in the Job pod spec, visible to anyone with pod-read RBAC and persisted in etcd until the Job's TTL. `DB_ROOT_PASSWORD` had a Kubernetes Secret path but kept a plaintext fallback for the user-provides-password case.
+2. Deleting a `Frappe Site` document while a creation Job was in flight orphaned the Job: reconciliation filters rows by `status="In Progress"`, so the deleted row was invisible and the Job ran to completion creating an untracked site.
+3. When the Job's `ttlSecondsAfterFinished` elapsed before reconciliation read its final status, the site was left in "In Progress" forever.
+
+### Decision
+
+- **Route every credential through a per-Job Secret.** `create_site_task` creates `{job_name}-creds` (labelled `app.kubernetes.io/managed-by=kubeport`, `kubeport.io/frappe-site=<docname>`) before submitting the Job. The Job consumes `ADMIN_PASSWORD` (always) and `DB_ROOT_PASSWORD` (when no user-supplied Secret) via `secretKeyRef`. After the Job exists we patch the Secret with `ownerReferences` → Job + `blockOwnerDeletion: true`, so K8s GC takes the Secret down with the Job's TTL cleanup. On exception before or during Job apply, we best-effort `delete_namespaced_secret` to avoid orphaning admin creds.
+- **Add `on_trash` to `FrappeSite`.** When the doc is deleted while a Job is in flight it rotates `operation_token` (invalidates the worker) and enqueues `cancel_site_task`, which deletes the Job with `propagation_policy="Background"`; ownerRef GC then reaps the creds Secret as a side effect. `cancel_site_task` also calls `_best_effort_delete_secret` as a backstop for the narrow window where the ownerRef patch never attached.
+- **Recover zombie "In Progress" on 404.** Reconciliation's `read_namespaced_job` 404 branch now calls `_site_exists_in_bench` — the same two-stage bench probe already used on Job-failed — and transitions the site to Active or Failed instead of logging and leaving it stuck.
+- **Validate `site_name`.** Reject anything outside a hostname-style label (lowercase alphanumerics, `.`, `-`, `_`, starting/ending alphanumeric) so the `{bench_release}/{site_name}` autoname, the K8s Job slug, and the bench env stay well-formed. Shell safety was already intact — `"$SITE_NAME"` in `_bench_new_site_command` does not expand command substitutions in the variable's value — but the naming correctness gap needed closing.
+
+### Rejected alternatives
+
+- **Mount passwords via `envFrom: secretRef`**: works, but loses the ability to cleanly mix our creds Secret with the bench reference pod's existing `envFrom` entries without risking accidental env-var leaks. Per-key `secretKeyRef` is more precise.
+- **Put `ownerReferences` on the Secret up front**: rejected because the Job's UID isn't known until after `apply_resource(Job)`. The two-step apply (create Secret, create Job, re-apply Secret with UID) is the canonical pattern.
+- **Delete the creds Secret from `cancel_site_task` only**: rejected because the rare "Secret applied, Job apply failed" path would leak credentials outside the normal cancel flow. Best-effort cleanup in the exception branch of `create_site_task` closes that window.
+
+### Implementation details
+
+- `kubeport/tasks/site_tasks.py`:
+  - New `_build_creds_secret_manifest(secret_name, namespace, site_docname, admin_password, db_root_password)`.
+  - `_build_env` rewritten: no more plaintext password parameters; takes `creds_secret_name` and `db_root_in_creds` and emits `secretKeyRef` for both ADMIN_PASSWORD and DB_ROOT_PASSWORD.
+  - `_build_job_manifest` passes these through.
+  - `create_site_task`: Secret apply → Job apply → read Job → re-apply Secret with `ownerReferences`. Any pre-Job exception triggers `_best_effort_delete_secret`.
+  - `cancel_site_task`: unchanged Job-delete path, plus a trailing `_best_effort_delete_secret` backstop.
+  - New `_best_effort_delete_secret` helper shared by both paths.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`:
+  - New `_SITE_NAME_RE` and `_validate_site_name()` called from `validate()`.
+  - New `on_trash(self)` that rotates the operation token and enqueues `cancel_site_task` when status is "In Progress" and a `creation_job_name` is set.
+- `kubeport/tasks/reconciliation.py`:
+  - 404 branch on `read_namespaced_job` now calls `_site_exists_in_bench` and finalizes to Active or Failed.
+- `kubeport/tests/test_site_tasks.py`:
+  - Expanded `_build_env` tests for the three new cases (ADMIN_PASSWORD secretKeyRef, user DB secret, creds-Secret fallback).
+  - New `_build_creds_secret_manifest` tests.
+  - New `UnitTestCreateSiteTask` (stale-token exit, happy-path Secret→Job→Secret apply with no plaintext passwords, exception rollback with orphan-Secret cleanup).
+  - New `UnitTestCancelSiteTask` (404 tolerance, non-404 logging, Secret cleanup in both).
+
+---
+
 ## 2026-04-17 — Frappe Site creation via Kubernetes Jobs
 
 ### Context
