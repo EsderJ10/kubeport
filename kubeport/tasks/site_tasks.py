@@ -59,6 +59,8 @@ def create_site_task(site_docname: str, operation_token: str):
 
 	doc = frappe.get_doc("Frappe Site", site_docname)
 	creds_secret_name: str | None = None
+	job_name_for_cleanup: str | None = None
+	job_applied = False
 	namespace = ""
 	api_client = None
 
@@ -80,6 +82,7 @@ def create_site_task(site_docname: str, operation_token: str):
 		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
 
 		job_name = _job_name(doc.site_name, operation_token)
+		job_name_for_cleanup = job_name
 		creds_secret_name = f"{job_name}-creds"
 		install_apps = _parse_install_apps(doc.install_apps)
 		db_type = doc.db_type or "mariadb"
@@ -118,6 +121,7 @@ def create_site_task(site_docname: str, operation_token: str):
 		)
 
 		apply_resource(api_client, job_manifest, namespace)
+		job_applied = True
 
 		# Now that the Job exists, adopt the Secret via ownerReferences so it
 		# gets garbage-collected whenever the Job is deleted (cancellation,
@@ -146,6 +150,13 @@ def create_site_task(site_docname: str, operation_token: str):
 			)
 
 		if not _site_operation_matches(site_docname, operation_token, "In Progress"):
+			# Doc was cancelled / deleted / force-recreated while we were
+			# applying. The Job we just created is now untracked: nothing in the
+			# DB references it, so reconciliation and cancel_site_task cannot
+			# reach it. Tear it down here so it does not run to completion and
+			# create an orphan site on the bench PVC.
+			_best_effort_delete_job(api_client, job_name, namespace)
+			_best_effort_delete_secret(api_client, creds_secret_name, namespace)
 			return
 
 		doc.db_set("creation_job_name", job_name)
@@ -158,11 +169,15 @@ def create_site_task(site_docname: str, operation_token: str):
 		)
 
 	except Exception as e:
-		# If we created the Secret but the Job submission failed, the Secret
-		# has no owner to GC it — clean it up best-effort so admin passwords
-		# don't linger on the cluster.
-		if creds_secret_name and api_client is not None and namespace:
-			_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+		# Best-effort cleanup of anything we created before the exception.
+		# Order matters: drop the Job first (which would otherwise GC the
+		# Secret via ownerRef once it starts running anyway), then the Secret
+		# as a backstop for the case where the ownerRef was never attached.
+		if api_client is not None and namespace:
+			if job_applied and job_name_for_cleanup:
+				_best_effort_delete_job(api_client, job_name_for_cleanup, namespace)
+			if creds_secret_name:
+				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
 
 		if not _site_operation_matches(site_docname, operation_token, "In Progress"):
 			return
@@ -445,6 +460,49 @@ def _best_effort_delete_secret(
 	except Exception as e:
 		frappe.logger("kubeport").warning(
 			"Could not delete orphan creds Secret '%s' in '%s': %s",
+			name,
+			namespace,
+			e,
+		)
+
+
+def _best_effort_delete_job(
+	api_client: "client.ApiClient",
+	name: str,
+	namespace: str,
+) -> None:
+	"""Delete a site-creation Job, ignoring 404s and logging everything else.
+
+	Used to tear down a Job that became orphaned mid-flight: the doc was
+	cancelled, deleted, or force-recreated after we already applied the Job
+	but before we could record its name on the DocType.  Without this, the
+	Job would run to completion untracked, potentially creating a site on
+	the bench PVC that has no row in MariaDB pointing at it.
+
+	Background propagation cascades to the owner-referenced creds Secret
+	and to the Job's pods.
+	"""
+	from kubernetes.client.rest import ApiException
+
+	try:
+		batch_v1 = client.BatchV1Api(api_client=api_client)
+		batch_v1.delete_namespaced_job(
+			name=name,
+			namespace=namespace,
+			propagation_policy="Background",
+		)
+	except ApiException as e:
+		if e.status == 404:
+			return
+		frappe.logger("kubeport").warning(
+			"Could not delete orphan site-creation Job '%s' in '%s': %s",
+			name,
+			namespace,
+			e,
+		)
+	except Exception as e:
+		frappe.logger("kubeport").warning(
+			"Could not delete orphan site-creation Job '%s' in '%s': %s",
 			name,
 			namespace,
 			e,

@@ -6,6 +6,38 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-04-22 — Frappe Site: fix Recreate (Force) path and orphan Job on mid-flight delete
+
+### Context
+
+Pre-merge review of `feat/frappe-site-provisioning` surfaced two defects that survived the earlier rounds:
+
+1. **`Recreate Site (Force)` was dead code.** The UI relabels the primary button and allows the click when `force_create=1` and `status="Active"`, but the server `create_site()` threw on `status="Active"` unconditionally, so the button always errored. The `--force` flag in `_bench_new_site_command` was reachable only from the Failed → retry path, not from Active → recreate, which is the advertised use case.
+2. **Orphan Job on mid-flight delete / force-recreate.** `create_site_task` re-checks the operation token after applying the Job (to handle the user cancelling or re-triggering while we were in flight) and returns on mismatch. Nothing tore down the Job it had just applied. `creation_job_name` stays empty on the row, so `on_trash` and reconciliation can't see the Job either. It ran to completion untracked, creating a site on the bench PVC with no MariaDB row. The Job's own TTL reaped the K8s resources but not the PVC data.
+
+### Decision
+
+- **Controller gate respects `force_create`.** `create_site()` now throws on Active only when `force_create` is unchecked. The Python guard matches the JS button's contract.
+- **Worker self-cleans on supersession.** When the post-apply token check fails, `create_site_task` calls `_best_effort_delete_job` and `_best_effort_delete_secret` on the Job and Secret it just created before returning. The same cleanup runs in the exception handler when `job_applied` is true, so a failure partway through the ownerRef step does not leak a Job. `_best_effort_delete_job` uses `propagation_policy="Background"` so K8s GC also reaps the Secret via the ownerRef (when it was attached) and the Job's pods.
+
+### Rejected alternatives
+
+- **Reserve `creation_job_name` before applying the Job.** Would make the Job visible to `on_trash` earlier, but introduces a new inconsistency window (a name recorded for a Job that does not yet exist) and forces reconciliation to tolerate phantom names. Deleting from the worker itself, using state it already has in scope, is simpler.
+- **Have `on_trash` list and delete Jobs by label selector when `creation_job_name` is empty.** Works, but the discovery call pays a round-trip on every trash of an In Progress doc just to cover a short-window race. Worker-side cleanup is cheaper and catches the same race.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `create_site` gate changed to `if self.status == "Active" and not self.force_create`.
+- `kubeport/tasks/site_tasks.py`:
+  - New `_best_effort_delete_job` mirroring `_best_effort_delete_secret` (404-tolerant, warn-and-continue on everything else, Background propagation).
+  - `create_site_task` tracks `job_applied: bool` and `job_name_for_cleanup`; the post-apply token re-check and the exception branch both delete the orphan Job before returning.
+- `kubeport/tests/test_site_tasks.py`:
+  - New `UnitTestBestEffortDeleteJob` for the helper.
+  - New `test_create_site_task_deletes_orphan_job_when_token_superseded_after_apply` driving `_site_operation_matches` to return `[True, False]`.
+  - New `test_manifest_passes_force_flag_through_to_bench_command` as a regression guard for the Recreate path.
+
+---
+
 ## 2026-04-22 — Frappe Site credentials move to per-Job Secret; orphan-Job cleanup on trash
 
 ### Context

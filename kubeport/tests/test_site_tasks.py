@@ -337,6 +337,28 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertEqual(container["resources"], {"requests": {"cpu": "100m"}})
 		self.assertEqual(container["securityContext"], {"runAsUser": 1000})
 
+	def test_manifest_passes_force_flag_through_to_bench_command(self):
+		"""force_create on the DocType must reach the bench argv as --force.
+		Regression guard for the broken Recreate path where the controller used
+		to reject Active unconditionally, hiding this end-to-end wiring.
+		"""
+		manifest = _build_job_manifest(
+			job_name="ks-demo-abcdef123456",
+			namespace="ns",
+			site_docname="release-a/demo",
+			site_name="demo",
+			db_type="mariadb",
+			install_apps=[],
+			force_create=True,
+			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
+			db_root_secret="",
+			db_root_secret_key="",
+			ref_spec=self._ref_spec(),
+		)
+		bench_cmd = manifest["spec"]["template"]["spec"]["containers"][0]["args"][0]
+		self.assertIn("--force", bench_cmd)
+
 	def test_manifest_site_env_wins_over_bench_env(self):
 		ref = self._ref_spec()
 		ref["container_env"] = [{"name": "SITE_NAME", "value": "WRONG"}]
@@ -514,6 +536,75 @@ class UnitTestCreateSiteTask(UnitTestCase):
 		self.assertIn("creation_job_name", set_fields)
 		self.assertIn("creation_job_token", set_fields)
 
+	def test_create_site_task_deletes_orphan_job_when_token_superseded_after_apply(self):
+		"""If the doc is cancelled/deleted/force-recreated between our first
+		token check and the re-check after the Job apply, we must tear down
+		the Job we just created. Otherwise it runs to completion untracked
+		and creates an orphan site on the bench PVC.
+		"""
+		from unittest.mock import patch
+
+		from kubeport.tasks import site_tasks
+
+		doc = _fake_frappe_site_doc()
+		release = _fake_release()
+
+		# True on entry (line 57), False on the post-apply re-check (line 152).
+		match_calls = iter([True, False])
+
+		deleted_jobs: list[str] = []
+		deleted_secrets: list[str] = []
+
+		def _capture_delete_job(_api_client, name, _namespace):
+			deleted_jobs.append(name)
+
+		def _capture_delete_secret(_api_client, name, _namespace):
+			deleted_secrets.append(name)
+
+		with patch.object(site_tasks, "_site_operation_matches", side_effect=lambda *a, **kw: next(match_calls)), \
+			patch.object(site_tasks, "frappe") as mock_frappe, \
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
+			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select, \
+			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone, \
+			patch.object(site_tasks, "apply_resource"), \
+			patch.object(site_tasks, "_best_effort_delete_job", side_effect=_capture_delete_job), \
+			patch.object(site_tasks, "_best_effort_delete_secret", side_effect=_capture_delete_secret), \
+			patch.object(site_tasks, "client") as mock_client:
+			mock_frappe.get_doc.side_effect = lambda doctype, name: (
+				doc if doctype == "Frappe Site" else release
+			)
+			mock_get_client.return_value = MagicMock()
+			mock_select.return_value = MagicMock()
+			mock_clone.return_value = {
+				"image": "frappe/erpnext:v15.0.0",
+				"pod_level": {},
+				"container_env": [],
+				"container_env_from": [],
+				"container_resources": None,
+				"container_security_context": None,
+				"volume_mounts": [{"name": "sites", "mountPath": "/home/frappe/frappe-bench/sites"}],
+				"volumes": [{"name": "sites", "persistentVolumeClaim": {"claimName": "s-pvc"}}],
+			}
+			batch_api = MagicMock()
+			batch_api.read_namespaced_job.return_value = SimpleNamespace(
+				metadata=SimpleNamespace(uid="job-uid-123")
+			)
+			mock_client.BatchV1Api.return_value = batch_api
+			mock_client.CoreV1Api.return_value = MagicMock()
+
+			site_tasks.create_site_task("release-a/demo.example.com", "tok" * 10 + "ab")
+
+		# Both the orphan Job and its creds Secret must be torn down, and the
+		# Job name must match the Secret name minus the '-creds' suffix.
+		self.assertEqual(len(deleted_jobs), 1)
+		self.assertEqual(len(deleted_secrets), 1)
+		self.assertEqual(f"{deleted_jobs[0]}-creds", deleted_secrets[0])
+
+		# The superseded worker must NOT record job bookkeeping on the doc.
+		set_fields = {call.args[0] for call in doc.db_set.call_args_list}
+		self.assertNotIn("creation_job_name", set_fields)
+		self.assertNotIn("creation_job_token", set_fields)
+
 	def test_create_site_task_marks_failed_and_cleans_up_secret_on_exception(self):
 		from unittest.mock import patch
 
@@ -567,6 +658,48 @@ class UnitTestCreateSiteTask(UnitTestCase):
 		field_values = {call.args[0]: call.args[1] for call in doc.db_set.call_args_list}
 		self.assertEqual(field_values.get("status"), "Failed")
 		self.assertIn("simulated apiserver blip", field_values.get("status_detail", ""))
+
+
+class UnitTestBestEffortDeleteJob(UnitTestCase):
+	def test_ignores_404_without_logging(self):
+		from unittest.mock import patch
+
+		from kubernetes.client.rest import ApiException
+
+		from kubeport.tasks import site_tasks
+
+		batch_api = MagicMock()
+		batch_api.delete_namespaced_job.side_effect = ApiException(status=404, reason="NotFound")
+
+		with patch.object(site_tasks, "client") as mock_client, \
+			patch.object(site_tasks.frappe, "logger") as mock_logger:
+			mock_client.BatchV1Api.return_value = batch_api
+			site_tasks._best_effort_delete_job(MagicMock(), "ks-demo-aaaabbbbcccc", "ns")
+
+		mock_logger.assert_not_called()
+		batch_api.delete_namespaced_job.assert_called_once()
+		# Must propagate the cascade so owner-referenced Secret goes with it.
+		_, kwargs = batch_api.delete_namespaced_job.call_args
+		self.assertEqual(kwargs["propagation_policy"], "Background")
+
+	def test_logs_warning_for_non_404_errors(self):
+		from unittest.mock import patch
+
+		from kubernetes.client.rest import ApiException
+
+		from kubeport.tasks import site_tasks
+
+		batch_api = MagicMock()
+		batch_api.delete_namespaced_job.side_effect = ApiException(status=500, reason="BoomError")
+
+		with patch.object(site_tasks, "client") as mock_client, \
+			patch.object(site_tasks.frappe, "logger") as mock_logger:
+			mock_client.BatchV1Api.return_value = batch_api
+			mock_warn = MagicMock()
+			mock_logger.return_value = SimpleNamespace(warning=mock_warn)
+			site_tasks._best_effort_delete_job(MagicMock(), "ks-demo-aaaabbbbcccc", "ns")
+
+		mock_warn.assert_called_once()
 
 
 class UnitTestCancelSiteTask(UnitTestCase):

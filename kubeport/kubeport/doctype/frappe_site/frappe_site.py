@@ -127,9 +127,9 @@ class FrappeSite(Document):
 			frappe.throw("A site name is required.")
 		if self.status == "In Progress":
 			frappe.throw("Site creation is already in progress.")
-		if self.status == "Active":
+		if self.status == "Active" and not self.force_create:
 			frappe.throw(
-				"This site already exists. Use Force Create if you need to recreate it."
+				"This site already exists. Enable Force Create to recreate it."
 			)
 
 		operation_token = secrets.token_hex(16)
