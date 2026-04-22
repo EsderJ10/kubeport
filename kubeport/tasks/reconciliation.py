@@ -245,13 +245,29 @@ def _reconcile_frappe_sites():
 
 			except ApiException as e:
 				if e.status == 404:
-					# Job was cleaned up (ttlSecondsAfterFinished elapsed) before we read it.
+					# Job was cleaned up (ttlSecondsAfterFinished elapsed) before we
+					# read its final status.  Without a ground-truth check the site
+					# would sit in "In Progress" forever, so fall back to the same
+					# bench probe we use for the failed-Job branch: if the site
+					# exists and is functional, call it Active; otherwise Failed.
 					frappe.logger("kubeport").warning(
 						"Creation Job '%s' for Frappe Site '%s' no longer exists "
-						"(likely cleaned up by TTL). Site status left as 'In Progress'.",
+						"(likely cleaned up by TTL). Falling back to bench probe.",
 						site.creation_job_name,
 						site.name,
 					)
+					if _site_exists_in_bench(site, core_v1):
+						_finalize_site_status(site, "Active", "")
+					else:
+						_finalize_site_status(
+							site,
+							"Failed",
+							_truncate_status_detail(
+								"Creation Job disappeared before reconciliation "
+								"could read its status (TTL expired). The site does "
+								"not exist on the bench."
+							),
+						)
 				else:
 					frappe.log_error(
 						title=f"Frappe Site Reconciliation Error: {site.name}",

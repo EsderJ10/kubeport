@@ -44,14 +44,23 @@ def create_site_task(site_docname: str, operation_token: str):
 	"""Background task: submit a Kubernetes Job that runs ``bench new-site``.
 
 	Reads the reference pod from the bench namespace to clone its image and
-	sites PVC mount, then submits a Job manifest via server-side apply.
-	Reconciliation polls the Job status and transitions the site to Active or
-	Failed once the Job finishes.
+	sites PVC mount, then submits a per-Job credentials Secret and the Job
+	manifest via server-side apply.  Reconciliation polls the Job status and
+	transitions the site to Active or Failed once the Job finishes.
+
+	The admin password (and, when the user chose the plaintext path, the DB
+	root password) are stored in a per-Job ``Secret`` and referenced by the
+	Job via ``secretKeyRef`` instead of being injected as plaintext env
+	values.  The Secret is owner-referenced to the Job so it is garbage
+	collected along with the Job's ``ttlSecondsAfterFinished`` cleanup.
 	"""
 	if not _site_operation_matches(site_docname, operation_token, "In Progress"):
 		return
 
 	doc = frappe.get_doc("Frappe Site", site_docname)
+	creds_secret_name: str | None = None
+	namespace = ""
+	api_client = None
 
 	try:
 		release = frappe.get_doc("Helm Release", doc.bench_release)
@@ -71,10 +80,27 @@ def create_site_task(site_docname: str, operation_token: str):
 		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
 
 		job_name = _job_name(doc.site_name, operation_token)
+		creds_secret_name = f"{job_name}-creds"
 		install_apps = _parse_install_apps(doc.install_apps)
 		db_type = doc.db_type or "mariadb"
 		admin_password = doc.get_password("admin_password") or ""
+		db_root_secret = doc.db_root_secret or ""
+		db_root_secret_key = doc.db_root_secret_key or "mariadb-root-password"
+
+		# Plaintext DB root password is only needed when the user did not
+		# provide a Kubernetes Secret — we route it through our creds Secret
+		# so it never lands as a plaintext env var.
+		needs_db_root_in_creds = not db_root_secret
 		db_root_password = doc.get_password("db_root_password") or ""
+
+		creds_secret_manifest = _build_creds_secret_manifest(
+			secret_name=creds_secret_name,
+			namespace=namespace,
+			site_docname=site_docname,
+			admin_password=admin_password,
+			db_root_password=db_root_password if needs_db_root_in_creds else None,
+		)
+		apply_resource(api_client, creds_secret_manifest, namespace)
 
 		job_manifest = _build_job_manifest(
 			job_name=job_name,
@@ -84,14 +110,40 @@ def create_site_task(site_docname: str, operation_token: str):
 			db_type=db_type,
 			install_apps=install_apps,
 			force_create=bool(doc.force_create),
-			admin_password=admin_password,
-			db_root_password=db_root_password,
-			db_root_secret=doc.db_root_secret or "",
-			db_root_secret_key=doc.db_root_secret_key or "mariadb-root-password",
+			creds_secret_name=creds_secret_name,
+			db_root_in_creds=needs_db_root_in_creds,
+			db_root_secret=db_root_secret,
+			db_root_secret_key=db_root_secret_key,
 			ref_spec=ref_spec,
 		)
 
 		apply_resource(api_client, job_manifest, namespace)
+
+		# Now that the Job exists, adopt the Secret via ownerReferences so it
+		# gets garbage-collected whenever the Job is deleted (cancellation,
+		# TTL-based cleanup after completion, on_trash cascade).  Best-effort:
+		# if this fails, the Secret still exists and will be cleaned up by
+		# cancel_site_task or by orphan-sweep logic outside this branch.
+		try:
+			batch_v1 = client.BatchV1Api(api_client=api_client)
+			job_read = batch_v1.read_namespaced_job(name=job_name, namespace=namespace)
+			job_uid = getattr(getattr(job_read, "metadata", None), "uid", None)
+			if job_uid:
+				creds_secret_manifest["metadata"]["ownerReferences"] = [{
+					"apiVersion": "batch/v1",
+					"kind": "Job",
+					"name": job_name,
+					"uid": job_uid,
+					"controller": True,
+					"blockOwnerDeletion": True,
+				}]
+				apply_resource(api_client, creds_secret_manifest, namespace)
+		except Exception as owner_err:
+			frappe.logger("kubeport").warning(
+				"Could not attach ownerReference for creds Secret '%s': %s",
+				creds_secret_name,
+				owner_err,
+			)
 
 		if not _site_operation_matches(site_docname, operation_token, "In Progress"):
 			return
@@ -106,6 +158,12 @@ def create_site_task(site_docname: str, operation_token: str):
 		)
 
 	except Exception as e:
+		# If we created the Secret but the Job submission failed, the Secret
+		# has no owner to GC it — clean it up best-effort so admin passwords
+		# don't linger on the cluster.
+		if creds_secret_name and api_client is not None and namespace:
+			_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+
 		if not _site_operation_matches(site_docname, operation_token, "In Progress"):
 			return
 
@@ -124,16 +182,30 @@ def create_site_task(site_docname: str, operation_token: str):
 
 
 def cancel_site_task(cluster: str, namespace: str, job_name: str):
-	"""Background task: best-effort delete the site-creation Job.
+	"""Background task: best-effort delete the site-creation Job and its creds Secret.
 
-	Called from ``FrappeSite.cancel_site``.  Document status has already
-	been rotated to Failed before enqueue, so any outcome here (success,
-	404, or error) is purely about cluster cleanup.
+	Called from ``FrappeSite.cancel_site`` and ``FrappeSite.on_trash``.  The
+	doc's status has already been rotated before enqueue, so any outcome
+	here (success, 404, or error) is purely about cluster cleanup.
+
+	Deleting the Job with ``propagation_policy="Background"`` cascades to
+	owner-referenced objects — including the creds Secret we create in
+	``create_site_task`` — so the explicit Secret delete below is only a
+	backstop for the narrow window where the Job never existed (e.g. Secret
+	got applied, Job submission failed) or ownerReferences were not attached.
 	"""
 	from kubernetes.client.rest import ApiException
 
 	try:
 		api_client = get_k8s_api_client(cluster)
+	except Exception as e:
+		frappe.log_error(
+			title=f"Frappe Site Cancel: failed to build K8s client for '{job_name}'",
+			message=str(e),
+		)
+		return
+
+	try:
 		batch_v1 = client.BatchV1Api(api_client=api_client)
 		batch_v1.delete_namespaced_job(
 			name=job_name,
@@ -141,17 +213,21 @@ def cancel_site_task(cluster: str, namespace: str, job_name: str):
 			propagation_policy="Background",
 		)
 	except ApiException as e:
-		if e.status == 404:
-			return
-		frappe.log_error(
-			title=f"Frappe Site Cancel: failed to delete Job '{job_name}'",
-			message=str(e),
-		)
+		if e.status != 404:
+			frappe.log_error(
+				title=f"Frappe Site Cancel: failed to delete Job '{job_name}'",
+				message=str(e),
+			)
 	except Exception as e:
 		frappe.log_error(
 			title=f"Frappe Site Cancel: failed to delete Job '{job_name}'",
 			message=str(e),
 		)
+
+	# Backstop for creds Secret cleanup.  When ownerReferences are in place,
+	# K8s GC already handles this; but this call guarantees cleanup even in
+	# failure-window cases where the Secret might otherwise linger.
+	_best_effort_delete_secret(api_client, f"{job_name}-creds", namespace)
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +242,8 @@ def _build_job_manifest(
 	db_type: str,
 	install_apps: list[str],
 	force_create: bool,
-	admin_password: str,
-	db_root_password: str,
+	creds_secret_name: str,
+	db_root_in_creds: bool,
 	db_root_secret: str,
 	db_root_secret_key: str,
 	ref_spec: dict[str, Any],
@@ -176,8 +252,8 @@ def _build_job_manifest(
 	site_env = _build_env(
 		site_name=site_name,
 		db_type=db_type,
-		admin_password=admin_password,
-		db_root_password=db_root_password,
+		creds_secret_name=creds_secret_name,
+		db_root_in_creds=db_root_in_creds,
 		db_root_secret=db_root_secret,
 		db_root_secret_key=db_root_secret_key,
 	)
@@ -258,21 +334,47 @@ def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool
 def _build_env(
 	site_name: str,
 	db_type: str,
-	admin_password: str,
-	db_root_password: str,
+	creds_secret_name: str,
+	db_root_in_creds: bool,
 	db_root_secret: str,
 	db_root_secret_key: str,
 ) -> list[dict[str, Any]]:
+	"""Build the Job container env list.
+
+	Credentials are **never** materialized as plaintext env values — both
+	``ADMIN_PASSWORD`` and ``DB_ROOT_PASSWORD`` flow in via ``secretKeyRef``.
+	The DB root password can come from two sources: the user-supplied
+	``db_root_secret`` (preferred), or our own per-Job creds Secret when the
+	user chose the plaintext field on the DocType.
+	"""
 	db_root_user = "root" if db_type == "mariadb" else "postgres"
 
 	env: list[dict[str, Any]] = [
 		{"name": "SITE_NAME", "value": site_name},
 		{"name": "DB_TYPE", "value": db_type},
 		{"name": "DB_ROOT_USER", "value": db_root_user},
-		{"name": "ADMIN_PASSWORD", "value": admin_password},
+		{
+			"name": "ADMIN_PASSWORD",
+			"valueFrom": {
+				"secretKeyRef": {
+					"name": creds_secret_name,
+					"key": "ADMIN_PASSWORD",
+				}
+			},
+		},
 	]
 
-	if db_root_secret:
+	if db_root_in_creds:
+		env.append({
+			"name": "DB_ROOT_PASSWORD",
+			"valueFrom": {
+				"secretKeyRef": {
+					"name": creds_secret_name,
+					"key": "DB_ROOT_PASSWORD",
+				}
+			},
+		})
+	else:
 		env.append({
 			"name": "DB_ROOT_PASSWORD",
 			"valueFrom": {
@@ -282,10 +384,71 @@ def _build_env(
 				}
 			},
 		})
-	else:
-		env.append({"name": "DB_ROOT_PASSWORD", "value": db_root_password})
 
 	return env
+
+
+def _build_creds_secret_manifest(
+	secret_name: str,
+	namespace: str,
+	site_docname: str,
+	admin_password: str,
+	db_root_password: str | None,
+) -> dict[str, Any]:
+	"""Build the per-Job credentials Secret that the Job reads via secretKeyRef.
+
+	Always carries ``ADMIN_PASSWORD``.  Also carries ``DB_ROOT_PASSWORD`` when
+	the user chose the plaintext path on the DocType (i.e. no external
+	``db_root_secret`` was provided).  ``stringData`` lets us hand values as
+	plain strings; the API server base64-encodes them at rest in etcd.
+	"""
+	string_data: dict[str, str] = {"ADMIN_PASSWORD": admin_password}
+	if db_root_password is not None:
+		string_data["DB_ROOT_PASSWORD"] = db_root_password
+
+	return {
+		"apiVersion": "v1",
+		"kind": "Secret",
+		"type": "Opaque",
+		"metadata": {
+			"name": secret_name,
+			"namespace": namespace,
+			"labels": {
+				"app.kubernetes.io/managed-by": "kubeport",
+				"kubeport.io/frappe-site": _safe_label_value(site_docname),
+			},
+		},
+		"stringData": string_data,
+	}
+
+
+def _best_effort_delete_secret(
+	api_client: "client.ApiClient",
+	name: str,
+	namespace: str,
+) -> None:
+	"""Delete a credentials Secret, ignoring 404s and logging everything else."""
+	from kubernetes.client.rest import ApiException
+
+	try:
+		core_v1 = client.CoreV1Api(api_client=api_client)
+		core_v1.delete_namespaced_secret(name=name, namespace=namespace)
+	except ApiException as e:
+		if e.status == 404:
+			return
+		frappe.logger("kubeport").warning(
+			"Could not delete orphan creds Secret '%s' in '%s': %s",
+			name,
+			namespace,
+			e,
+		)
+	except Exception as e:
+		frappe.logger("kubeport").warning(
+			"Could not delete orphan creds Secret '%s' in '%s': %s",
+			name,
+			namespace,
+			e,
+		)
 
 
 # ---------------------------------------------------------------------------

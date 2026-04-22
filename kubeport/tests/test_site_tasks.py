@@ -9,6 +9,7 @@ from frappe.tests import UnitTestCase
 
 from kubeport.tasks.site_tasks import (
 	_bench_new_site_command,
+	_build_creds_secret_manifest,
 	_build_env,
 	_build_job_manifest,
 	_clone_reference_pod_spec,
@@ -73,20 +74,37 @@ class UnitTestSiteHelpers(UnitTestCase):
 		env = _build_env(
 			site_name="s1",
 			db_type="postgres",
-			admin_password="pw",
-			db_root_password="root-pw",
+			creds_secret_name="job-creds",
+			db_root_in_creds=True,
 			db_root_secret="",
 			db_root_secret_key="",
 		)
 		db_root_user = next(e for e in env if e["name"] == "DB_ROOT_USER")
 		self.assertEqual(db_root_user["value"], "postgres")
 
-	def test_build_env_uses_secret_ref_when_db_root_secret_provided(self):
+	def test_build_env_admin_password_always_references_creds_secret(self):
 		env = _build_env(
 			site_name="s1",
 			db_type="mariadb",
-			admin_password="pw",
-			db_root_password="ignored",
+			creds_secret_name="ks-s1-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
+			db_root_secret="",
+			db_root_secret_key="",
+		)
+		admin = next(e for e in env if e["name"] == "ADMIN_PASSWORD")
+		# Security: must not appear as plaintext "value"; must be secretKeyRef.
+		self.assertNotIn("value", admin)
+		self.assertEqual(
+			admin["valueFrom"]["secretKeyRef"],
+			{"name": "ks-s1-aaaabbbbcccc-creds", "key": "ADMIN_PASSWORD"},
+		)
+
+	def test_build_env_db_root_uses_user_secret_when_provided(self):
+		env = _build_env(
+			site_name="s1",
+			db_type="mariadb",
+			creds_secret_name="job-creds",
+			db_root_in_creds=False,
 			db_root_secret="mariadb-root-secret",
 			db_root_secret_key="password",
 		)
@@ -96,6 +114,48 @@ class UnitTestSiteHelpers(UnitTestCase):
 			db_root_password["valueFrom"]["secretKeyRef"],
 			{"name": "mariadb-root-secret", "key": "password"},
 		)
+
+	def test_build_env_db_root_falls_back_to_creds_secret_when_no_user_secret(self):
+		env = _build_env(
+			site_name="s1",
+			db_type="mariadb",
+			creds_secret_name="ks-s1-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
+			db_root_secret="",
+			db_root_secret_key="",
+		)
+		db_root_password = next(e for e in env if e["name"] == "DB_ROOT_PASSWORD")
+		self.assertNotIn("value", db_root_password)
+		self.assertEqual(
+			db_root_password["valueFrom"]["secretKeyRef"],
+			{"name": "ks-s1-aaaabbbbcccc-creds", "key": "DB_ROOT_PASSWORD"},
+		)
+
+	def test_build_creds_secret_manifest_includes_admin_always(self):
+		manifest = _build_creds_secret_manifest(
+			secret_name="ks-demo-aaaa-creds",
+			namespace="ns",
+			site_docname="release/demo",
+			admin_password="pw",
+			db_root_password=None,
+		)
+		self.assertEqual(manifest["kind"], "Secret")
+		self.assertEqual(manifest["type"], "Opaque")
+		self.assertEqual(manifest["stringData"]["ADMIN_PASSWORD"], "pw")
+		self.assertNotIn("DB_ROOT_PASSWORD", manifest["stringData"])
+		# Carries the managed-by + frappe-site labels so sweeps can find it.
+		labels = manifest["metadata"]["labels"]
+		self.assertEqual(labels["app.kubernetes.io/managed-by"], "kubeport")
+
+	def test_build_creds_secret_manifest_includes_db_root_when_provided(self):
+		manifest = _build_creds_secret_manifest(
+			secret_name="ks-demo-aaaa-creds",
+			namespace="ns",
+			site_docname="release/demo",
+			admin_password="pw",
+			db_root_password="root-pw",
+		)
+		self.assertEqual(manifest["stringData"]["DB_ROOT_PASSWORD"], "root-pw")
 
 	def test_merge_env_has_overrides_win_on_name_collision(self):
 		base = [
@@ -246,8 +306,8 @@ class UnitTestJobManifest(UnitTestCase):
 			db_type="mariadb",
 			install_apps=["erpnext"],
 			force_create=False,
-			admin_password="admin",
-			db_root_password="root",
+			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
 			db_root_secret="",
 			db_root_secret_key="",
 			ref_spec=self._ref_spec(),
@@ -266,8 +326,8 @@ class UnitTestJobManifest(UnitTestCase):
 			db_type="mariadb",
 			install_apps=[],
 			force_create=False,
-			admin_password="admin",
-			db_root_password="root",
+			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
 			db_root_secret="",
 			db_root_secret_key="",
 			ref_spec=self._ref_spec(),
@@ -288,8 +348,8 @@ class UnitTestJobManifest(UnitTestCase):
 			db_type="mariadb",
 			install_apps=[],
 			force_create=False,
-			admin_password="admin",
-			db_root_password="root",
+			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
 			db_root_secret="",
 			db_root_secret_key="",
 			ref_spec=ref,
@@ -327,3 +387,234 @@ class UnitTestOperationTokenGuard(UnitTestCase):
 		with patch("kubeport.tasks.site_tasks.frappe.db.get_value") as mock_get:
 			mock_get.return_value = {"operation_token": "token", "status": "In Progress"}
 			self.assertTrue(_site_operation_matches("site", "token", "In Progress"))
+
+
+def _fake_frappe_site_doc(site_name: str = "demo.example.com") -> MagicMock:
+	"""Build a mock Frappe Site doc with typical fields populated."""
+	doc = MagicMock()
+	doc.name = f"release-a/{site_name}"
+	doc.site_name = site_name
+	doc.bench_release = "release-a"
+	doc.db_type = "mariadb"
+	doc.install_apps = "erpnext"
+	doc.force_create = 0
+	doc.db_root_secret = ""
+	doc.db_root_secret_key = "mariadb-root-password"
+	# get_password returns the secret regardless of which field is asked for,
+	# but tests inspect the calls to distinguish.
+	doc.get_password.side_effect = lambda field: {
+		"admin_password": "admin-pw",
+		"db_root_password": "root-pw",
+	}.get(field, "")
+	doc.db_set = MagicMock()
+	return doc
+
+
+def _fake_release() -> MagicMock:
+	release = MagicMock()
+	release.cluster = "cluster-a"
+	release.namespace = "bench-ns"
+	release.release_name = "bench-a"
+	return release
+
+
+class UnitTestCreateSiteTask(UnitTestCase):
+	"""End-to-end mocked tests for ``create_site_task``.
+
+	These cover the orchestration path (K8s client setup, Secret+Job apply,
+	token bookkeeping, failure rollback) that the helper-level tests above
+	never exercise.
+	"""
+
+	def test_create_site_task_exits_early_when_token_superseded(self):
+		from unittest.mock import patch
+
+		from kubeport.tasks import site_tasks
+
+		with patch.object(site_tasks, "_site_operation_matches", return_value=False), \
+			patch.object(site_tasks, "frappe") as mock_frappe, \
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client:
+			site_tasks.create_site_task("release-a/demo", "stale-token")
+			# Stale worker must not even fetch the doc.
+			mock_frappe.get_doc.assert_not_called()
+			mock_get_client.assert_not_called()
+
+	def test_create_site_task_applies_secret_then_job_and_sets_tokens(self):
+		from unittest.mock import patch
+
+		from kubeport.tasks import site_tasks
+
+		doc = _fake_frappe_site_doc()
+		release = _fake_release()
+		applied: list[tuple[str, dict]] = []
+
+		def _apply(_api_client, manifest, _ns):
+			applied.append((manifest["kind"], manifest))
+
+		with patch.object(site_tasks, "_site_operation_matches", return_value=True), \
+			patch.object(site_tasks, "frappe") as mock_frappe, \
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
+			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select, \
+			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone, \
+			patch.object(site_tasks, "apply_resource", side_effect=_apply), \
+			patch.object(site_tasks, "client") as mock_client:
+			mock_frappe.get_doc.side_effect = lambda doctype, name: (
+				doc if doctype == "Frappe Site" else release
+			)
+			mock_get_client.return_value = MagicMock()
+			mock_select.return_value = MagicMock()
+			mock_clone.return_value = {
+				"image": "frappe/erpnext:v15.0.0",
+				"pod_level": {},
+				"container_env": [],
+				"container_env_from": [],
+				"container_resources": None,
+				"container_security_context": None,
+				"volume_mounts": [{"name": "sites", "mountPath": "/home/frappe/frappe-bench/sites"}],
+				"volumes": [{"name": "sites", "persistentVolumeClaim": {"claimName": "s-pvc"}}],
+			}
+			# Read back fake Job with a UID so the ownerRef patch runs.
+			batch_api = MagicMock()
+			batch_api.read_namespaced_job.return_value = SimpleNamespace(
+				metadata=SimpleNamespace(uid="job-uid-123")
+			)
+			mock_client.BatchV1Api.return_value = batch_api
+			mock_client.CoreV1Api.return_value = MagicMock()
+
+			site_tasks.create_site_task("release-a/demo.example.com", "tok" * 10 + "ab")
+
+		# Exactly three applies: Secret (first), Job, Secret again with ownerRef.
+		kinds = [k for k, _ in applied]
+		self.assertEqual(kinds, ["Secret", "Job", "Secret"])
+
+		# The Secret is named after the Job and owner-referenced on the
+		# second apply, guaranteeing GC-on-Job-delete.
+		secret_first = applied[0][1]
+		job_manifest = applied[1][1]
+		secret_second = applied[2][1]
+		self.assertTrue(secret_first["metadata"]["name"].endswith("-creds"))
+		self.assertEqual(
+			secret_first["metadata"]["name"],
+			job_manifest["metadata"]["name"] + "-creds",
+		)
+		self.assertNotIn("ownerReferences", secret_first["metadata"])
+		self.assertEqual(
+			secret_second["metadata"]["ownerReferences"][0]["uid"], "job-uid-123"
+		)
+
+		# No plaintext password env values anywhere on the Job.
+		container = job_manifest["spec"]["template"]["spec"]["containers"][0]
+		for entry in container["env"]:
+			if entry["name"] in ("ADMIN_PASSWORD", "DB_ROOT_PASSWORD"):
+				self.assertNotIn("value", entry)
+				self.assertIn("valueFrom", entry)
+
+		# Doc got its job-bookkeeping fields set.
+		set_fields = {call.args[0] for call in doc.db_set.call_args_list}
+		self.assertIn("creation_job_name", set_fields)
+		self.assertIn("creation_job_token", set_fields)
+
+	def test_create_site_task_marks_failed_and_cleans_up_secret_on_exception(self):
+		from unittest.mock import patch
+
+		from kubeport.tasks import site_tasks
+
+		doc = _fake_frappe_site_doc()
+		release = _fake_release()
+
+		def _apply_that_fails_on_job(_api_client, manifest, _ns):
+			if manifest["kind"] == "Job":
+				raise RuntimeError("simulated apiserver blip")
+
+		deleted: list[str] = []
+
+		def _capture_delete(_api_client, name, _namespace):
+			deleted.append(name)
+
+		with patch.object(site_tasks, "_site_operation_matches", return_value=True), \
+			patch.object(site_tasks, "frappe") as mock_frappe, \
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
+			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select, \
+			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone, \
+			patch.object(site_tasks, "apply_resource", side_effect=_apply_that_fails_on_job), \
+			patch.object(site_tasks, "_best_effort_delete_secret", side_effect=_capture_delete), \
+			patch.object(site_tasks, "client") as mock_client:
+			mock_frappe.get_doc.side_effect = lambda doctype, name: (
+				doc if doctype == "Frappe Site" else release
+			)
+			mock_get_client.return_value = MagicMock()
+			mock_select.return_value = MagicMock()
+			mock_clone.return_value = {
+				"image": "frappe/erpnext:v15.0.0",
+				"pod_level": {},
+				"container_env": [],
+				"container_env_from": [],
+				"container_resources": None,
+				"container_security_context": None,
+				"volume_mounts": [{"name": "sites", "mountPath": "/home/frappe/frappe-bench/sites"}],
+				"volumes": [{"name": "sites", "persistentVolumeClaim": {"claimName": "s-pvc"}}],
+			}
+			mock_client.BatchV1Api.return_value = MagicMock()
+			mock_client.CoreV1Api.return_value = MagicMock()
+
+			site_tasks.create_site_task("release-a/demo.example.com", "tok" * 10 + "ab")
+
+		# Orphan-Secret cleanup fired with the expected name.
+		self.assertEqual(len(deleted), 1)
+		self.assertTrue(deleted[0].endswith("-creds"))
+
+		# Doc marked Failed with a truncated status_detail.
+		field_values = {call.args[0]: call.args[1] for call in doc.db_set.call_args_list}
+		self.assertEqual(field_values.get("status"), "Failed")
+		self.assertIn("simulated apiserver blip", field_values.get("status_detail", ""))
+
+
+class UnitTestCancelSiteTask(UnitTestCase):
+	def test_cancel_site_task_tolerates_404_on_job_delete(self):
+		from unittest.mock import patch
+
+		from kubernetes.client.rest import ApiException
+
+		from kubeport.tasks import site_tasks
+
+		batch_api = MagicMock()
+		batch_api.delete_namespaced_job.side_effect = ApiException(status=404, reason="NotFound")
+
+		with patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
+			patch.object(site_tasks, "client") as mock_client, \
+			patch.object(site_tasks, "_best_effort_delete_secret") as mock_del_secret, \
+			patch.object(site_tasks.frappe, "log_error") as mock_log_error:
+			mock_get_client.return_value = MagicMock()
+			mock_client.BatchV1Api.return_value = batch_api
+
+			site_tasks.cancel_site_task("cluster-a", "bench-ns", "ks-demo-aaaabbbbcccc")
+
+		# 404 must NOT raise or log an error; Secret cleanup must still run.
+		mock_log_error.assert_not_called()
+		mock_del_secret.assert_called_once()
+		_, name, namespace = mock_del_secret.call_args.args
+		self.assertEqual(name, "ks-demo-aaaabbbbcccc-creds")
+		self.assertEqual(namespace, "bench-ns")
+
+	def test_cancel_site_task_logs_non_404_errors_but_still_cleans_secret(self):
+		from unittest.mock import patch
+
+		from kubernetes.client.rest import ApiException
+
+		from kubeport.tasks import site_tasks
+
+		batch_api = MagicMock()
+		batch_api.delete_namespaced_job.side_effect = ApiException(status=500, reason="BoomError")
+
+		with patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
+			patch.object(site_tasks, "client") as mock_client, \
+			patch.object(site_tasks, "_best_effort_delete_secret") as mock_del_secret, \
+			patch.object(site_tasks.frappe, "log_error") as mock_log_error:
+			mock_get_client.return_value = MagicMock()
+			mock_client.BatchV1Api.return_value = batch_api
+
+			site_tasks.cancel_site_task("cluster-a", "bench-ns", "ks-demo-aaaabbbbcccc")
+
+		mock_log_error.assert_called_once()
+		# Even after a non-404 Job delete error, we still attempt Secret cleanup.
+		mock_del_secret.assert_called_once()

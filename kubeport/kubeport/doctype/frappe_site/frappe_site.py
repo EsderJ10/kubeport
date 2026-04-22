@@ -26,6 +26,17 @@ from frappe.model.document import Document
 # would create an injection path in the site-creation Job.
 _APP_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
+# Site names feed three places that each have different constraints:
+#  - the autoname pattern ``{bench_release}/{site_name}`` — a ``/`` in site_name
+#    would split the docname into extra segments;
+#  - the K8s Job name slug via ``_job_name`` — sanitized, but a site with only
+#    non-alphanumerics would slug to empty;
+#  - the bench pod as the ``$SITE_NAME`` env var — safe under double quotes,
+#    but newlines/control chars still confuse logs and downstream tooling.
+# We require a hostname-style label: start/end alphanumeric, interior may
+# include ``.`` ``-`` or ``_``. This matches what ``bench new-site`` expects.
+_SITE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
+
 
 class FrappeSite(Document):
 	# begin: auto-generated types
@@ -56,6 +67,8 @@ class FrappeSite(Document):
 
 	def validate(self):
 		"""Populate derived fields from bench_release and guard identity immutability."""
+		self._validate_site_name()
+
 		if not self.is_new():
 			expected = f"{self.bench_release}/{self.site_name}"
 			if self.name != expected:
@@ -76,6 +89,16 @@ class FrappeSite(Document):
 			)
 
 		self._validate_install_apps()
+
+	def _validate_site_name(self):
+		if not self.site_name:
+			return
+		if not _SITE_NAME_RE.match(self.site_name):
+			frappe.throw(
+				f"Invalid site name '{self.site_name}'. "
+				"Use lowercase letters, digits, dots, hyphens, or underscores; "
+				"must start and end with a letter or digit (e.g. 'erp.example.com')."
+			)
 
 	def _validate_install_apps(self):
 		if not self.install_apps:
@@ -172,4 +195,29 @@ class FrappeSite(Document):
 			f"Cancellation requested for '{self.site_name}'.",
 			alert=True,
 			indicator="orange",
+		)
+
+	def on_trash(self):
+		"""Best-effort cleanup of an in-flight Job when the document is deleted.
+
+		Without this, deleting the doc would leave the K8s Job running and
+		invisible to reconciliation (which filters on status="In Progress"
+		against existing rows).  Rotating ``operation_token`` also invalidates
+		any worker already partway through ``create_site_task``.
+		"""
+		if self.status != "In Progress":
+			return
+
+		job_name = self.creation_job_name
+		if not job_name:
+			return
+
+		self.db_set("operation_token", secrets.token_hex(16))
+		frappe.enqueue(
+			"kubeport.tasks.site_tasks.cancel_site_task",
+			cluster=self.cluster,
+			namespace=self.namespace or "default",
+			job_name=job_name,
+			queue="short",
+			enqueue_after_commit=True,
 		)
