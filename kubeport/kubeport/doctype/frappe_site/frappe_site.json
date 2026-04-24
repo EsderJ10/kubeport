@@ -131,7 +131,7 @@
    "fieldname": "db_type",
    "fieldtype": "Select",
    "label": "Database Type",
-   "options": "mariadb\npostgres"
+   "options": "mariadb"
   },
   {
    "fieldname": "force_create",

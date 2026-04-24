@@ -6,6 +6,60 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-04-23 — Frappe Site: orphan-Job sweep, hang timeout, label-guarded reconciliation, 3-state bench probe
+
+### Context
+
+Pre-merge audit of `feat/frappe-site-provisioning` surfaced five robustness gaps that the prior rounds did not close:
+
+1. A worker hard-killed (OOM, node drain, SIGKILL) between `apply_resource(job)` and `db_set("creation_job_name", ...)` leaves a real Job running with no DocType pointer. Reconciliation filters by non-empty `creation_job_name`, so the Job is invisible; the PVC side-effect persists until a human notices.
+2. A Job stuck in `ImagePullBackOff` / unable to reach DB never flips `succeeded` or `failed`, so reconciliation's polling leaves the row `In Progress` forever.
+3. Reconciliation reads the Job purely by name; a stale `creation_job_name` (or the unlikely name collision) would let us finalize the wrong row's status.
+4. A rolling bench restart during the Job-failed or TTL-expired branch causes the exec-based ground-truth probe to raise, which the old code translated to `False` → terminal `Failed` — even though the site might be perfectly fine.
+5. The `db_type` UI option advertised `postgres`, but the bench command always used `--mariadb-root-*` flags and the superuser was hardcoded to `"postgres"` with no way to override. It had never been validated on a real postgres-backed bench.
+
+### Decision
+
+- **Orphan-Job sweep.** A new `_sweep_orphan_site_jobs()` runs at the end of every 5-minute reconciliation tick. For each cluster/namespace pair that has at least one `Frappe Site` row it lists Jobs labeled `app.kubernetes.io/managed-by=kubeport,kubeport.io/frappe-site` and deletes any whose names do not appear in any row's `creation_job_name`. Uses the existing `_best_effort_delete_job` with Background propagation so the creds Secret is GC'd via ownerRef in the same sweep.
+- **`activeDeadlineSeconds` on every site-creation Job.** Defaults to 30 minutes (`_JOB_ACTIVE_DEADLINE_SECONDS`). Enough headroom for realistic `bench new-site --install-app=erpnext` on modest hardware, tight enough that genuine hangs surface before an operator notices.
+- **Label-guarded reconciliation.** Before finalizing status on any Job, `_reconcile_frappe_sites` calls `_job_belongs_to_site` to confirm the Job's `kubeport.io/frappe-site` label matches the doc's `_safe_label_value(docname)`. Mismatch → log and skip. Never touches the row.
+- **Three-state bench probe.** `_site_exists_in_bench` becomes `_probe_site_state` and returns `SITE_PROBE_EXISTS` / `SITE_PROBE_MISSING` / `SITE_PROBE_UNKNOWN`. Transport-level exec failures (pod selection failure, stream errors) surface as `unknown`; the caller defers the status transition to the next tick instead of writing `Failed`. `_exec_bench_site_functional` now re-raises instead of swallowing exec errors so the distinction is possible.
+- **Hide postgres from the UI for now.** `frappe_site.json` removes `postgres` from the `db_type` options. The `_build_env` / `_bench_new_site_command` postgres branches stay in place for forward compatibility but are only reachable by direct DB write until the flow is plumbed correctly and validated on a real postgres bench.
+
+### Rejected alternatives
+
+- **Reserve `creation_job_name` before applying the Job.** Rejected again for the same reason as in the 2026-04-22 entry: phantom names on rows for Jobs that do not yet exist. The label-based sweep reaches the same orphan Jobs without the inconsistency window.
+- **Shorter TTL (`ttlSecondsAfterFinished`) instead of `activeDeadlineSeconds`.** TTL only fires once the Job completes. It does not help a Job that is still hung — the very case we need to bound.
+- **Plumb postgres correctly in this PR.** Requires a postgres-backed bench in CI or at least a known-good smoke run. Neither is available this cycle; shipping a visible but broken option is worse than shipping a narrower feature.
+
+### Implementation details
+
+- `kubeport/tasks/site_tasks.py`:
+  - New module-level constants `_JOB_ACTIVE_DEADLINE_SECONDS`, `SITE_DOC_LABEL`, `MANAGED_BY_LABEL`, `MANAGED_BY_VALUE`.
+  - `_build_job_manifest` adds `spec.activeDeadlineSeconds = _JOB_ACTIVE_DEADLINE_SECONDS` and uses the label constants. `_build_creds_secret_manifest` also uses the label constants so the sweep's selector is guaranteed consistent with what the worker writes.
+- `kubeport/tasks/reconciliation.py`:
+  - New `SITE_PROBE_EXISTS` / `SITE_PROBE_MISSING` / `SITE_PROBE_UNKNOWN` constants.
+  - `_site_exists_in_bench` → `_probe_site_state` (3-state return). Exec transport failures return `unknown`.
+  - `_exec_bench_site_functional` now raises instead of swallowing exceptions.
+  - New `_job_belongs_to_site(job, site)` called in `_reconcile_frappe_sites` before any status write.
+  - New `_sweep_orphan_site_jobs()` wired into `reconcile_all_releases`.
+  - Both the Job-failed branch and the 404-TTL branch call `_probe_site_state`; `SITE_PROBE_UNKNOWN` defers to the next tick instead of finalizing.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`:
+  - `db_type` options narrowed from `mariadb\npostgres` to `mariadb`.
+- `kubeport/tests/test_site_tasks.py`:
+  - New `test_manifest_sets_active_deadline_seconds`.
+- `kubeport/tests/test_reconciliation.py`:
+  - Existing Job-failed tests switched from `_site_exists_in_bench` to `_probe_site_state` with `"exists"` / `"missing"` return values, and all `_reconcile_frappe_sites` tests now patch `_job_belongs_to_site` to bypass label inspection for `SimpleNamespace` fakes.
+  - New `test_reconcile_frappe_sites_skips_job_with_wrong_site_label`.
+  - New `test_reconcile_skips_finalize_on_transient_probe_failure`.
+  - New `UnitTestJobBelongsToSite` (4 cases).
+  - New `UnitTestSweepOrphanSiteJobs` (tracked-name preserved, orphan deleted, empty-creation-job-name still swept).
+  - `test_reconcile_all_releases_only_runs_active_sweeps` extended with `_sweep_orphan_site_jobs` assertion.
+- `docs/frappe-site-smoke.md`: new real-cluster smoke procedure (8 scenarios) — worker-crash recovery (sweep), hung-pod (activeDeadlineSeconds), transient bench restart, etc.
+- `docs/control-plane-state.md`: updated capabilities, robustness table, and "Site Lifecycle" gap for postgres.
+
+---
+
 ## 2026-04-22 — Frappe Site: fix Recreate (Force) path and orphan Job on mid-flight delete
 
 ### Context

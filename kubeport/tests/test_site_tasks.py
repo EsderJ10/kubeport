@@ -337,6 +337,34 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertEqual(container["resources"], {"requests": {"cpu": "100m"}})
 		self.assertEqual(container["securityContext"], {"runAsUser": 1000})
 
+	def test_manifest_sets_active_deadline_seconds(self):
+		"""The Job must carry an activeDeadlineSeconds ceiling so a stuck pod
+		eventually flips to failed — without it, reconciliation's succeeded/
+		failed polling never fires on hangs and the row sits In Progress forever.
+		"""
+		from kubeport.tasks.site_tasks import _JOB_ACTIVE_DEADLINE_SECONDS
+
+		manifest = _build_job_manifest(
+			job_name="ks-demo-abcdef123456",
+			namespace="ns",
+			site_docname="release-a/demo",
+			site_name="demo",
+			db_type="mariadb",
+			install_apps=[],
+			force_create=False,
+			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
+			db_root_secret="",
+			db_root_secret_key="",
+			ref_spec=self._ref_spec(),
+		)
+		self.assertEqual(
+			manifest["spec"]["activeDeadlineSeconds"], _JOB_ACTIVE_DEADLINE_SECONDS,
+		)
+		# Must be a positive int (K8s rejects 0 and negatives).
+		self.assertIsInstance(manifest["spec"]["activeDeadlineSeconds"], int)
+		self.assertGreater(manifest["spec"]["activeDeadlineSeconds"], 0)
+
 	def test_manifest_passes_force_flag_through_to_bench_command(self):
 		"""force_create on the DocType must reach the bench argv as --force.
 		Regression guard for the broken Recreate path where the controller used

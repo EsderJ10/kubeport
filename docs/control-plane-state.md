@@ -48,12 +48,16 @@ The current milestone is **robustness** — making discovery, background executi
 
 - `Frappe Site` DocType links to a Helm Release (the target bench).
 - Background job discovers a running bench pod, dynamically extracts its container image and sites PVC mount, and submits a Kubernetes Job running `bench new-site`.
-- Reconciliation verifies actual site existence on the bench (via exec-based discovery checking for `site_config.json` and `bench list-apps`) rather than trusting Job exit codes — avoids false negatives.
+- Reconciliation verifies actual site existence on the bench (via exec-based discovery checking for `site_config.json` and `bench list-apps`) rather than trusting Job exit codes — avoids false negatives. The probe is three-state (`exists` / `missing` / `unknown`); transient bench-exec failures return `unknown` and defer the status transition to the next tick instead of marking the site `Failed`.
 - **Credentials flow through a per-Job Kubernetes Secret, never as plaintext env vars.** The task creates a `{job_name}-creds` Secret carrying `ADMIN_PASSWORD` (and `DB_ROOT_PASSWORD` when the user chose the plaintext field), owner-referenced to the Job so it is garbage-collected alongside the Job's TTL cleanup. The Job reads both via `secretKeyRef`.
+- Only MariaDB is a supported database backend today. The `db_type` field exposes only `mariadb`; postgres plumbing in `_build_env` / `_bench_new_site_command` is retained for forward compatibility but is not reachable from the UI and has not been validated on a real postgres-backed bench.
 - Supports both direct database root password and Kubernetes Secret references.
 - Per-run operation tokens for concurrency safety.
 - `on_trash` cascades deletion to any in-flight Kubernetes Job: rotating the operation token invalidates concurrent workers and `cancel_site_task` deletes the Job with `propagation_policy="Background"`, which also cleans up the creds Secret via owner-reference GC.
-- On Job TTL expiration before reconciliation reads the final status, reconciliation falls back to the same bench ground-truth probe used for the Job-failed branch, transitioning the site to Active or Failed instead of leaving it stuck in "In Progress".
+- On Job TTL expiration before reconciliation reads the final status, reconciliation falls back to the same bench ground-truth probe used for the Job-failed branch, transitioning the site to Active, Failed, or (on `unknown`) deferring to the next tick.
+- Every site-creation Job carries `activeDeadlineSeconds` (30 min default) so a pod stuck in `ImagePullBackOff` or unable to reach the DB eventually flips to `failed` instead of leaving the row in `In Progress` forever.
+- Reconciliation validates each Job's `kubeport.io/frappe-site` label before trusting its status, defending against hash collisions and stale `creation_job_name` values.
+- **Orphan-Job sweep**: each reconciliation tick lists Jobs labeled `app.kubernetes.io/managed-by=kubeport,kubeport.io/frappe-site` in every cluster/namespace pair that has any `Frappe Site` row and deletes those not referenced by any row's `creation_job_name`. Covers the narrow failure mode where a worker is hard-killed between applying the Job and recording its name.
 - Site names are validated to hostname-style labels (lowercase alphanumerics plus `.`, `-`, `_`, starting/ending alphanumeric) so they are safe for the `{bench_release}/{site_name}` docname, the K8s Job slug, and the bench environment.
 
 ### Live Discovery
@@ -87,6 +91,10 @@ The codebase actively defends against imperfect cluster conditions:
 | Pod selection is resilient | Label-first with namespace-scan fallback, ranked by stability |
 | Job exit codes are not trusted blindly | Ground-truth verification via exec-based site existence check |
 | Reconciliation can recover | Documents move from `Degraded` back to `Deployed` when live state normalizes |
+| Transient probe failures do not mark sites failed | Site probe returns `unknown` on exec errors; status transition deferred |
+| Hung site-creation Jobs are reaped | `activeDeadlineSeconds` on every Job |
+| Orphan Jobs are swept | Label-based sweep in each reconciliation tick |
+| Job identity is validated | `kubeport.io/frappe-site` label checked before any status write |
 
 ---
 
@@ -113,6 +121,7 @@ The codebase actively defends against imperfect cluster conditions:
 
 - `Frappe Site` currently supports creation only. Future work: deletion (`bench drop-site`), migration (`bench migrate`), backup/restore.
 - Discovered sites are not automatically linked to `Frappe Site` documents.
+- Postgres-backed benches are not yet supported end-to-end. The `db_type` field exposes only `mariadb`; the postgres code paths exist but have not been validated against a real postgres-backed bench and the root username is not user-configurable.
 
 ### Testing Depth
 

@@ -20,6 +20,13 @@ from kubeport.utils.k8s_resources import check_resources_exist
 _HEALTHY_RELEASE_STATUSES = ["Deployed", "Degraded"]
 _HELM_STATUS_DETAIL_LIMIT = 500
 
+# Three-state result from the bench ground-truth probe.  "unknown" means the
+# probe could not reach the bench pod or exec failed transiently — the caller
+# must NOT finalize the doc on this value; it should wait for the next tick.
+SITE_PROBE_EXISTS = "exists"
+SITE_PROBE_MISSING = "missing"
+SITE_PROBE_UNKNOWN = "unknown"
+
 
 def reconcile_all_releases():
 	"""Periodic task: compare desired state (DB) with actual state (K8s cluster).
@@ -29,6 +36,7 @@ def reconcile_all_releases():
 	_reconcile_helm_releases()
 	_reconcile_service_bundles()
 	_reconcile_frappe_sites()
+	_sweep_orphan_site_jobs()
 
 
 def _reconcile_helm_releases():
@@ -219,6 +227,18 @@ def _reconcile_frappe_sites():
 					namespace=site.namespace or "default",
 				)
 
+				if not _job_belongs_to_site(job, site):
+					# Name matches but labels don't — never touch this row from this
+					# Job.  Could be a stale name stored on the doc pointing at an
+					# unrelated Job, or a future hash collision.
+					frappe.logger("kubeport").warning(
+						"Skipping reconciliation for Frappe Site '%s': Job '%s' is "
+						"not labeled for this site.",
+						site.name,
+						site.creation_job_name,
+					)
+					continue
+
 				succeeded = (job.status.succeeded or 0) if job.status else 0
 				failed = (job.status.failed or 0) if job.status else 0
 
@@ -228,9 +248,10 @@ def _reconcile_frappe_sites():
 					# The Job pod exited non-zero, but bench new-site can do this even on
 					# success (e.g. when --install-app triggers migrations that log warnings).
 					# Check ground truth first: does the site actually exist on the bench?
-					if _site_exists_in_bench(site, core_v1):
+					probe = _probe_site_state(site, core_v1)
+					if probe == SITE_PROBE_EXISTS:
 						_finalize_site_status(site, "Active", "")
-					else:
+					elif probe == SITE_PROBE_MISSING:
 						detail = _extract_job_failure_detail(
 							core_v1=core_v1,
 							job=job,
@@ -241,6 +262,7 @@ def _reconcile_frappe_sites():
 								title=f"Frappe Site Creation Failed: {site.name}",
 								message=detail,
 							)
+					# probe == SITE_PROBE_UNKNOWN: skip this tick, retry on next run.
 				# If neither succeeded nor failed, the Job is still running — leave status as-is.
 
 			except ApiException as e:
@@ -250,15 +272,17 @@ def _reconcile_frappe_sites():
 					# would sit in "In Progress" forever, so fall back to the same
 					# bench probe we use for the failed-Job branch: if the site
 					# exists and is functional, call it Active; otherwise Failed.
+					# An "unknown" probe (bench unreachable) defers the decision.
 					frappe.logger("kubeport").warning(
 						"Creation Job '%s' for Frappe Site '%s' no longer exists "
 						"(likely cleaned up by TTL). Falling back to bench probe.",
 						site.creation_job_name,
 						site.name,
 					)
-					if _site_exists_in_bench(site, core_v1):
+					probe = _probe_site_state(site, core_v1)
+					if probe == SITE_PROBE_EXISTS:
 						_finalize_site_status(site, "Active", "")
-					else:
+					elif probe == SITE_PROBE_MISSING:
 						_finalize_site_status(
 							site,
 							"Failed",
@@ -268,6 +292,7 @@ def _reconcile_frappe_sites():
 								"not exist on the bench."
 							),
 						)
+					# probe == SITE_PROBE_UNKNOWN: defer to next tick.
 				else:
 					frappe.log_error(
 						title=f"Frappe Site Reconciliation Error: {site.name}",
@@ -318,8 +343,8 @@ def _finalize_site_status(
 	return True
 
 
-def _site_exists_in_bench(site: "frappe._dict", core_v1: "client.CoreV1Api") -> bool:
-	"""Return True if the site is both present and functional on the bench.
+def _probe_site_state(site: "frappe._dict", core_v1: "client.CoreV1Api") -> str:
+	"""Return one of SITE_PROBE_EXISTS / SITE_PROBE_MISSING / SITE_PROBE_UNKNOWN.
 
 	A presence-only check (``site_config.json`` exists) is insufficient:
 	``bench new-site`` writes that file after creating the database but
@@ -327,14 +352,16 @@ def _site_exists_in_bench(site: "frappe._dict", core_v1: "client.CoreV1Api") -> 
 	A Job that fails during those later stages would leave a broken site
 	that still looks "present" to a directory scan.
 
-	We therefore run a two-stage ground-truth check:
+	Two-stage ground-truth check:
 
 	1. Fast: the site directory exists (reuses the discovery helper).
 	2. Strong: ``bench --site <name> list-apps`` exits 0 inside the bench
 	   pod, which requires a reachable DB and populated framework schema.
 
-	Any failure along the way returns False so callers safely fall back
-	to the ``Failed`` branch.
+	Exceptions reaching the bench (pod selection, exec failure) surface as
+	``SITE_PROBE_UNKNOWN`` so that a transient bench rollout does not cause
+	a terminal "Failed" transition on a site that is really fine — the
+	caller simply retries on the next reconcile tick.
 	"""
 	from kubeport.utils.discovery import _exec_list_sites, _select_site_discovery_pod
 
@@ -351,10 +378,19 @@ def _site_exists_in_bench(site: "frappe._dict", core_v1: "client.CoreV1Api") -> 
 			namespace=namespace,
 			pod=ref_pod,
 		)
-		if site.site_name not in existing_sites:
-			return False
+	except Exception as e:
+		frappe.logger("kubeport").warning(
+			"Could not probe site '%s' — bench unreachable, treating as unknown: %s",
+			site.name,
+			e,
+		)
+		return SITE_PROBE_UNKNOWN
 
-		return _exec_bench_site_functional(
+	if site.site_name not in existing_sites:
+		return SITE_PROBE_MISSING
+
+	try:
+		is_functional = _exec_bench_site_functional(
 			core_v1=core_v1,
 			namespace=namespace,
 			pod=ref_pod,
@@ -362,11 +398,117 @@ def _site_exists_in_bench(site: "frappe._dict", core_v1: "client.CoreV1Api") -> 
 		)
 	except Exception as e:
 		frappe.logger("kubeport").warning(
-			"Could not verify site existence for '%s' after Job failure: %s",
+			"Functional probe for site '%s' failed transiently, treating as unknown: %s",
 			site.name,
 			e,
 		)
+		return SITE_PROBE_UNKNOWN
+
+	# Directory exists; functional check decides usability.  A non-functional
+	# site directory is treated as SITE_PROBE_MISSING so the caller records the
+	# Job failure reason instead of prematurely calling it Active.
+	return SITE_PROBE_EXISTS if is_functional else SITE_PROBE_MISSING
+
+
+def _job_belongs_to_site(job: "client.V1Job", site: "frappe._dict") -> bool:
+	"""Return True if the Job's labels match the expected site docname.
+
+	Reconciliation reads the Job by name only, so a hash collision or a
+	stale ``creation_job_name`` pointing at an unrelated Job would otherwise
+	let us finalize the wrong site's status.  The label has 48 bits of
+	entropy at the doc level plus the operator-selected site name, so a
+	mismatch is a strong signal to skip.
+	"""
+	from kubeport.tasks.site_tasks import MANAGED_BY_VALUE, SITE_DOC_LABEL, _safe_label_value
+
+	metadata = getattr(job, "metadata", None)
+	labels = (metadata.labels or {}) if metadata and metadata.labels else {}
+	if labels.get("app.kubernetes.io/managed-by") != MANAGED_BY_VALUE:
 		return False
+	return labels.get(SITE_DOC_LABEL) == _safe_label_value(site.name)
+
+
+def _sweep_orphan_site_jobs():
+	"""Delete site-creation Jobs the DocType layer no longer references.
+
+	Covers the narrow failure mode where the background worker applies a
+	Job successfully but is hard-killed before it can ``db_set`` the
+	``creation_job_name`` on the row.  Nothing else tracks those Jobs:
+	``on_trash`` early-returns on empty ``creation_job_name`` and
+	``_reconcile_frappe_sites`` filters on the same field.
+
+	The sweep is scoped to (cluster, namespace) pairs that currently have
+	at least one ``Frappe Site`` row so we never manufacture a cluster
+	connection just to look for orphans.  Jobs are identified by their
+	``app.kubernetes.io/managed-by=kubeport`` + ``kubeport.io/frappe-site``
+	labels (written by ``_build_job_manifest``).
+	"""
+	from collections import defaultdict
+
+	from kubernetes import client
+
+	from kubeport.tasks.site_tasks import (
+		MANAGED_BY_LABEL,
+		MANAGED_BY_VALUE,
+		SITE_DOC_LABEL,
+		_best_effort_delete_job,
+	)
+	from kubeport.utils.k8s_client import get_k8s_api_client
+
+	all_sites = frappe.get_all(
+		"Frappe Site",
+		fields=["name", "cluster", "namespace", "creation_job_name"],
+	)
+
+	# (cluster, namespace) -> set of Job names currently referenced by any doc.
+	tracked: dict[tuple[str, str], set[str]] = defaultdict(set)
+	for site in all_sites:
+		if not site.cluster:
+			continue
+		ns = site.namespace or "default"
+		if site.creation_job_name:
+			tracked[(site.cluster, ns)].add(site.creation_job_name)
+		else:
+			# Touch the key so we still sweep the namespace even when every row
+			# has an empty creation_job_name (the exact case this sweep targets).
+			tracked.setdefault((site.cluster, ns), set())
+
+	for (cluster_name, namespace), known_names in tracked.items():
+		try:
+			api_client = get_k8s_api_client(cluster_name)
+		except Exception as e:
+			frappe.log_error(
+				title=f"Frappe Site orphan sweep: could not build K8s client for '{cluster_name}'",
+				message=str(e),
+			)
+			continue
+
+		try:
+			batch_v1 = client.BatchV1Api(api_client=api_client)
+			jobs = batch_v1.list_namespaced_job(
+				namespace=namespace,
+				label_selector=f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE},{SITE_DOC_LABEL}",
+				_request_timeout=15,
+			)
+		except Exception as e:
+			frappe.log_error(
+				title=f"Frappe Site orphan sweep: list failed for '{cluster_name}/{namespace}'",
+				message=str(e),
+			)
+			continue
+
+		for job in (jobs.items or []):
+			metadata = getattr(job, "metadata", None)
+			job_name = metadata.name if metadata and metadata.name else None
+			if not job_name or job_name in known_names:
+				continue
+			frappe.logger("kubeport").warning(
+				"Sweeping orphan Frappe Site Job '%s' in '%s/%s' — not referenced by any Frappe Site row.",
+				job_name,
+				cluster_name,
+				namespace,
+			)
+			_best_effort_delete_job(api_client, job_name, namespace)
 
 
 def _exec_bench_site_functional(
@@ -419,15 +561,9 @@ def _exec_bench_site_functional(
 	if container_name:
 		exec_kwargs["container"] = container_name
 
-	try:
-		output = stream(core_v1.connect_get_namespaced_pod_exec, **exec_kwargs)
-	except Exception as e:
-		frappe.logger("kubeport").warning(
-			"bench list-apps exec failed for site '%s' in namespace '%s': %s",
-			site_name, namespace, e,
-		)
-		return False
-
+	# Exec transport errors propagate so the caller can distinguish "site is
+	# not functional" (False return) from "probe failed transiently" (raises).
+	output = stream(core_v1.connect_get_namespaced_pod_exec, **exec_kwargs)
 	return "__OK__" in (output or "")
 
 

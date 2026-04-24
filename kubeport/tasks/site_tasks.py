@@ -34,6 +34,19 @@ from kubeport.utils.k8s_resources import apply_resource
 
 _STATUS_DETAIL_LIMIT = 500
 _JOB_TTL_SECONDS = 7200  # 2 h — enough for reconciliation (5-min cadence) to read result
+# Upper bound on how long a single site-creation Job can run.  Without this the
+# Job can hang indefinitely (ImagePullBackOff, DB unreachable, etc.) and
+# reconciliation's succeeded/failed polling never fires — the site sits in
+# "In Progress" forever.  30 min comfortably covers realistic `bench new-site`
+# runs including ERPNext app install on modest hardware while still surfacing
+# genuine hangs before a human notices.
+_JOB_ACTIVE_DEADLINE_SECONDS = 1800
+# Label key written on every Job and creds Secret we create.  Used by the
+# orphan-sweep in reconciliation to find resources the DocType layer has lost
+# track of (e.g. worker hard-killed between Job apply and db_set).
+SITE_DOC_LABEL = "kubeport.io/frappe-site"
+MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
+MANAGED_BY_VALUE = "kubeport"
 # Duplicated from frappe_site.py on purpose: if a malformed value ever reaches
 # the worker (direct DB write, schema import, etc.), we must not interpolate
 # shell metacharacters into the bench command string.
@@ -305,13 +318,14 @@ def _build_job_manifest(
 			"name": job_name,
 			"namespace": namespace,
 			"labels": {
-				"app.kubernetes.io/managed-by": "kubeport",
-				"kubeport.io/frappe-site": _safe_label_value(site_docname),
+				MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+				SITE_DOC_LABEL: _safe_label_value(site_docname),
 			},
 		},
 		"spec": {
 			"backoffLimit": 0,
 			"ttlSecondsAfterFinished": _JOB_TTL_SECONDS,
+			"activeDeadlineSeconds": _JOB_ACTIVE_DEADLINE_SECONDS,
 			"template": {"spec": pod_spec},
 		},
 	}
@@ -429,8 +443,8 @@ def _build_creds_secret_manifest(
 			"name": secret_name,
 			"namespace": namespace,
 			"labels": {
-				"app.kubernetes.io/managed-by": "kubeport",
-				"kubeport.io/frappe-site": _safe_label_value(site_docname),
+				MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+				SITE_DOC_LABEL: _safe_label_value(site_docname),
 			},
 		},
 		"stringData": string_data,
