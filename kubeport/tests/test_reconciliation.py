@@ -132,6 +132,7 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			"name": "rel-a/demo.example.com",
 			"cluster": "cluster-a",
 			"namespace": "ns",
+			"status": "In Progress",
 			"creation_job_name": "ks-demo-abcdef123456",
 			"creation_job_token": "token-1",
 			"bench_release": "rel-a",
@@ -294,7 +295,7 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 		site = SimpleNamespace(
 			name="rel/s", creation_job_token="t", creation_job_name="j",
 		)
-		applied = _finalize_site_status(site, "Active", "")
+		applied = _finalize_site_status(site, "In Progress", "Active", "")
 		self.assertFalse(applied)
 		mock_set_value.assert_not_called()
 		mock_publish.assert_not_called()
@@ -312,7 +313,7 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 		site = SimpleNamespace(
 			name="rel/s", creation_job_token="t", creation_job_name="j",
 		)
-		applied = _finalize_site_status(site, "Active", "")
+		applied = _finalize_site_status(site, "In Progress", "Active", "")
 		self.assertTrue(applied)
 		mock_set_value.assert_called_once_with("Frappe Site", "rel/s", {
 			"status": "Active",
@@ -329,6 +330,7 @@ class UnitTestReconcileFrappeSitesExtra(UnitTestCase):
 			"name": "rel-a/demo.example.com",
 			"cluster": "cluster-a",
 			"namespace": "ns",
+			"status": "In Progress",
 			"creation_job_name": "ks-demo-abcdef123456",
 			"creation_job_token": "token-1",
 			"bench_release": "rel-a",

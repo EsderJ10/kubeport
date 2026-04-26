@@ -172,29 +172,36 @@ def _reconcile_service_bundles():
 				)
 
 
-def _reconcile_frappe_sites():
-	"""Poll Kubernetes Job status for all in-progress Frappe Site creations.
+_SITE_IN_FLIGHT_STATUSES = ("In Progress", "Deleting", "Migrating")
 
-	Transitions sites to Active (job succeeded) or Failed (job failed).
-	Sites whose Job has already been cleaned up by ttlSecondsAfterFinished
-	are left as-is so a human can investigate; a warning is logged.
+
+def _reconcile_frappe_sites():
+	"""Poll Kubernetes Job status for all in-flight Frappe Site operations.
+
+	Three lifecycle states are reconciled here:
+
+	- ``In Progress`` (creation): transitions to Active or Failed based on
+	  Job exit + ground-truth bench probe.
+	- ``Deleting``: on confirmed-missing site, deletes the Frappe Site row
+	  itself; on still-present, lands the row in Failed.
+	- ``Migrating``: on functional probe, transitions back to Active; on
+	  broken or missing, lands Failed.
 
 	All status writes re-check ``operation_token`` against ``creation_job_token``
-	so that a concurrent re-creation (e.g. user clicked Force Create again)
-	cannot be overwritten by the old Job's terminal state.
+	so that a concurrent supersession (force-recreate, cancel) cannot be
+	overwritten by the previous operation's terminal state.
 	"""
 	from collections import defaultdict
 
 	from kubernetes import client
-	from kubernetes.client.rest import ApiException
 
 	from kubeport.utils.k8s_client import get_k8s_api_client
 
-	in_progress = frappe.get_all(
+	in_flight = frappe.get_all(
 		"Frappe Site",
-		filters={"status": "In Progress"},
+		filters={"status": ("in", _SITE_IN_FLIGHT_STATUSES)},
 		fields=[
-			"name", "cluster", "namespace",
+			"name", "cluster", "namespace", "status",
 			"creation_job_name", "creation_job_token",
 			"bench_release", "site_name",
 		],
@@ -202,7 +209,7 @@ def _reconcile_frappe_sites():
 
 	# Group by cluster so we only build one ApiClient per cluster per tick.
 	by_cluster: dict[str, list["frappe._dict"]] = defaultdict(list)
-	for site in in_progress:
+	for site in in_flight:
 		if site.creation_job_name:
 			by_cluster[site.cluster].append(site)
 
@@ -222,82 +229,12 @@ def _reconcile_frappe_sites():
 
 		for site in sites:
 			try:
-				job = batch_v1.read_namespaced_job(
-					name=site.creation_job_name,
-					namespace=site.namespace or "default",
-				)
-
-				if not _job_belongs_to_site(job, site):
-					# Name matches but labels don't — never touch this row from this
-					# Job.  Could be a stale name stored on the doc pointing at an
-					# unrelated Job, or a future hash collision.
-					frappe.logger("kubeport").warning(
-						"Skipping reconciliation for Frappe Site '%s': Job '%s' is "
-						"not labeled for this site.",
-						site.name,
-						site.creation_job_name,
-					)
-					continue
-
-				succeeded = (job.status.succeeded or 0) if job.status else 0
-				failed = (job.status.failed or 0) if job.status else 0
-
-				if succeeded > 0:
-					_finalize_site_status(site, "Active", "")
-				elif failed > 0:
-					# The Job pod exited non-zero, but bench new-site can do this even on
-					# success (e.g. when --install-app triggers migrations that log warnings).
-					# Check ground truth first: does the site actually exist on the bench?
-					probe = _probe_site_state(site, core_v1)
-					if probe == SITE_PROBE_EXISTS:
-						_finalize_site_status(site, "Active", "")
-					elif probe == SITE_PROBE_MISSING:
-						detail = _extract_job_failure_detail(
-							core_v1=core_v1,
-							job=job,
-							namespace=site.namespace or "default",
-						)
-						if _finalize_site_status(site, "Failed", _truncate_status_detail(detail)):
-							frappe.log_error(
-								title=f"Frappe Site Creation Failed: {site.name}",
-								message=detail,
-							)
-					# probe == SITE_PROBE_UNKNOWN: skip this tick, retry on next run.
-				# If neither succeeded nor failed, the Job is still running — leave status as-is.
-
-			except ApiException as e:
-				if e.status == 404:
-					# Job was cleaned up (ttlSecondsAfterFinished elapsed) before we
-					# read its final status.  Without a ground-truth check the site
-					# would sit in "In Progress" forever, so fall back to the same
-					# bench probe we use for the failed-Job branch: if the site
-					# exists and is functional, call it Active; otherwise Failed.
-					# An "unknown" probe (bench unreachable) defers the decision.
-					frappe.logger("kubeport").warning(
-						"Creation Job '%s' for Frappe Site '%s' no longer exists "
-						"(likely cleaned up by TTL). Falling back to bench probe.",
-						site.creation_job_name,
-						site.name,
-					)
-					probe = _probe_site_state(site, core_v1)
-					if probe == SITE_PROBE_EXISTS:
-						_finalize_site_status(site, "Active", "")
-					elif probe == SITE_PROBE_MISSING:
-						_finalize_site_status(
-							site,
-							"Failed",
-							_truncate_status_detail(
-								"Creation Job disappeared before reconciliation "
-								"could read its status (TTL expired). The site does "
-								"not exist on the bench."
-							),
-						)
-					# probe == SITE_PROBE_UNKNOWN: defer to next tick.
-				else:
-					frappe.log_error(
-						title=f"Frappe Site Reconciliation Error: {site.name}",
-						message=str(e),
-					)
+				if site.status == "In Progress":
+					_reconcile_site_create(site, batch_v1, core_v1)
+				elif site.status == "Deleting":
+					_reconcile_site_delete(site, batch_v1, core_v1)
+				elif site.status == "Migrating":
+					_reconcile_site_migrate(site, batch_v1, core_v1)
 			except Exception as e:
 				frappe.log_error(
 					title=f"Frappe Site Reconciliation Error: {site.name}",
@@ -305,15 +242,268 @@ def _reconcile_frappe_sites():
 				)
 
 
+def _read_op_job(
+	site: "frappe._dict",
+	batch_v1: "client.BatchV1Api",
+):
+	"""Read the operation Job for ``site``; return (job, status_404) tuple.
+
+	Returns ``(job, False)`` on success, ``(None, True)`` when the Job no
+	longer exists (TTL cleanup before we got here), or raises on other API
+	errors.
+	"""
+	from kubernetes.client.rest import ApiException
+
+	try:
+		job = batch_v1.read_namespaced_job(
+			name=site.creation_job_name,
+			namespace=site.namespace or "default",
+		)
+		return job, False
+	except ApiException as e:
+		if e.status == 404:
+			return None, True
+		raise
+
+
+def _reconcile_site_create(
+	site: "frappe._dict",
+	batch_v1: "client.BatchV1Api",
+	core_v1: "client.CoreV1Api",
+):
+	"""Reconcile an ``In Progress`` row: transition to Active or Failed."""
+	job, gone = _read_op_job(site, batch_v1)
+
+	if gone:
+		# Job was cleaned up (ttlSecondsAfterFinished elapsed) before we read
+		# its final status.  Fall back to the bench probe so the row does not
+		# sit in "In Progress" forever.
+		frappe.logger("kubeport").warning(
+			"Creation Job '%s' for Frappe Site '%s' no longer exists "
+			"(likely cleaned up by TTL). Falling back to bench probe.",
+			site.creation_job_name,
+			site.name,
+		)
+		probe = _probe_site_state(site, core_v1)
+		if probe == SITE_PROBE_EXISTS:
+			_finalize_site_status(site, "In Progress", "Active", "")
+		elif probe == SITE_PROBE_MISSING:
+			_finalize_site_status(
+				site,
+				"In Progress",
+				"Failed",
+				_truncate_status_detail(
+					"Creation Job disappeared before reconciliation could read "
+					"its status (TTL expired). The site does not exist on the bench."
+				),
+			)
+		# SITE_PROBE_UNKNOWN: defer to next tick.
+		return
+
+	if not _job_belongs_to_site(job, site):
+		frappe.logger("kubeport").warning(
+			"Skipping reconciliation for Frappe Site '%s': Job '%s' is "
+			"not labeled for this site.",
+			site.name,
+			site.creation_job_name,
+		)
+		return
+
+	succeeded = (job.status.succeeded or 0) if job.status else 0
+	failed = (job.status.failed or 0) if job.status else 0
+
+	if succeeded > 0:
+		_finalize_site_status(site, "In Progress", "Active", "")
+	elif failed > 0:
+		# Job exit code is not authoritative — bench new-site can exit non-zero
+		# even on success (--install-app warnings, etc.).  Probe the bench.
+		probe = _probe_site_state(site, core_v1)
+		if probe == SITE_PROBE_EXISTS:
+			_finalize_site_status(site, "In Progress", "Active", "")
+		elif probe == SITE_PROBE_MISSING:
+			detail = _extract_job_failure_detail(
+				core_v1=core_v1,
+				job=job,
+				namespace=site.namespace or "default",
+			)
+			if _finalize_site_status(site, "In Progress", "Failed", _truncate_status_detail(detail)):
+				frappe.log_error(
+					title=f"Frappe Site Creation Failed: {site.name}",
+					message=detail,
+				)
+		# SITE_PROBE_UNKNOWN: defer.
+	# Neither succeeded nor failed yet — Job still running, leave row as-is.
+
+
+def _reconcile_site_delete(
+	site: "frappe._dict",
+	batch_v1: "client.BatchV1Api",
+	core_v1: "client.CoreV1Api",
+):
+	"""Reconcile a ``Deleting`` row: delete the doc on confirmed-missing site.
+
+	Job-exit signal alone is not authoritative for drop-site either: an
+	exit-zero Job that left the site untouched (mis-pointed bench, DB error
+	on a different site) would otherwise get the row removed without the
+	site actually being gone.  The probe is the source of truth.
+	"""
+	job, gone = _read_op_job(site, batch_v1)
+
+	if gone:
+		# Job already cleaned up — fall through to probe.
+		frappe.logger("kubeport").warning(
+			"Drop-site Job '%s' for Frappe Site '%s' no longer exists "
+			"(likely cleaned up by TTL). Falling back to bench probe.",
+			site.creation_job_name,
+			site.name,
+		)
+		_apply_delete_probe(site, core_v1, failure_detail=None)
+		return
+
+	if not _job_belongs_to_site(job, site):
+		frappe.logger("kubeport").warning(
+			"Skipping reconciliation for Frappe Site '%s': drop-site Job '%s' "
+			"is not labeled for this site.",
+			site.name,
+			site.creation_job_name,
+		)
+		return
+
+	succeeded = (job.status.succeeded or 0) if job.status else 0
+	failed = (job.status.failed or 0) if job.status else 0
+
+	if succeeded > 0:
+		_apply_delete_probe(site, core_v1, failure_detail=None)
+	elif failed > 0:
+		# Probe still — drop-site can exit non-zero (e.g. site_config.json
+		# already gone from a prior partial run) yet still leave the bench in
+		# a consistent state.
+		detail = _extract_job_failure_detail(
+			core_v1=core_v1,
+			job=job,
+			namespace=site.namespace or "default",
+		)
+		_apply_delete_probe(site, core_v1, failure_detail=detail)
+	# Job still running — leave row as-is.
+
+
+def _apply_delete_probe(
+	site: "frappe._dict",
+	core_v1: "client.CoreV1Api",
+	failure_detail: str | None,
+):
+	"""Map a drop-site probe result onto a row decision.
+
+	- MISSING → delete the row (the site is gone, the doc has done its job).
+	- EXISTS → mark Failed; surface the Job logs (if we have them) so the
+	  operator sees why the drop did not take.
+	- UNKNOWN → defer to the next tick.
+	"""
+	probe = _probe_site_state(site, core_v1)
+	if probe == SITE_PROBE_MISSING:
+		_finalize_site_deletion(site)
+		return
+	if probe == SITE_PROBE_EXISTS:
+		detail = failure_detail or "Drop-site Job ran but the site is still present on the bench."
+		if _finalize_site_status(site, "Deleting", "Failed", _truncate_status_detail(detail)):
+			frappe.log_error(
+				title=f"Frappe Site Drop Failed: {site.name}",
+				message=detail,
+			)
+	# SITE_PROBE_UNKNOWN: defer.
+
+
+def _reconcile_site_migrate(
+	site: "frappe._dict",
+	batch_v1: "client.BatchV1Api",
+	core_v1: "client.CoreV1Api",
+):
+	"""Reconcile a ``Migrating`` row: Active on functional, Failed on broken."""
+	job, gone = _read_op_job(site, batch_v1)
+
+	if gone:
+		frappe.logger("kubeport").warning(
+			"Migrate Job '%s' for Frappe Site '%s' no longer exists "
+			"(likely cleaned up by TTL). Falling back to bench probe.",
+			site.creation_job_name,
+			site.name,
+		)
+		probe = _probe_site_state(site, core_v1)
+		if probe == SITE_PROBE_EXISTS:
+			_finalize_site_status(site, "Migrating", "Active", "")
+		elif probe == SITE_PROBE_MISSING:
+			_finalize_site_status(
+				site,
+				"Migrating",
+				"Failed",
+				_truncate_status_detail(
+					"Migrate Job disappeared before reconciliation could read "
+					"its status (TTL expired) and the site is not functional."
+				),
+			)
+		return
+
+	if not _job_belongs_to_site(job, site):
+		frappe.logger("kubeport").warning(
+			"Skipping reconciliation for Frappe Site '%s': migrate Job '%s' "
+			"is not labeled for this site.",
+			site.name,
+			site.creation_job_name,
+		)
+		return
+
+	succeeded = (job.status.succeeded or 0) if job.status else 0
+	failed = (job.status.failed or 0) if job.status else 0
+
+	if succeeded > 0:
+		probe = _probe_site_state(site, core_v1)
+		if probe == SITE_PROBE_EXISTS:
+			_finalize_site_status(site, "Migrating", "Active", "")
+		elif probe == SITE_PROBE_MISSING:
+			detail = _extract_job_failure_detail(
+				core_v1=core_v1,
+				job=job,
+				namespace=site.namespace or "default",
+			)
+			if _finalize_site_status(site, "Migrating", "Failed", _truncate_status_detail(detail)):
+				frappe.log_error(
+					title=f"Frappe Site Migrate Broke Site: {site.name}",
+					message=detail,
+				)
+		# UNKNOWN: defer.
+	elif failed > 0:
+		# Migrate Job exited non-zero — but if the probe still shows the site
+		# functional, treat it as a false negative and recover to Active.
+		probe = _probe_site_state(site, core_v1)
+		if probe == SITE_PROBE_EXISTS:
+			_finalize_site_status(site, "Migrating", "Active", "")
+		elif probe == SITE_PROBE_MISSING:
+			detail = _extract_job_failure_detail(
+				core_v1=core_v1,
+				job=job,
+				namespace=site.namespace or "default",
+			)
+			if _finalize_site_status(site, "Migrating", "Failed", _truncate_status_detail(detail)):
+				frappe.log_error(
+					title=f"Frappe Site Migrate Failed: {site.name}",
+					message=detail,
+				)
+		# UNKNOWN: defer.
+
+
 def _finalize_site_status(
 	site: "frappe._dict",
+	expected_status: str,
 	next_status: str,
 	detail: str,
 ) -> bool:
 	"""Write a terminal status for a Frappe Site, guarded by the operation token.
 
-	Returns True if the transition was applied, False if it was skipped
-	because a concurrent operation has superseded this Job.
+	``expected_status`` is the in-flight status the row must currently be in
+	for this transition to apply (``In Progress`` for creation, ``Deleting``
+	or ``Migrating`` for the lifecycle ops).  Returns True if the transition
+	was applied, False if it was skipped because a concurrent operation has
+	superseded this Job.
 	"""
 	current = frappe.db.get_value(
 		"Frappe Site",
@@ -321,7 +511,7 @@ def _finalize_site_status(
 		["operation_token", "status"],
 		as_dict=True,
 	)
-	if not current or current.get("status") != "In Progress":
+	if not current or current.get("status") != expected_status:
 		return False
 	if current.get("operation_token") != site.creation_job_token:
 		frappe.logger("kubeport").info(
@@ -341,6 +531,51 @@ def _finalize_site_status(
 		{"site_docname": site.name, "status": next_status},
 		doctype="Frappe Site",
 		docname=site.name,
+	)
+	return True
+
+
+def _finalize_site_deletion(site: "frappe._dict") -> bool:
+	"""Delete the Frappe Site row after a confirmed-missing probe.
+
+	Token + status guard mirrors ``_finalize_site_status`` so a concurrent
+	supersession (cancel, force action) cannot delete a row that has moved
+	on to a new operation.
+
+	The ``Active``-refusing branch in ``FrappeSite.on_trash`` does not fire
+	for ``Deleting`` rows, so the doc deletion succeeds.  The publish-realtime
+	event uses status ``Deleted`` so any open form can route the user away
+	from a now-404 doc.
+	"""
+	current = frappe.db.get_value(
+		"Frappe Site",
+		site.name,
+		["operation_token", "status"],
+		as_dict=True,
+	)
+	if not current or current.get("status") != "Deleting":
+		return False
+	if current.get("operation_token") != site.creation_job_token:
+		frappe.logger("kubeport").info(
+			"Skipping stale delete-finalize for Frappe Site '%s' — current "
+			"operation_token does not match the token that launched job '%s'.",
+			site.name,
+			site.creation_job_name,
+		)
+		return False
+
+	frappe.publish_realtime(
+		"frappe_site_status_update",
+		{"site_docname": site.name, "status": "Deleted"},
+		doctype="Frappe Site",
+		docname=site.name,
+	)
+	frappe.delete_doc(
+		"Frappe Site",
+		site.name,
+		ignore_permissions=True,
+		force=True,
+		delete_permanently=True,
 	)
 	return True
 
@@ -443,7 +678,7 @@ def _sweep_orphan_site_jobs():
 	at least one ``Frappe Site`` row so we never manufacture a cluster
 	connection just to look for orphans.  Jobs are identified by their
 	``app.kubernetes.io/managed-by=kubeport`` + ``kubeport.io/frappe-site``
-	labels (written by ``_build_job_manifest``).
+	labels (written by ``_build_op_job_manifest``).
 	"""
 	from collections import defaultdict
 
