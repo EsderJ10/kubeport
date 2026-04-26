@@ -13,12 +13,13 @@ import frappe
 
 @frappe.whitelist()
 def get_site_job_logs(site_docname: str) -> dict:
-	"""Return the stdout logs from the site-creation Job pod.
+	"""Return the stdout logs from the current operation's Job pod.
 
-	Fetches the most recent log lines from the pod created by the
-	Kubernetes Job that runs ``bench new-site``.  Returns an empty
-	string for ``logs`` when the Job pod is not yet available or has
-	already been cleaned up by ttlSecondsAfterFinished.
+	Fetches the most recent log lines from the pod created by the most
+	recent Kubernetes Job submitted for this site (``bench new-site``,
+	``bench drop-site``, or ``bench migrate``).  Returns an empty string
+	for ``logs`` when the Job pod is not yet available or has already
+	been cleaned up by ttlSecondsAfterFinished.
 
 	Args:
 		site_docname: The Frappe Site document name.
@@ -30,7 +31,7 @@ def get_site_job_logs(site_docname: str) -> dict:
 	doc = frappe.get_doc("Frappe Site", site_docname)
 
 	if not doc.creation_job_name:
-		return {"job_name": "", "logs": "", "error": "No creation job has been submitted yet."}
+		return {"job_name": "", "logs": "", "error": "No operation job has been submitted yet."}
 
 	namespace = doc.namespace or "default"
 	cluster = doc.cluster

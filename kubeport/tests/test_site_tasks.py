@@ -8,16 +8,42 @@ import pytest
 from frappe.tests import UnitTestCase
 
 from kubeport.tasks.site_tasks import (
+	_bench_drop_site_command,
+	_bench_migrate_command,
 	_bench_new_site_command,
 	_build_creds_secret_manifest,
+	_build_drop_creds_secret_manifest,
+	_build_drop_env,
 	_build_env,
-	_build_job_manifest,
+	_build_op_job_manifest,
 	_clone_reference_pod_spec,
 	_job_name,
 	_merge_env,
 	_parse_install_apps,
 	_safe_label_value,
 )
+
+
+def _create_manifest(ref_spec, *, force_create=False, install_apps=None, site_name="demo"):
+	"""Test helper: assemble a create-site Job manifest the same way the task does."""
+	bench_cmd = _bench_new_site_command(site_name, install_apps or [], force_create)
+	container_env = _build_env(
+		site_name=site_name,
+		db_type="mariadb",
+		creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+		db_root_in_creds=True,
+		db_root_secret="",
+		db_root_secret_key="",
+	)
+	return _build_op_job_manifest(
+		job_name="ks-demo-abcdef123456",
+		namespace="ns",
+		site_docname=f"release-a/{site_name}",
+		operation_label="create-site",
+		container_command=bench_cmd,
+		container_env=container_env,
+		ref_spec=ref_spec,
+	)
 
 
 class UnitTestSiteHelpers(UnitTestCase):
@@ -298,40 +324,14 @@ class UnitTestJobManifest(UnitTestCase):
 		}
 
 	def test_manifest_lifts_pod_level_fields(self):
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo.example.com",
-			site_name="demo.example.com",
-			db_type="mariadb",
-			install_apps=["erpnext"],
-			force_create=False,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=self._ref_spec(),
-		)
+		manifest = _create_manifest(self._ref_spec(), install_apps=["erpnext"])
 		pod = manifest["spec"]["template"]["spec"]
 		self.assertEqual(pod["serviceAccountName"], "frappe-sa")
 		self.assertEqual(pod["imagePullSecrets"], [{"name": "registry-secret"}])
 		self.assertEqual(pod["securityContext"], {"fsGroup": 1000})
 
 	def test_manifest_container_includes_env_from_and_resources(self):
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo",
-			site_name="demo",
-			db_type="mariadb",
-			install_apps=[],
-			force_create=False,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=self._ref_spec(),
-		)
+		manifest = _create_manifest(self._ref_spec())
 		container = manifest["spec"]["template"]["spec"]["containers"][0]
 		self.assertEqual(container["envFrom"], [{"configMapRef": {"name": "frappe-config"}}])
 		self.assertEqual(container["resources"], {"requests": {"cpu": "100m"}})
@@ -344,20 +344,7 @@ class UnitTestJobManifest(UnitTestCase):
 		"""
 		from kubeport.tasks.site_tasks import _JOB_ACTIVE_DEADLINE_SECONDS
 
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo",
-			site_name="demo",
-			db_type="mariadb",
-			install_apps=[],
-			force_create=False,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=self._ref_spec(),
-		)
+		manifest = _create_manifest(self._ref_spec())
 		self.assertEqual(
 			manifest["spec"]["activeDeadlineSeconds"], _JOB_ACTIVE_DEADLINE_SECONDS,
 		)
@@ -370,44 +357,106 @@ class UnitTestJobManifest(UnitTestCase):
 		Regression guard for the broken Recreate path where the controller used
 		to reject Active unconditionally, hiding this end-to-end wiring.
 		"""
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo",
-			site_name="demo",
-			db_type="mariadb",
-			install_apps=[],
-			force_create=True,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=self._ref_spec(),
-		)
+		manifest = _create_manifest(self._ref_spec(), force_create=True)
 		bench_cmd = manifest["spec"]["template"]["spec"]["containers"][0]["args"][0]
 		self.assertIn("--force", bench_cmd)
 
 	def test_manifest_site_env_wins_over_bench_env(self):
 		ref = self._ref_spec()
 		ref["container_env"] = [{"name": "SITE_NAME", "value": "WRONG"}]
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo",
-			site_name="demo",
-			db_type="mariadb",
-			install_apps=[],
-			force_create=False,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=ref,
-		)
+		manifest = _create_manifest(ref)
 		env = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
 		site_name_entries = [e for e in env if e["name"] == "SITE_NAME"]
 		self.assertEqual(len(site_name_entries), 1)
 		self.assertEqual(site_name_entries[0]["value"], "demo")
+
+	def test_manifest_uses_operation_label_as_container_name(self):
+		"""The operation_label arg controls the container name so logs and
+		pod inspection clearly identify which lifecycle op a Job represents.
+		"""
+		manifest = _build_op_job_manifest(
+			job_name="ks-demo-abcdef123456",
+			namespace="ns",
+			site_docname="release-a/demo",
+			operation_label="delete-site",
+			container_command="echo noop",
+			container_env=[],
+			ref_spec=self._ref_spec(),
+		)
+		container = manifest["spec"]["template"]["spec"]["containers"][0]
+		self.assertEqual(container["name"], "delete-site")
+
+	def test_drop_site_command_quotes_env_vars(self):
+		"""Drop-site command must reference shell-quoted env vars so a malformed
+		site_name (or DB password) cannot break out of the argv.
+		"""
+		cmd = _bench_drop_site_command("demo")
+		self.assertIn('"$SITE_NAME"', cmd)
+		self.assertIn('--root-login="$DB_ROOT_USER"', cmd)
+		self.assertIn('--root-password="$DB_ROOT_PASSWORD"', cmd)
+		self.assertIn("--no-backup", cmd)
+		self.assertIn("--force", cmd)
+		# Site name is never interpolated as plaintext into the command.
+		self.assertNotIn("demo", cmd.replace('"$SITE_NAME"', ""))
+
+	def test_drop_site_command_does_not_set_admin_password(self):
+		"""Drop-site does not need an admin password — it should not reference
+		ADMIN_PASSWORD anywhere in the command.
+		"""
+		cmd = _bench_drop_site_command("demo")
+		self.assertNotIn("ADMIN_PASSWORD", cmd)
+		self.assertNotIn("admin-password", cmd)
+
+	def test_migrate_command_uses_site_env_var(self):
+		"""Migrate command must use $SITE_NAME (validated, env-injected) and
+		not interpolate the raw site name into the shell string.
+		"""
+		cmd = _bench_migrate_command("demo")
+		self.assertEqual(cmd, 'bench --site "$SITE_NAME" migrate')
+		self.assertNotIn("demo", cmd)
+
+	def test_build_drop_env_omits_admin_password(self):
+		"""Drop-site env must not carry ADMIN_PASSWORD — it is a no-op for
+		drop-site and would expose a credential the Job does not need.
+		"""
+		env = _build_drop_env(
+			site_name="demo",
+			db_type="mariadb",
+			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
+			db_root_secret="",
+			db_root_secret_key="",
+		)
+		names = {e["name"] for e in env}
+		self.assertNotIn("ADMIN_PASSWORD", names)
+		self.assertEqual(names, {"SITE_NAME", "DB_TYPE", "DB_ROOT_USER", "DB_ROOT_PASSWORD"})
+
+	def test_build_drop_env_uses_user_secret_when_provided(self):
+		env = _build_drop_env(
+			site_name="demo",
+			db_type="mariadb",
+			creds_secret_name=None,
+			db_root_in_creds=False,
+			db_root_secret="user-mariadb-secret",
+			db_root_secret_key="root-pw",
+		)
+		db_root = next(e for e in env if e["name"] == "DB_ROOT_PASSWORD")
+		self.assertEqual(
+			db_root["valueFrom"]["secretKeyRef"],
+			{"name": "user-mariadb-secret", "key": "root-pw"},
+		)
+
+	def test_build_drop_creds_secret_carries_only_db_root(self):
+		manifest = _build_drop_creds_secret_manifest(
+			secret_name="ks-demo-aaaabbbbcccc-creds",
+			namespace="ns",
+			site_docname="release-a/demo",
+			db_root_password="hunter2",
+		)
+		self.assertEqual(manifest["stringData"], {"DB_ROOT_PASSWORD": "hunter2"})
+		labels = manifest["metadata"]["labels"]
+		self.assertIn("kubeport.io/frappe-site", labels)
+		self.assertIn("app.kubernetes.io/managed-by", labels)
 
 
 class UnitTestOperationTokenGuard(UnitTestCase):
@@ -437,6 +486,25 @@ class UnitTestOperationTokenGuard(UnitTestCase):
 		with patch("kubeport.tasks.site_tasks.frappe.db.get_value") as mock_get:
 			mock_get.return_value = {"operation_token": "token", "status": "In Progress"}
 			self.assertTrue(_site_operation_matches("site", "token", "In Progress"))
+
+	def test_site_operation_matches_accepts_deleting_and_migrating(self):
+		"""The guard is reused across all in-flight operations — a token-match
+		on Deleting / Migrating must succeed the same way it does on In Progress.
+		"""
+		from unittest.mock import patch
+
+		from kubeport.tasks.site_tasks import _site_operation_matches
+
+		for status in ("Deleting", "Migrating"):
+			with patch("kubeport.tasks.site_tasks.frappe.db.get_value") as mock_get:
+				mock_get.return_value = {"operation_token": "token", "status": status}
+				self.assertTrue(
+					_site_operation_matches("site", "token", status),
+					f"guard should accept matching token for status={status!r}",
+				)
+				# And must reject a stale create-time token if the row has moved
+				# on to Deleting/Migrating (different expected_status).
+				self.assertFalse(_site_operation_matches("site", "token", "In Progress"))
 
 
 def _fake_frappe_site_doc(site_name: str = "demo.example.com") -> MagicMock:
