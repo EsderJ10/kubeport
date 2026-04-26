@@ -332,8 +332,10 @@ def _finalize_site_status(
 		)
 		return False
 
-	frappe.db.set_value("Frappe Site", site.name, "status", next_status)
-	frappe.db.set_value("Frappe Site", site.name, "status_detail", detail)
+	frappe.db.set_value("Frappe Site", site.name, {
+		"status": next_status,
+		"status_detail": detail,
+	})
 	frappe.publish_realtime(
 		"frappe_site_status_update",
 		{"site_docname": site.name, "status": next_status},

@@ -779,3 +779,124 @@ class UnitTestCancelSiteTask(UnitTestCase):
 		mock_log_error.assert_called_once()
 		# Even after a non-404 Job delete error, we still attempt Secret cleanup.
 		mock_del_secret.assert_called_once()
+
+
+class UnitTestControllerValidation(UnitTestCase):
+	"""Tests for the FrappeSite controller validation methods.
+
+	These cover the outer defense layer (DocType validate) that rejects bad
+	input before it ever reaches the background worker.
+	"""
+
+	def _make_doc(self, **overrides):
+		"""Build a minimal FrappeSite-like object for validation testing."""
+		from unittest.mock import patch
+
+		with patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe"):
+			from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+			doc = FrappeSite.__new__(FrappeSite)
+			doc.flags = MagicMock()
+			defaults = {
+				"name": "release-a/erp.example.com",
+				"site_name": "erp.example.com",
+				"bench_release": "",
+				"cluster": "cluster-a",
+				"namespace": "ns",
+				"db_root_password": "pw",
+				"db_root_secret": "",
+				"install_apps": "",
+				"status": "Draft",
+				"admin_password": "pw",
+				"db_type": "mariadb",
+				"force_create": 0,
+				"creation_job_name": "",
+				"creation_job_token": "",
+				"operation_token": "",
+				"db_root_secret_key": "",
+				"status_detail": "",
+			}
+			defaults.update(overrides)
+			for k, v in defaults.items():
+				setattr(doc, k, v)
+			return doc
+
+	def test_validate_site_name_accepts_valid_hostnames(self):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import _SITE_NAME_RE
+
+		for name in ("erp.example.com", "a", "my_site", "s1.s2.s3", "a-b"):
+			self.assertTrue(
+				_SITE_NAME_RE.match(name),
+				f"Expected '{name}' to be accepted as a valid site name",
+			)
+
+	def test_validate_site_name_rejects_shell_metacharacters(self):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import _SITE_NAME_RE
+
+		for name in ('erp"; curl evil', "$(cmd)", "a/b", "A.B", "-leading", "trailing-"):
+			self.assertIsNone(
+				_SITE_NAME_RE.match(name),
+				f"Expected '{name}' to be rejected as an invalid site name",
+			)
+
+	def test_validate_install_apps_rejects_shell_injection(self):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import _APP_NAME_RE
+
+		for app in ('erpnext"; curl evil', "$(cmd)", "ERPNext", "has space"):
+			self.assertIsNone(
+				_APP_NAME_RE.match(app),
+				f"Expected '{app}' to be rejected as an invalid app name",
+			)
+
+	def test_validate_install_apps_accepts_valid_names(self):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import _APP_NAME_RE
+
+		for app in ("erpnext", "payments", "hrms", "custom-app", "my_app"):
+			self.assertTrue(
+				_APP_NAME_RE.match(app),
+				f"Expected '{app}' to be accepted as a valid app name",
+			)
+
+	def test_validate_rejects_non_deployed_bench_release(self):
+		"""The controller must block saving when the bench release is not deployed."""
+		from unittest.mock import patch
+
+		doc = self._make_doc(bench_release="release-a")
+
+		mock_release = MagicMock()
+		mock_release.cluster = "cluster-a"
+		mock_release.namespace = "ns"
+		mock_release.status = "Draft"
+
+		with patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe") as mock_frappe:
+			mock_frappe.get_doc.return_value = mock_release
+			mock_frappe.throw.side_effect = Exception("validation error")
+
+			doc.is_new = lambda: True
+			with pytest.raises(Exception, match="validation error"):
+				doc.validate()
+
+			# frappe.throw should have been called with a message about the status
+			throw_args = mock_frappe.throw.call_args
+			self.assertIn("Draft", throw_args.args[0])
+			self.assertIn("deployed", throw_args.args[0].lower())
+
+	def test_validate_accepts_deployed_bench_release(self):
+		"""The controller must allow saving when the bench release is deployed."""
+		from unittest.mock import patch
+
+		doc = self._make_doc(bench_release="release-a")
+
+		mock_release = MagicMock()
+		mock_release.cluster = "cluster-a"
+		mock_release.namespace = "ns"
+		mock_release.status = "Deployed"
+
+		with patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe") as mock_frappe:
+			mock_frappe.get_doc.return_value = mock_release
+			doc.is_new = lambda: True
+			# Should not throw — validate succeeds
+			doc.validate()
+			# frappe.throw should not have been called with a release-status message
+			for call_args in mock_frappe.throw.call_args_list:
+				self.assertNotIn("deployed", call_args.args[0].lower())

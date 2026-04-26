@@ -172,7 +172,8 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			_reconcile_frappe_sites()
 
 		mock_db_set_value.assert_any_call(
-			"Frappe Site", "rel-a/demo.example.com", "status", "Active",
+			"Frappe Site", "rel-a/demo.example.com",
+			{"status": "Active", "status_detail": ""},
 		)
 		mock_publish.assert_called_once()
 
@@ -203,8 +204,7 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			_reconcile_frappe_sites()
 
 		# No status writes should happen when tokens no longer match
-		for call_args in mock_db_set_value.call_args_list:
-			self.assertNotIn(call_args.args[2], ("status", "status_detail"))
+		mock_db_set_value.assert_not_called()
 		mock_publish.assert_not_called()
 
 	@patch("kubeport.tasks.reconciliation._probe_site_state")
@@ -237,7 +237,8 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			_reconcile_frappe_sites()
 
 		mock_db_set_value.assert_any_call(
-			"Frappe Site", "rel-a/demo.example.com", "status", "Active",
+			"Frappe Site", "rel-a/demo.example.com",
+			{"status": "Active", "status_detail": ""},
 		)
 		mock_extract_detail.assert_not_called()
 		mock_log_error.assert_not_called()
@@ -273,13 +274,8 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			_reconcile_frappe_sites()
 
 		mock_db_set_value.assert_any_call(
-			"Frappe Site", "rel-a/demo.example.com", "status", "Failed",
-		)
-		mock_db_set_value.assert_any_call(
-			"Frappe Site",
-			"rel-a/demo.example.com",
-			"status_detail",
-			"Traceback: DB error",
+			"Frappe Site", "rel-a/demo.example.com",
+			{"status": "Failed", "status_detail": "Traceback: DB error"},
 		)
 		mock_log_error.assert_called_once()
 
@@ -318,7 +314,10 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 		)
 		applied = _finalize_site_status(site, "Active", "")
 		self.assertTrue(applied)
-		mock_set_value.assert_any_call("Frappe Site", "rel/s", "status", "Active")
+		mock_set_value.assert_called_once_with("Frappe Site", "rel/s", {
+			"status": "Active",
+			"status_detail": "",
+		})
 		mock_publish.assert_called_once()
 
 
@@ -377,8 +376,7 @@ class UnitTestReconcileFrappeSitesExtra(UnitTestCase):
 			_reconcile_frappe_sites()
 
 		# No status writes should occur — the Job did not belong to us.
-		for call_args in mock_db_set_value.call_args_list:
-			self.assertNotIn(call_args.args[2], ("status", "status_detail"))
+		mock_db_set_value.assert_not_called()
 		mock_publish.assert_not_called()
 
 	@patch("kubeport.tasks.reconciliation._probe_site_state")
@@ -414,8 +412,7 @@ class UnitTestReconcileFrappeSitesExtra(UnitTestCase):
 			_reconcile_frappe_sites()
 
 		# No terminal status writes; no failure detail extraction either.
-		for call_args in mock_db_set_value.call_args_list:
-			self.assertNotIn(call_args.args[2], ("status", "status_detail"))
+		mock_db_set_value.assert_not_called()
 		mock_publish.assert_not_called()
 		mock_extract_detail.assert_not_called()
 

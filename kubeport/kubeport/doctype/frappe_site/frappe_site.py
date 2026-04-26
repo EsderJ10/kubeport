@@ -81,6 +81,11 @@ class FrappeSite(Document):
 			release = frappe.get_doc("Helm Release", self.bench_release)
 			self.cluster = release.cluster
 			self.namespace = release.namespace or "default"
+			if release.status not in ("Deployed", "Degraded"):
+				frappe.throw(
+					f"Bench release '{self.bench_release}' has status '{release.status}'. "
+					"Only deployed or degraded releases can host site creation."
+				)
 
 		if not self.db_root_password and not self.db_root_secret:
 			frappe.throw(
