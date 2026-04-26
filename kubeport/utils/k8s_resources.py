@@ -246,15 +246,21 @@ def check_resources_exist(
 	namespace: str,
 	doctype: str,
 	docname: str,
+	api_client: client.ApiClient | None = None,
 ) -> tuple[bool, str]:
 	"""Verify that K8s resources from a manifest JSON exist on the cluster.
+
+	Pass ``api_client`` to reuse an already-built client (e.g. when batching
+	multiple bundles on the same cluster).  When omitted, a client is built
+	from ``cluster_name``.
 
 	Returns:
 		A tuple of ``(is_healthy, detail_message)``.
 	"""
-	from kubeport.utils.k8s_client import get_k8s_api_client
+	if api_client is None:
+		from kubeport.utils.k8s_client import get_k8s_api_client
 
-	api_client = get_k8s_api_client(cluster_name)
+		api_client = get_k8s_api_client(cluster_name)
 	manifest_data = load_managed_manifest_objects(manifest_json)
 
 	for k8s_object in manifest_data:

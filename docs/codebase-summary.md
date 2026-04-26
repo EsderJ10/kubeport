@@ -1,241 +1,259 @@
 # Codebase Summary
 
+Module-level architecture reference for the Kubeport repository. This document describes what each module does and how they relate. For current capabilities and open gaps, see [Control Plane State](control-plane-state.md).
+
+---
+
 ## Top-Level Structure
 
-- `kubeport/api/`
-  - Whitelisted APIs for live cluster interactions.
-  - `__init__.py` handles namespace lookup and kubeconfig parsing/extraction.
-  - `discovery.py` handles live release and site discovery.
-- `kubeport/utils/`
-  - Core integration layer for Kubernetes and Helm.
-  - `k8s_client.py` builds scoped Kubernetes API clients.
-  - `helm.py` wraps the Helm CLI with temporary kubeconfig handling.
-  - `discovery.py` contains read-only cluster and site discovery logic.
-  - `k8s_resources.py` handles supported manifest parsing and CRUD behavior.
-- `kubeport/tasks/`
-  - Background execution and reconciliation.
-  - `helm_tasks.py` handles repo sync plus Helm release deploy/uninstall.
-  - `service_bundle_tasks.py` handles raw manifest apply/delete.
-  - `reconciliation.py` performs scheduled drift detection.
-- `kubeport/kubeport/doctype/`
-  - Frappe document models and form scripts.
-  - Main DocTypes are `Kubernetes Cluster`, `Helm Repository`, `Helm Chart`, `Helm Release`, `Service Bundle`, and `Helm Chart Version`.
-- `kubeport/tests/`
-  - Cross-module unit tests for discovery, tasks, reconciliation, hooks, manifests, patches, and Helm utilities.
-- `kubeport/patches/`
-  - Migration and cleanup patches for the shift from legacy manifest models to `Service Bundle`.
+```
+kubeport/
+├── api/              # Whitelisted read-only endpoints
+│   ├── __init__.py   # Namespace lookup, kubeconfig parsing/extraction
+│   ├── discovery.py  # Live release and site discovery
+│   └── site.py       # Frappe Site job log retrieval
+├── utils/            # Stateless integration helpers
+│   ├── k8s_client.py # Scoped Kubernetes API client builder
+│   ├── helm.py       # Helm CLI wrapper (subprocess, temp kubeconfig)
+│   ├── discovery.py  # Read-only cluster and site discovery logic
+│   └── k8s_resources.py  # Manifest parsing, CRUD, resource allowlist
+├── tasks/            # Background jobs (all cluster-mutating work)
+│   ├── helm_tasks.py         # Repo sync, release deploy/uninstall
+│   ├── service_bundle_tasks.py  # Manifest apply/delete
+│   ├── site_tasks.py         # Frappe site creation via K8s Jobs
+│   └── reconciliation.py     # Scheduled drift detection
+├── kubeport/doctype/  # Frappe DocType definitions and controllers
+│   ├── kubernetes_cluster/
+│   ├── helm_repository/
+│   ├── helm_chart/
+│   ├── helm_chart_version/
+│   ├── helm_release/
+│   ├── service_bundle/
+│   └── frappe_site/
+├── tests/            # Cross-module unit tests
+├── patches/          # Schema migration and cleanup
+└── hooks.py          # App configuration, scheduled jobs
+```
 
 ## Core Runtime Model
 
-The codebase follows a clear split between desired state and observed state.
+The codebase enforces a strict split between desired state and observed state:
 
-- Desired state lives in MariaDB through Frappe DocTypes.
-- Observed state comes from live Helm and Kubernetes queries.
-- Mutating operations are routed through background jobs.
-- Scheduled reconciliation compares desired and observed state and updates status fields.
+- **Desired state** lives in MariaDB through Frappe DocTypes.
+- **Observed state** comes from live Kubernetes and Helm queries.
+- **Mutating operations** are routed through background jobs on the `long` queue.
+- **Reconciliation** compares desired and observed state on a schedule and updates status fields.
 
-That is the defining architectural decision in the repository.
+This is the defining architectural decision in the repository.
 
-## Main DocTypes
+---
 
-### `Kubernetes Cluster`
+## DocTypes
 
-Purpose:
-- Stores cluster connectivity configuration.
-- Serves as the anchor for all live Kubernetes access.
+### Kubernetes Cluster
 
-Key behavior:
-- Validates auth-method-specific fields.
-- Supports connection testing.
-- Supports dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
+Stores cluster connectivity configuration and serves as the anchor for all live Kubernetes access.
+
+- Validates auth-method-specific fields (kubeconfig content, bearer token + CA certificate, or in-cluster).
+- Supports connection testing against the real Kubernetes API.
+- Provides dev-only TLS verification bypass for kubeconfig and bearer-token local clusters.
 - Requires a CA certificate for bearer-token auth unless dev-only TLS bypass is explicitly enabled.
-- Normalizes imported kubeconfig server endpoints when the source file points at local-only addresses that are not reachable from the app container.
-- The client-side form renders live discovery using async API calls.
+- Normalizes imported kubeconfig server endpoints when the source file points at local-only addresses (`0.0.0.0`, `127.0.0.1`, `localhost`) unreachable from the app container.
+- Client-side form renders live discovery tables via async API calls.
 
-### `Helm Repository`
+### Helm Repository
 
-Purpose:
-- Stores Helm repo configuration and sync settings.
+Stores Helm repo configuration and sync metadata.
 
-Key behavior:
-- Auto-registers new repos with Helm.
-- Syncs charts in background jobs.
+- Auto-registers repos with Helm on creation.
+- Syncs charts in background jobs with per-run sync tokens to prevent stale workers from overwriting newer syncs.
+- Rebuilds full chart/version inventory from the current repo index and prunes stale chart rows that disappeared upstream.
 - Tracks sync status and last sync timestamp.
-- Uses per-run sync tokens so stale repo workers cannot overwrite a newer sync.
-- Rebuilds full chart/version inventory from the current repo index and prunes stale chart rows.
+- Supports optional `include_patterns` (comma-separated globs) to filter which charts are synced.
 
-### `Helm Chart`
+### Helm Chart
 
-Purpose:
-- Stores repository-backed chart metadata and version history.
+Stores repository-backed chart metadata and version history.
 
-Key behavior:
-- Builds Helm chart references.
-- Fetches and caches default `values.yaml`.
+- Autonamed as `{repository}/{chart_name}`.
+- Maintains a child table of `Helm Chart Version` records.
+- Caches default `values.yaml` content.
+- Clears cached default values when the latest chart version changes during sync.
+- Builds chart references for Helm CLI commands.
 
-### `Helm Release`
+### Helm Release
 
-Purpose:
-- Stores desired state for a Helm-managed workload deployment.
+Stores desired state for a Helm-managed workload deployment.
 
-Key behavior:
-- Validates YAML values.
-- Rejects unsafe `local-path` plus `ReadWriteMany` combinations.
-- Queues deploy and uninstall through background jobs.
-- Tracks release lifecycle state and Helm status detail.
-- Uses a composite document identity based on cluster, namespace, and release name.
+- Identity is scoped to `cluster/namespace/release_name`, matching real Helm release scope.
+- Validates YAML values content.
+- Rejects unsafe `local-path` StorageClass plus `ReadWriteMany` access mode combinations.
+- Queues deploy (`helm upgrade --install`) and uninstall through background jobs.
+- Tracks release lifecycle state (`Draft`, `In Progress`, `Deployed`, `Degraded`, `Failed`, `Uninstalling`).
+- Workers re-check document status before acting, reducing stale duplicate execution.
 
-### `Service Bundle`
+### Service Bundle
 
-Purpose:
-- Stores desired state for raw Kubernetes manifests.
+Stores desired state for raw Kubernetes manifests.
 
-Key behavior:
-- Validates supported manifest content.
-- Queues apply and delete through background jobs.
+- Validates manifest content against the supported resource kind allowlist.
+- Queues apply (server-side apply) and delete through background jobs.
+- Uses per-run operation tokens and a distinct `Deleting` state for concurrency safety.
 - Tracks bundle lifecycle state.
-- Uses per-run operation tokens so stale apply/delete workers do not overwrite current bundle state.
+
+### Frappe Site
+
+Stores desired state for a Frappe site to be created on a running bench.
+
+- Links to a `Helm Release` (the target bench).
+- Stores site name, admin password, database credentials, and apps to install.
+- Background job discovers a running bench pod, dynamically extracts its container image and sites PVC mount, and submits a Kubernetes Job running `bench new-site`.
+- Reconciliation verifies site existence via exec-based discovery (checks for `site_config.json`) rather than trusting Job exit code — avoids false negatives when `--install-app` triggers non-fatal warnings.
+- Uses per-run operation tokens for concurrency safety.
+
+---
 
 ## API Layer
 
 ### `kubeport.api.__init__`
 
-Provides:
-- live namespace discovery
-- kubeconfig context parsing
-- kubeconfig context extraction
-- kubeconfig endpoint normalization metadata for import flows
+Form-supporting endpoints for cluster interaction:
 
-These APIs are form-supporting APIs, not long-running orchestration endpoints.
+- `get_cluster_namespaces(cluster_name)` — live namespace listing for form dropdowns
+- `parse_kubeconfig_contexts(kubeconfig_content)` — parse uploaded kubeconfig, return context metadata with normalization info
+- `extract_kubeconfig_context(kubeconfig_content, context_name)` — extract a minimal, self-contained kubeconfig for a single context
+
+Includes kubeconfig endpoint normalization: detects local-only API server addresses (`0.0.0.0`, `127.0.0.1`, `localhost`) and replaces them with the container's default gateway IP for containerized development setups.
 
 ### `kubeport.api.discovery`
 
-Provides:
-- cluster-wide live Helm release discovery
-- per-release site discovery aggregation
-- partial-error reporting in one response payload
+Live cluster discovery endpoint:
 
-This is one of the most important files for the current control-plane UX.
+- `get_cluster_discovery(cluster_name)` — returns `{ benches, sites, errors }` payload
+- Discovers Helm releases cluster-wide, then runs site discovery against releases identified as Frappe benches (currently `erpnext` chart only)
+- Release-level failures are isolated and reported as partial errors — a single failing release does not block discovery for other releases
+
+### `kubeport.api.site`
+
+Frappe Site form support:
+
+- `get_site_job_logs(site_docname)` — fetches stdout from the site-creation Job pod for display in the form
+- Returns empty logs gracefully when the Job pod is not yet available or has been cleaned up by TTL
+
+---
 
 ## Utility Layer
 
 ### `k8s_client.py`
 
-Strengths:
-- supports three auth modes
-- avoids mutating global Kubernetes client state
-- handles bearer-token CA material carefully
+Builds scoped Kubernetes API clients from cluster documents. Foundational for all K8s-facing flows.
 
-This file is foundational because almost every Kubernetes-facing flow depends on it being safe in a multi-request, multi-worker environment.
+- Supports three auth modes: kubeconfig, bearer token, in-cluster.
+- Avoids mutating global Kubernetes client state — each call produces an isolated client.
+- Handles bearer-token CA material and TLS bypass configuration.
 
 ### `helm.py`
 
-Strengths:
-- stateless wrapper around the Helm binary
-- per-call temporary kubeconfig handling
-- JSON parsing where supported
-- no `shell=True`
+Stateless wrapper around the Helm 3 binary.
 
-This is the repository’s Helm integration boundary.
+- Every function writes a temporary kubeconfig file, runs `helm` via `subprocess.run` (as a list, never `shell=True`), and cleans up in a `finally` block.
+- JSON output parsing where Helm supports it; raw YAML for `helm show values`.
+- In-Cluster auth yields `None` for the kubeconfig path, allowing Helm to auto-detect pod credentials.
+- Concurrent workers never share kubeconfig state due to per-call temp file isolation.
 
 ### `discovery.py`
 
-Strengths:
-- read-only by design
-- release normalization
-- Frappe-chart identification
-- fallback pod matching
-- workload-only site discovery
-- pod ranking for more reliable exec targets
+Read-only cluster and site discovery logic. Contains most of the robustness milestone implementation.
 
-This file contains most of the current robustness milestone logic.
+- Release normalization: splits chart name and version, identifies Frappe bench charts.
+- Pod selection: label-first lookup with fallback to namespace scan. Workload-only filtering excludes infra pods (mariadb, valkey). Candidate pods are ranked by phase, readiness, and component label.
+- Site listing: exec into a selected pod and enumerate directories containing `site_config.json`.
 
 ### `k8s_resources.py`
 
-Strengths:
-- validates managed manifest content
-- supports server-side apply
-- supports deletion and existence checks
-- keeps Service Bundle scope constrained to a known allowlist
+Manifest parsing, validation, and CRUD for Service Bundle resources.
 
-Current limitation:
-- no CRD or arbitrary resource support
+- Validates managed manifest content against a fixed allowlist of built-in resource kinds.
+- Supports server-side apply (`application/apply-patch+yaml`) with fallback to `create_from_dict` on 404.
+- Supports deletion with silent success on 404 (resource already gone).
+- Provides `check_resources_exist` for reconciliation health checks.
+
+---
 
 ## Task Layer
 
 ### `helm_tasks.py`
 
-Responsibilities:
-- repo registration and sync
-- release install/upgrade
-- release uninstall
-- realtime event publication
+Helm repository and release operations:
 
-Notable quality point:
-- release workers re-check status before acting, which reduces stale duplicate execution risk.
-- repo sync workers now re-check a per-run token and roll back partial writes when a newer sync supersedes them.
+- `add_and_sync_repo` — register repo with Helm, sync chart inventory
+- `sync_repo_charts` — re-register repo, refresh index, sync charts with per-run token check
+- `sync_all_repos` — daily scheduler entry point, enqueues `sync_repo_charts` for each repo
+- `install_or_upgrade_release` — idempotent `helm upgrade --install` with status re-check before acting
+- `uninstall_release` — `helm uninstall` with stale-job guard
+
+Chart sync rebuilds full version inventory from `helm search repo --versions`, groups by chart name, deduplicates versions, prunes charts that disappeared upstream, and clears cached default values when the latest version changes.
 
 ### `service_bundle_tasks.py`
 
-Responsibilities:
-- apply and delete raw manifests in background workers
-- update state and publish realtime events
+Raw manifest lifecycle:
+
+- `apply_service_bundle` — iterate manifest objects and call `apply_resource` for each
+- `delete_service_bundle` — iterate manifest objects and call `delete_resource` for each
+- Both use per-run operation tokens and publish realtime events.
+
+### `site_tasks.py`
+
+Frappe site creation via Kubernetes Jobs:
+
+- `create_site_task` — discovers a live bench pod, extracts its image and sites PVC mount dynamically, builds a Job manifest running `bench new-site`, and submits it via `apply_resource`.
+- Job names are derived from the site name and operation token for uniqueness.
+- Supports both direct `db_root_password` and Kubernetes `Secret` references for database credentials.
+- Reuses `_select_site_discovery_pod` from the discovery module for consistent pod selection.
 
 ### `reconciliation.py`
 
-Responsibilities:
-- scheduled drift detection every five minutes
-- Helm release health checks through `helm status`
-- Service Bundle health checks through resource existence
+Scheduled drift detection running every 5 minutes:
 
-This file keeps the control plane honest after out-of-band cluster changes.
+- **Helm Releases**: queries `helm status` for all `Deployed`/`Degraded` releases. Marks `Degraded` when Helm reports non-`deployed` status. Can recover back to `Deployed`.
+- **Service Bundles**: checks resource existence via `check_resources_exist`. Marks `Degraded` on missing resources.
+- **Frappe Sites**: polls `BatchV1Api.read_namespaced_job()` for `In Progress` sites. Checks ground truth (site file existence on bench) before marking Failed on non-zero Job exit codes. Handles Job TTL cleanup gracefully.
 
-## Frontend/Form Behavior
+---
 
-The JavaScript in DocType folders is pragmatic and async-first.
+## Frontend / Form Behavior
 
-- `Kubernetes Cluster` renders live discovery tables in the form.
-- `Helm Release` and `Service Bundle` listen for realtime status updates.
+JavaScript form scripts in DocType folders follow an async-first pattern:
+
+- `Kubernetes Cluster` renders live discovery tables in the form via `frappe.xcall`.
+- `Helm Release` and `Service Bundle` listen for realtime status update events and refresh indicators.
+- `Frappe Site` displays status indicators, creation triggers, and fetches Job logs asynchronously.
 - Namespace suggestions are fetched live from the selected cluster.
-- The UI avoids trying to persist externally discovered state during document fetch.
+- Forms never attempt to persist externally discovered state during document fetch.
 
-This matches the repository’s architectural direction.
+---
 
-## Tests
+## Test Coverage
 
-The strongest test coverage today is around:
+| Area | Coverage Level | Notes |
+|---|---|---|
+| Discovery behavior | Strong | Pod selection, fallback matching, error categories |
+| API timeout usage | Strong | Request timeout assertions |
+| Reconciliation state transitions | Strong | Including Frappe Site ground-truth verification |
+| Manifest validation | Strong | Resource kind allowlist, field validation |
+| Helm worker concurrency guards | Strong | Token checks, status re-checks |
+| Cleanup/migration patches | Strong | Legacy DocType removal, data migration |
+| Helm hooks and scheduling | Good | Scheduler event declarations |
+| Frappe Site job submission | Weak | Future coverage priority |
+| Helm Repository end-to-end sync | Weak | Needs integration test |
+| Helm Chart metadata flows | Weak | Needs integration test |
+| Cross-DocType integration | Weak | Needs broader workflow tests |
 
-- discovery behavior
-- API timeout usage
-- reconciliation state transitions
-- manifest validation
-- Helm worker concurrency safeguards
-- cleanup and migration patches
+---
 
-The weakest coverage today is around:
+## Patches and Migration
 
-- repository sync behavior end to end
-- chart metadata behavior end to end
-- broader integration flows across DocTypes and workers
+The patch layer documents an architectural transition:
 
-## Patches And Migration Story
-
-The patch layer shows an architectural transition:
-
-- old manifest-centric models existed before
-- their data is migrated into `Service Bundle`
-- legacy DocTypes are then cleaned up
-
-That is a sign the project is already evolving its domain model rather than staying static.
-
-## Overall Assessment
-
-The codebase is coherent. The boundaries are sensible:
-
-- DocTypes define desired state
-- API modules expose live reads
-- utils isolate Helm and Kubernetes mechanics
-- tasks own side effects
-- reconciliation owns drift handling
-
-The current implementation is strongest where control-plane correctness matters most: keeping external calls out of the request thread, keeping discovery read-only, and distinguishing live observed state from persisted intent. The main opportunities now are broader platform coverage, deeper health modeling, and stronger integration testing.
+- **Pre-model-sync**: `migrate_kubernetes_manifests_to_service_bundles.py` — migrates data from legacy `Kubernetes Manifest` DocType into `Service Bundle`.
+- **Post-model-sync**: `cleanup_legacy_kubeport_doctypes.py` — removes deprecated DocType tables. `rename_helm_release_docnames.py` — migrates Helm Release document names to the `cluster/namespace/release_name` identity scheme.
