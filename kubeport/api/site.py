@@ -30,7 +30,7 @@ def get_site_job_logs(site_docname: str) -> dict:
 	"""
 	doc = frappe.get_doc("Frappe Site", site_docname)
 
-	if not doc.creation_job_name:
+	if not doc.operation_job_name:
 		return {"job_name": "", "logs": "", "error": "No operation job has been submitted yet."}
 
 	namespace = doc.namespace or "default"
@@ -38,7 +38,7 @@ def get_site_job_logs(site_docname: str) -> dict:
 
 	if not cluster:
 		return {
-			"job_name": doc.creation_job_name,
+			"job_name": doc.operation_job_name,
 			"logs": "",
 			"error": "Site document is missing cluster information.",
 		}
@@ -54,13 +54,13 @@ def get_site_job_logs(site_docname: str) -> dict:
 
 		pods = core_v1.list_namespaced_pod(
 			namespace=namespace,
-			label_selector=f"job-name={doc.creation_job_name}",
+			label_selector=f"job-name={doc.operation_job_name}",
 			_request_timeout=15,
 		)
 
 		if not pods.items:
 			return {
-				"job_name": doc.creation_job_name,
+				"job_name": doc.operation_job_name,
 				"logs": "",
 				"error": "Job pod not found — it may still be pending or has been cleaned up.",
 			}
@@ -69,7 +69,7 @@ def get_site_job_logs(site_docname: str) -> dict:
 		pod_name = pod.metadata.name if pod.metadata else None
 		if not pod_name:
 			return {
-				"job_name": doc.creation_job_name,
+				"job_name": doc.operation_job_name,
 				"logs": "",
 				"error": "Job pod name unavailable.",
 			}
@@ -88,11 +88,11 @@ def get_site_job_logs(site_docname: str) -> dict:
 			else:
 				raise
 
-		return {"job_name": doc.creation_job_name, "logs": logs or "", "error": None}
+		return {"job_name": doc.operation_job_name, "logs": logs or "", "error": None}
 
 	except Exception as e:
 		return {
-			"job_name": doc.creation_job_name,
+			"job_name": doc.operation_job_name,
 			"logs": "",
 			"error": str(e),
 		}

@@ -133,8 +133,8 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			"cluster": "cluster-a",
 			"namespace": "ns",
 			"status": "In Progress",
-			"creation_job_name": "ks-demo-abcdef123456",
-			"creation_job_token": "token-1",
+			"operation_job_name": "ks-demo-abcdef123456",
+			"operation_job_token": "token-1",
 			"bench_release": "rel-a",
 			"site_name": "demo.example.com",
 		}
@@ -191,7 +191,7 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 		mock_db_set_value,
 		mock_publish,
 	):
-		mock_get_all.return_value = [self._site(creation_job_token="token-old")]
+		mock_get_all.return_value = [self._site(operation_job_token="token-old")]
 		# Current document now has a fresh operation_token (user re-triggered)
 		mock_db_get_value.return_value = {
 			"operation_token": "token-new",
@@ -293,7 +293,7 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 	):
 		mock_get_value.return_value = {"operation_token": "t", "status": "Failed"}
 		site = SimpleNamespace(
-			name="rel/s", creation_job_token="t", creation_job_name="j",
+			name="rel/s", operation_job_token="t", operation_job_name="j",
 		)
 		applied = _finalize_site_status(site, "In Progress", "Active", "")
 		self.assertFalse(applied)
@@ -311,7 +311,7 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 	):
 		mock_get_value.return_value = {"operation_token": "t", "status": "In Progress"}
 		site = SimpleNamespace(
-			name="rel/s", creation_job_token="t", creation_job_name="j",
+			name="rel/s", operation_job_token="t", operation_job_name="j",
 		)
 		applied = _finalize_site_status(site, "In Progress", "Active", "")
 		self.assertTrue(applied)
@@ -331,8 +331,8 @@ class UnitTestReconcileFrappeSitesExtra(UnitTestCase):
 			"cluster": "cluster-a",
 			"namespace": "ns",
 			"status": "In Progress",
-			"creation_job_name": "ks-demo-abcdef123456",
-			"creation_job_token": "token-1",
+			"operation_job_name": "ks-demo-abcdef123456",
+			"operation_job_token": "token-1",
 			"bench_release": "rel-a",
 			"site_name": "demo.example.com",
 		}
@@ -474,7 +474,7 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 				name="rel-a/demo",
 				cluster="cluster-a",
 				namespace="ns",
-				creation_job_name="ks-demo-known123456ab",
+				operation_job_name="ks-demo-known123456ab",
 			),
 		]
 		mock_get_api_client.return_value = MagicMock()
@@ -508,13 +508,13 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 				name="rel-a/demo",
 				cluster="cluster-a",
 				namespace="ns",
-				creation_job_name="ks-demo-abc123abc123",
+				operation_job_name="ks-demo-abc123abc123",
 			),
 			SimpleNamespace(
 				name="rel-a/other",
 				cluster="cluster-a",
 				namespace="ns",
-				creation_job_name="ks-other-xyz456xyz4",
+				operation_job_name="ks-other-xyz456xyz4",
 			),
 		]
 		mock_get_api_client.return_value = MagicMock()
@@ -532,20 +532,20 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
 	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
 	@patch("kubeport.tasks.reconciliation.frappe.get_all")
-	def test_sweeps_namespace_even_when_all_rows_have_empty_creation_job_name(
+	def test_sweeps_namespace_even_when_all_rows_have_empty_operation_job_name(
 		self,
 		mock_get_all,
 		mock_get_api_client,
 		mock_delete_job,
 	):
-		"""The worker-crash scenario: every row has empty creation_job_name but
+		"""The worker-crash scenario: every row has empty operation_job_name but
 		a labeled Job still exists in the cluster.  The sweep must still run."""
 		mock_get_all.return_value = [
 			SimpleNamespace(
 				name="rel-a/demo",
 				cluster="cluster-a",
 				namespace="ns",
-				creation_job_name=None,
+				operation_job_name=None,
 			),
 		]
 		mock_get_api_client.return_value = MagicMock()

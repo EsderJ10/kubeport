@@ -50,12 +50,12 @@ class FrappeSite(Document):
 		admin_password: DF.Password
 		bench_release: DF.Link
 		cluster: DF.Data | None
-		creation_job_name: DF.Data | None
-		creation_job_token: DF.Data | None
+		operation_job_name: DF.Data | None
+		operation_job_token: DF.Data | None
 		db_root_password: DF.Password | None
 		db_root_secret: DF.Data | None
 		db_root_secret_key: DF.Data | None
-		db_type: DF.Literal["mariadb", "postgres"]
+		db_type: DF.Literal["mariadb"]
 		force_create: DF.Check
 		install_apps: DF.SmallText | None
 		namespace: DF.Data | None
@@ -144,8 +144,8 @@ class FrappeSite(Document):
 		# Reset the job-launching token; the worker sets it again once the Job
 		# is actually submitted.  Clearing here prevents a stale reconciliation
 		# from matching on a fresh operation_token.
-		self.db_set("creation_job_token", "")
-		self.db_set("creation_job_name", "")
+		self.db_set("operation_job_token", "")
+		self.db_set("operation_job_name", "")
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.create_site_task",
 			site_docname=self.name,
@@ -177,7 +177,7 @@ class FrappeSite(Document):
 				f"Delete Site is not available while status is '{self.status}'. "
 				"Wait for the current operation to finish or cancel it first."
 			)
-		if self.status == "Failed" and not self.creation_job_name:
+		if self.status == "Failed" and not self.operation_job_name:
 			# No Job ever ran for this row — there is no site on the bench to drop.
 			# Operator can just delete the row directly.
 			frappe.throw(
@@ -191,8 +191,8 @@ class FrappeSite(Document):
 		self.db_set("operation_token", operation_token)
 		# Clear the previous operation's Job pointer; the worker sets these
 		# again once the drop-site Job is actually submitted.
-		self.db_set("creation_job_token", "")
-		self.db_set("creation_job_name", "")
+		self.db_set("operation_job_token", "")
+		self.db_set("operation_job_name", "")
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.delete_site_task",
 			site_docname=self.name,
@@ -225,8 +225,8 @@ class FrappeSite(Document):
 		self.db_set("status", "Migrating")
 		self.db_set("status_detail", "")
 		self.db_set("operation_token", operation_token)
-		self.db_set("creation_job_token", "")
-		self.db_set("creation_job_name", "")
+		self.db_set("operation_job_token", "")
+		self.db_set("operation_job_name", "")
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.migrate_site_task",
 			site_docname=self.name,
@@ -253,7 +253,7 @@ class FrappeSite(Document):
 		if self.status not in ("In Progress", "Deleting", "Migrating"):
 			frappe.throw("Cancel is only available while an operation is in progress.")
 
-		job_name = self.creation_job_name
+		job_name = self.operation_job_name
 		prior_status = self.status
 		# Rotate the token before enqueueing so any in-flight worker sees a
 		# mismatch and exits cleanly.
@@ -266,7 +266,7 @@ class FrappeSite(Document):
 		}[prior_status]
 		self.db_set("status", "Failed")
 		self.db_set("status_detail", f"Cancelled {op_label} by {user}.")
-		self.db_set("creation_job_token", "")
+		self.db_set("operation_job_token", "")
 
 		if job_name:
 			frappe.enqueue(
@@ -311,7 +311,7 @@ class FrappeSite(Document):
 		if self.status not in ("In Progress", "Deleting", "Migrating"):
 			return
 
-		job_name = self.creation_job_name
+		job_name = self.operation_job_name
 		if not job_name:
 			return
 

@@ -177,8 +177,8 @@ def create_site_task(site_docname: str, operation_token: str):
 			_best_effort_delete_secret(api_client, creds_secret_name, namespace)
 			return
 
-		doc.db_set("creation_job_name", job_name)
-		doc.db_set("creation_job_token", operation_token)
+		doc.db_set("operation_job_name", job_name)
+		doc.db_set("operation_job_token", operation_token)
 		frappe.publish_realtime(
 			"frappe_site_status_update",
 			{"site_docname": site_docname, "status": "In Progress", "job_name": job_name},
@@ -377,8 +377,8 @@ def delete_site_task(site_docname: str, operation_token: str):
 				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
 			return
 
-		doc.db_set("creation_job_name", job_name)
-		doc.db_set("creation_job_token", operation_token)
+		doc.db_set("operation_job_name", job_name)
+		doc.db_set("operation_job_token", operation_token)
 		frappe.publish_realtime(
 			"frappe_site_status_update",
 			{"site_docname": site_docname, "status": "Deleting", "job_name": job_name},
@@ -470,8 +470,8 @@ def migrate_site_task(site_docname: str, operation_token: str):
 			_best_effort_delete_job(api_client, job_name, namespace)
 			return
 
-		doc.db_set("creation_job_name", job_name)
-		doc.db_set("creation_job_token", operation_token)
+		doc.db_set("operation_job_name", job_name)
+		doc.db_set("operation_job_token", operation_token)
 		frappe.publish_realtime(
 			"frappe_site_status_update",
 			{"site_docname": site_docname, "status": "Migrating", "job_name": job_name},
@@ -640,7 +640,7 @@ def _build_env(
 	``db_root_secret`` (preferred), or our own per-Job creds Secret when the
 	user chose the plaintext field on the DocType.
 	"""
-	db_root_user = "root" if db_type == "mariadb" else "postgres"
+	db_root_user = "root"
 
 	env: list[dict[str, Any]] = [
 		{"name": "SITE_NAME", "value": site_name},
@@ -696,7 +696,7 @@ def _build_drop_env(
 	creds Secret (when the user chose the plaintext field on the DocType)
 	or the user-supplied ``db_root_secret``.
 	"""
-	db_root_user = "root" if db_type == "mariadb" else "postgres"
+	db_root_user = "root"
 
 	env: list[dict[str, Any]] = [
 		{"name": "SITE_NAME", "value": site_name},

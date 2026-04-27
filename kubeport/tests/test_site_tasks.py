@@ -96,17 +96,6 @@ class UnitTestSiteHelpers(UnitTestCase):
 		self.assertIn('--install-app="erpnext"', cmd)
 		self.assertIn('--install-app="payments"', cmd)
 
-	def test_build_env_uses_postgres_root_user_for_postgres(self):
-		env = _build_env(
-			site_name="s1",
-			db_type="postgres",
-			creds_secret_name="job-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-		)
-		db_root_user = next(e for e in env if e["name"] == "DB_ROOT_USER")
-		self.assertEqual(db_root_user["value"], "postgres")
 
 	def test_build_env_admin_password_always_references_creds_secret(self):
 		env = _build_env(
@@ -629,8 +618,8 @@ class UnitTestCreateSiteTask(UnitTestCase):
 
 		# Doc got its job-bookkeeping fields set.
 		set_fields = {call.args[0] for call in doc.db_set.call_args_list}
-		self.assertIn("creation_job_name", set_fields)
-		self.assertIn("creation_job_token", set_fields)
+		self.assertIn("operation_job_name", set_fields)
+		self.assertIn("operation_job_token", set_fields)
 
 	def test_create_site_task_deletes_orphan_job_when_token_superseded_after_apply(self):
 		"""If the doc is cancelled/deleted/force-recreated between our first
@@ -698,8 +687,8 @@ class UnitTestCreateSiteTask(UnitTestCase):
 
 		# The superseded worker must NOT record job bookkeeping on the doc.
 		set_fields = {call.args[0] for call in doc.db_set.call_args_list}
-		self.assertNotIn("creation_job_name", set_fields)
-		self.assertNotIn("creation_job_token", set_fields)
+		self.assertNotIn("operation_job_name", set_fields)
+		self.assertNotIn("operation_job_token", set_fields)
 
 	def test_create_site_task_marks_failed_and_cleans_up_secret_on_exception(self):
 		from unittest.mock import patch
@@ -878,8 +867,8 @@ class UnitTestControllerValidation(UnitTestCase):
 				"admin_password": "pw",
 				"db_type": "mariadb",
 				"force_create": 0,
-				"creation_job_name": "",
-				"creation_job_token": "",
+				"operation_job_name": "",
+				"operation_job_token": "",
 				"operation_token": "",
 				"db_root_secret_key": "",
 				"status_detail": "",

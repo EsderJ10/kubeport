@@ -13,7 +13,7 @@ frappe.ui.form.on('Frappe Site', {
 		}
 
 		const in_flight = ['In Progress', 'Migrating', 'Deleting'].includes(frm.doc.status);
-		const has_job = !!frm.doc.creation_job_name;
+		const has_job = !!frm.doc.operation_job_name;
 
 		// Create button: hide while any operation is running; relabel once the
 		// site exists so the only way to re-provision is via an explicit Force

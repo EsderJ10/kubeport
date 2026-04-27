@@ -14,8 +14,8 @@
   "column_break_status",
   "status",
   "status_detail",
-  "creation_job_name",
-  "creation_job_token",
+  "operation_job_name",
+  "operation_job_token",
   "operation_token",
   "section_break_credentials",
   "admin_password",
@@ -91,7 +91,7 @@
   },
   {
    "description": "Name of the K8s Job for the current operation (create / delete / migrate). Cleared between operations.",
-   "fieldname": "creation_job_name",
+   "fieldname": "operation_job_name",
    "fieldtype": "Data",
    "hidden": 1,
    "label": "Operation Job Name",
@@ -99,7 +99,7 @@
   },
   {
    "description": "Snapshot of operation_token captured when the current Job was launched. Reconciliation uses this to skip writes from superseded operations.",
-   "fieldname": "creation_job_token",
+   "fieldname": "operation_job_token",
    "fieldtype": "Data",
    "hidden": 1,
    "label": "Operation Job Token",

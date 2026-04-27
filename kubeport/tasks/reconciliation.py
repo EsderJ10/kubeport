@@ -187,7 +187,7 @@ def _reconcile_frappe_sites():
 	- ``Migrating``: on functional probe, transitions back to Active; on
 	  broken or missing, lands Failed.
 
-	All status writes re-check ``operation_token`` against ``creation_job_token``
+	All status writes re-check ``operation_token`` against ``operation_job_token``
 	so that a concurrent supersession (force-recreate, cancel) cannot be
 	overwritten by the previous operation's terminal state.
 	"""
@@ -202,7 +202,7 @@ def _reconcile_frappe_sites():
 		filters={"status": ("in", _SITE_IN_FLIGHT_STATUSES)},
 		fields=[
 			"name", "cluster", "namespace", "status",
-			"creation_job_name", "creation_job_token",
+			"operation_job_name", "operation_job_token",
 			"bench_release", "site_name",
 		],
 	)
@@ -210,7 +210,7 @@ def _reconcile_frappe_sites():
 	# Group by cluster so we only build one ApiClient per cluster per tick.
 	by_cluster: dict[str, list["frappe._dict"]] = defaultdict(list)
 	for site in in_flight:
-		if site.creation_job_name:
+		if site.operation_job_name:
 			by_cluster[site.cluster].append(site)
 
 	for cluster_name, sites in by_cluster.items():
@@ -256,7 +256,7 @@ def _read_op_job(
 
 	try:
 		job = batch_v1.read_namespaced_job(
-			name=site.creation_job_name,
+			name=site.operation_job_name,
 			namespace=site.namespace or "default",
 		)
 		return job, False
@@ -281,7 +281,7 @@ def _reconcile_site_create(
 		frappe.logger("kubeport").warning(
 			"Creation Job '%s' for Frappe Site '%s' no longer exists "
 			"(likely cleaned up by TTL). Falling back to bench probe.",
-			site.creation_job_name,
+			site.operation_job_name,
 			site.name,
 		)
 		probe = _probe_site_state(site, core_v1)
@@ -305,7 +305,7 @@ def _reconcile_site_create(
 			"Skipping reconciliation for Frappe Site '%s': Job '%s' is "
 			"not labeled for this site.",
 			site.name,
-			site.creation_job_name,
+			site.operation_job_name,
 		)
 		return
 
@@ -325,6 +325,7 @@ def _reconcile_site_create(
 				core_v1=core_v1,
 				job=job,
 				namespace=site.namespace or "default",
+				operation_label="bench new-site",
 			)
 			if _finalize_site_status(site, "In Progress", "Failed", _truncate_status_detail(detail)):
 				frappe.log_error(
@@ -354,7 +355,7 @@ def _reconcile_site_delete(
 		frappe.logger("kubeport").warning(
 			"Drop-site Job '%s' for Frappe Site '%s' no longer exists "
 			"(likely cleaned up by TTL). Falling back to bench probe.",
-			site.creation_job_name,
+			site.operation_job_name,
 			site.name,
 		)
 		_apply_delete_probe(site, core_v1, failure_detail=None)
@@ -365,7 +366,7 @@ def _reconcile_site_delete(
 			"Skipping reconciliation for Frappe Site '%s': drop-site Job '%s' "
 			"is not labeled for this site.",
 			site.name,
-			site.creation_job_name,
+			site.operation_job_name,
 		)
 		return
 
@@ -382,6 +383,7 @@ def _reconcile_site_delete(
 			core_v1=core_v1,
 			job=job,
 			namespace=site.namespace or "default",
+			operation_label="bench drop-site",
 		)
 		_apply_delete_probe(site, core_v1, failure_detail=detail)
 	# Job still running — leave row as-is.
@@ -425,7 +427,7 @@ def _reconcile_site_migrate(
 		frappe.logger("kubeport").warning(
 			"Migrate Job '%s' for Frappe Site '%s' no longer exists "
 			"(likely cleaned up by TTL). Falling back to bench probe.",
-			site.creation_job_name,
+			site.operation_job_name,
 			site.name,
 		)
 		probe = _probe_site_state(site, core_v1)
@@ -448,7 +450,7 @@ def _reconcile_site_migrate(
 			"Skipping reconciliation for Frappe Site '%s': migrate Job '%s' "
 			"is not labeled for this site.",
 			site.name,
-			site.creation_job_name,
+			site.operation_job_name,
 		)
 		return
 
@@ -464,6 +466,7 @@ def _reconcile_site_migrate(
 				core_v1=core_v1,
 				job=job,
 				namespace=site.namespace or "default",
+				operation_label="bench migrate",
 			)
 			if _finalize_site_status(site, "Migrating", "Failed", _truncate_status_detail(detail)):
 				frappe.log_error(
@@ -482,6 +485,7 @@ def _reconcile_site_migrate(
 				core_v1=core_v1,
 				job=job,
 				namespace=site.namespace or "default",
+				operation_label="bench migrate",
 			)
 			if _finalize_site_status(site, "Migrating", "Failed", _truncate_status_detail(detail)):
 				frappe.log_error(
@@ -513,12 +517,12 @@ def _finalize_site_status(
 	)
 	if not current or current.get("status") != expected_status:
 		return False
-	if current.get("operation_token") != site.creation_job_token:
+	if current.get("operation_token") != site.operation_job_token:
 		frappe.logger("kubeport").info(
 			"Skipping stale reconciliation for Frappe Site '%s' — current "
 			"operation_token does not match the token that launched job '%s'.",
 			site.name,
-			site.creation_job_name,
+			site.operation_job_name,
 		)
 		return False
 
@@ -555,12 +559,12 @@ def _finalize_site_deletion(site: "frappe._dict") -> bool:
 	)
 	if not current or current.get("status") != "Deleting":
 		return False
-	if current.get("operation_token") != site.creation_job_token:
+	if current.get("operation_token") != site.operation_job_token:
 		frappe.logger("kubeport").info(
 			"Skipping stale delete-finalize for Frappe Site '%s' — current "
 			"operation_token does not match the token that launched job '%s'.",
 			site.name,
-			site.creation_job_name,
+			site.operation_job_name,
 		)
 		return False
 
@@ -651,7 +655,7 @@ def _job_belongs_to_site(job: "client.V1Job", site: "frappe._dict") -> bool:
 	"""Return True if the Job's labels match the expected site docname.
 
 	Reconciliation reads the Job by name only, so a hash collision or a
-	stale ``creation_job_name`` pointing at an unrelated Job would otherwise
+	stale ``operation_job_name`` pointing at an unrelated Job would otherwise
 	let us finalize the wrong site's status.  The label has 48 bits of
 	entropy at the doc level plus the operator-selected site name, so a
 	mismatch is a strong signal to skip.
@@ -670,8 +674,8 @@ def _sweep_orphan_site_jobs():
 
 	Covers the narrow failure mode where the background worker applies a
 	Job successfully but is hard-killed before it can ``db_set`` the
-	``creation_job_name`` on the row.  Nothing else tracks those Jobs:
-	``on_trash`` early-returns on empty ``creation_job_name`` and
+	``operation_job_name`` on the row.  Nothing else tracks those Jobs:
+	``on_trash`` early-returns on empty ``operation_job_name`` and
 	``_reconcile_frappe_sites`` filters on the same field.
 
 	The sweep is scoped to (cluster, namespace) pairs that currently have
@@ -694,7 +698,7 @@ def _sweep_orphan_site_jobs():
 
 	all_sites = frappe.get_all(
 		"Frappe Site",
-		fields=["name", "cluster", "namespace", "creation_job_name"],
+		fields=["name", "cluster", "namespace", "operation_job_name"],
 	)
 
 	# (cluster, namespace) -> set of Job names currently referenced by any doc.
@@ -703,11 +707,11 @@ def _sweep_orphan_site_jobs():
 		if not site.cluster:
 			continue
 		ns = site.namespace or "default"
-		if site.creation_job_name:
-			tracked[(site.cluster, ns)].add(site.creation_job_name)
+		if site.operation_job_name:
+			tracked[(site.cluster, ns)].add(site.operation_job_name)
 		else:
 			# Touch the key so we still sweep the namespace even when every row
-			# has an empty creation_job_name (the exact case this sweep targets).
+			# has an empty operation_job_name (the exact case this sweep targets).
 			tracked.setdefault((site.cluster, ns), set())
 
 	for (cluster_name, namespace), known_names in tracked.items():
@@ -808,14 +812,20 @@ def _extract_job_failure_detail(
 	core_v1: "client.CoreV1Api",
 	job: "client.V1Job",
 	namespace: str,
+	*,
+	operation_label: str = "bench operation",
 ) -> str:
 	"""Return a useful failure message from the Job pod's stdout log.
 
 	Kubernetes's terminated.reason is always "Error" for any non-zero exit and
 	terminated.message is empty unless terminationMessagePath is configured in
 	the pod spec (we did not set it).  Fetching the actual pod log gives a far
-	more actionable message — it contains the bench new-site output including the
-	real error from MariaDB / app install.
+	more actionable message — it contains the bench command output including the
+	real error from the database or app layer.
+
+	``operation_label`` is a human-readable description of the bench command
+	that failed (e.g. ``bench new-site``, ``bench drop-site``,
+	``bench migrate``), used in the leading sentence of the detail message.
 	"""
 	if not job.metadata or not job.metadata.name:
 		return "Job failed (no metadata available)."
@@ -840,7 +850,7 @@ def _extract_job_failure_detail(
 					_request_timeout=15,
 				)
 				if logs and logs.strip():
-					return f"bench new-site failed. Last 30 log lines:\n\n{logs.strip()}"
+					return f"{operation_label} failed. Last 30 log lines:\n\n{logs.strip()}"
 			except Exception:
 				pass
 
