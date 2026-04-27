@@ -556,7 +556,9 @@ class UnitTestCreateSiteTask(UnitTestCase):
 		applied: list[tuple[str, dict]] = []
 
 		def _apply(_api_client, manifest, _ns):
-			applied.append((manifest["kind"], manifest))
+			from copy import deepcopy
+
+			applied.append((manifest["kind"], deepcopy(manifest)))
 
 		with patch.object(site_tasks, "_site_operation_matches", return_value=True), \
 			patch.object(site_tasks, "frappe") as mock_frappe, \
