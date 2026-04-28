@@ -295,12 +295,19 @@ class FrappeSite(Document):
 
 		``Active`` rows must go through ``delete_site`` so the bench-side site
 		(database + files) is dropped first; otherwise deleting the row would
-		leak the site into permanent obscurity.  Reconciliation removes the
-		row itself once the drop-site Job confirms the site is gone.
+		leak the site into permanent obscurity.
 
-		For in-flight operations (``In Progress`` / ``Deleting`` / ``Migrating``)
-		we still let the operator delete the row, but rotate the token and
-		clean up the K8s Job so it does not run untracked.
+		``Migrating`` rows are refused: cancelling a running migration can
+		corrupt the schema, and we want the operator to go through the gated
+		``cancel_site`` path explicitly rather than backdoor a kill via row
+		trash.
+
+		For any other status, if the row carries an ``operation_job_name`` we
+		rotate the operation token (so an in-flight reconciliation is rejected
+		by its token check) and enqueue ``cancel_site_task`` to clean up the
+		Job and its creds Secret.  This covers the in-flight cases
+		(``In Progress`` / ``Deleting``) and a ``Failed`` row whose Job survived
+		(cancelled mid-flight, drop-site that left the site present).
 		"""
 		if self.status == "Active":
 			frappe.throw(
@@ -308,11 +315,13 @@ class FrappeSite(Document):
 				"then this row will be removed automatically."
 			)
 
-		if self.status not in ("In Progress", "Deleting", "Migrating"):
-			return
+		if self.status == "Migrating":
+			frappe.throw(
+				"This site has a migration in progress. Cancel the migration first "
+				"(it requires explicit confirmation), then delete the row."
+			)
 
-		job_name = self.operation_job_name
-		if not job_name:
+		if not self.operation_job_name:
 			return
 
 		self.db_set("operation_token", secrets.token_hex(16))
@@ -320,7 +329,7 @@ class FrappeSite(Document):
 			"kubeport.tasks.site_tasks.cancel_site_task",
 			cluster=self.cluster,
 			namespace=self.namespace or "default",
-			job_name=job_name,
+			job_name=self.operation_job_name,
 			queue="short",
 			enqueue_after_commit=True,
 		)

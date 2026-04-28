@@ -1,8 +1,9 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
+import frappe
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 from frappe.tests import UnitTestCase
@@ -959,3 +960,48 @@ class UnitTestControllerValidation(UnitTestCase):
 			# frappe.throw should not have been called with a release-status message
 			for call_args in mock_frappe.throw.call_args_list:
 				self.assertNotIn("deployed", call_args.args[0].lower())
+
+
+class UnitTestOnTrashCleanup(UnitTestCase):
+	"""H3: on_trash enqueues cancel whenever a Job pointer exists."""
+
+	def _doc(self, **overrides):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+		# Build a stub doc that mimics the surface on_trash uses.
+		doc = MagicMock(spec=FrappeSite)
+		doc.status = overrides.get("status", "Failed")
+		doc.operation_job_name = overrides.get("operation_job_name", "ks-demo-abc123abc123")
+		doc.cluster = overrides.get("cluster", "cluster-a")
+		doc.namespace = overrides.get("namespace", "ns")
+		# bind the real on_trash to the mock doc so we exercise the controller logic.
+		doc.on_trash = FrappeSite.on_trash.__get__(doc, FrappeSite)
+		return doc
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_enqueues_cancel_for_failed_row_with_job(self, mock_enqueue):
+		doc = self._doc(status="Failed", operation_job_name="ks-demo-abc123abc123")
+		doc.on_trash()
+		mock_enqueue.assert_called_once()
+		_args, kwargs = mock_enqueue.call_args
+		self.assertEqual(kwargs["job_name"], "ks-demo-abc123abc123")
+		self.assertEqual(kwargs["cluster"], "cluster-a")
+		self.assertEqual(kwargs["namespace"], "ns")
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_no_enqueue_for_failed_row_without_job(self, mock_enqueue):
+		doc = self._doc(status="Failed", operation_job_name=None)
+		doc.on_trash()
+		mock_enqueue.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_still_enqueues_for_in_flight_with_job(self, mock_enqueue):
+		# Regression guard: existing in-flight cleanup branch still works.
+		doc = self._doc(status="In Progress", operation_job_name="ks-demo-deadbeef0000")
+		doc.on_trash()
+		mock_enqueue.assert_called_once()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_no_enqueue_for_draft_row(self, mock_enqueue):
+		doc = self._doc(status="Draft", operation_job_name=None)
+		doc.on_trash()
+		mock_enqueue.assert_not_called()
