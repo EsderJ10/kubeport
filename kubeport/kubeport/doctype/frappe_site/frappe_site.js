@@ -129,10 +129,64 @@ frappe.ui.form.on('Frappe Site', {
 	},
 
 	cancel_site_btn: function (frm) {
+		if (frm.doc.status === 'Migrating') {
+			const dialog = new frappe.ui.Dialog({
+				title: __('Cancel migration of "{0}"', [frm.doc.site_name]),
+				fields: [
+					{
+						fieldtype: 'HTML',
+						fieldname: 'warning',
+						options: `
+							<div class="alert alert-danger">
+								<strong>${__('Destructive action')}.</strong>
+								${__(
+									'Cancelling a running migration can leave the database schema in a half-applied state ' +
+									'with no automatic rollback. The site may need manual recovery.'
+								)}
+							</div>
+							<p>${__('Type <code>CANCEL</code> below to enable the destructive action.')}</p>
+						`,
+					},
+					{
+						fieldtype: 'Data',
+						fieldname: 'confirm',
+						label: __('Type CANCEL to confirm'),
+						reqd: 1,
+					},
+				],
+				primary_action_label: __('Cancel migration'),
+				primary_action(values) {
+					if ((values.confirm || '').trim() !== 'CANCEL') {
+						frappe.show_alert({
+							message: __('Type CANCEL exactly to confirm.'),
+							indicator: 'orange',
+						});
+						return;
+					}
+					dialog.hide();
+					frappe.call({
+						doc: frm.doc,
+						method: 'cancel_site',
+						args: { confirm_destructive: 1 },
+						callback: function (r) {
+							if (!r.exc) frm.reload_doc();
+						}
+					});
+				},
+			});
+			dialog.show();
+
+			const $btn = dialog.get_primary_btn();
+			$btn.prop('disabled', true);
+			dialog.fields_dict.confirm.$input.on('input', function () {
+				const ok = ($(this).val() || '').trim() === 'CANCEL';
+				$btn.prop('disabled', !ok);
+			});
+			return;
+		}
+
 		const op_labels = {
 			'In Progress': __('Cancel site creation for "{0}"? The Kubernetes Job will be deleted.',
-				[frm.doc.site_name]),
-			'Migrating': __('Cancel migration of "{0}"? The Kubernetes Job will be deleted; the site may be left mid-migration and will need attention.',
 				[frm.doc.site_name]),
 			'Deleting': __('Cancel deletion of "{0}"? The drop-site Job will be deleted; the site may already be partially dropped.',
 				[frm.doc.site_name]),

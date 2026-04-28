@@ -11,6 +11,7 @@ Covers three DocTypes:
 - **Frappe Site** — polls Kubernetes Job status for in-progress site creations
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
 import frappe
@@ -26,6 +27,10 @@ _HELM_STATUS_DETAIL_LIMIT = 500
 SITE_PROBE_EXISTS = "exists"
 SITE_PROBE_MISSING = "missing"
 SITE_PROBE_UNKNOWN = "unknown"
+
+# The worker records operation_job_name after Kubernetes acknowledges Job
+# apply.  The sweep must not race that apply -> db_set window.
+_ORPHAN_SWEEP_GRACE_SECONDS = 300
 
 
 def reconcile_all_releases():
@@ -738,11 +743,19 @@ def _sweep_orphan_site_jobs():
 			)
 			continue
 
+		now = datetime.now(timezone.utc)
 		for job in (jobs.items or []):
 			metadata = getattr(job, "metadata", None)
 			job_name = metadata.name if metadata and metadata.name else None
 			if not job_name or job_name in known_names:
 				continue
+			created = getattr(metadata, "creation_timestamp", None) if metadata else None
+			if created is not None:
+				if created.tzinfo is None:
+					created = created.replace(tzinfo=timezone.utc)
+				age_seconds = (now - created).total_seconds()
+				if age_seconds < _ORPHAN_SWEEP_GRACE_SECONDS:
+					continue
 			frappe.logger("kubeport").warning(
 				"Sweeping orphan Frappe Site Job '%s' in '%s/%s' — not referenced by any Frappe Site row.",
 				job_name,

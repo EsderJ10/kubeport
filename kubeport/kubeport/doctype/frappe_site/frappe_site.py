@@ -242,16 +242,31 @@ class FrappeSite(Document):
 		)
 
 	@frappe.whitelist()
-	def cancel_site(self):
+	def cancel_site(self, confirm_destructive: bool = False):
 		"""Cancel an in-flight operation (create / delete / migrate).
 
 		Rotates the operation token so any concurrent worker or reconciler
 		holding the old token is a no-op, marks the row ``Failed``, and
 		enqueues Job cleanup.  Operator can re-issue the appropriate action
 		from the ``Failed`` state.
+
+		``confirm_destructive`` is required for ``Migrating`` because
+		cancelling a running migration can leave MariaDB schema changes
+		half-applied.
 		"""
 		if self.status not in ("In Progress", "Deleting", "Migrating"):
 			frappe.throw("Cancel is only available while an operation is in progress.")
+
+		if isinstance(confirm_destructive, str):
+			confirm_destructive = confirm_destructive.lower() in ("1", "true", "yes")
+
+		if self.status == "Migrating" and not confirm_destructive:
+			frappe.throw(
+				"Cancelling a running migration can leave the site's database "
+				"schema in a half-applied state with no automatic rollback. "
+				"Confirm explicitly to proceed.",
+				title="Destructive cancel required",
+			)
 
 		job_name = self.operation_job_name
 		prior_status = self.status
@@ -265,7 +280,13 @@ class FrappeSite(Document):
 			"Migrating": "migration",
 		}[prior_status]
 		self.db_set("status", "Failed")
-		self.db_set("status_detail", f"Cancelled {op_label} by {user}.")
+		if prior_status == "Migrating":
+			self.db_set(
+				"status_detail",
+				f"Cancelled {op_label} by {user} (destructive cancel acknowledged).",
+			)
+		else:
+			self.db_set("status_detail", f"Cancelled {op_label} by {user}.")
 		self.db_set("operation_job_token", "")
 
 		if job_name:

@@ -48,19 +48,20 @@ The current milestone is **robustness** — making discovery, background executi
 
 - `Frappe Site` DocType links to a Helm Release (the target bench).
 - Background jobs run all three lifecycle operations (`bench new-site`, `bench drop-site`, `bench migrate`) by submitting a Kubernetes Job whose pod template is cloned from a live bench workload pod (image, sites PVC mount, env, pod-level fields). A single `_build_op_job_manifest` builder is reused across operations; only the bench command and per-op env differ.
+- All three lifecycle operations run through a single `_run_site_op` orchestrator: per-op behavior is supplied by a small `SiteOpConfig` dataclass plus plain callables (`build_command`, `build_env`, `build_creds_secret`). This is the single source of truth for the apply pipeline, post-apply token re-check, and exception cleanup.
 - Reconciliation verifies actual site existence on the bench (via exec-based discovery checking for `site_config.json` and `bench list-apps`) rather than trusting Job exit codes — avoids false negatives. The probe is three-state (`exists` / `missing` / `unknown`); transient bench-exec failures return `unknown` and defer the status transition to the next tick instead of marking the site `Failed`.
-- **Lifecycle states**: `Draft → In Progress → Active | Failed`, plus `Active → Migrating → Active | Failed` and `Active|Failed → Deleting → [doc deleted] | Failed`. Cancellation rotates the operation token, marks the row `Failed`, and best-effort deletes the Job; works symmetrically across creation, deletion, and migration.
+- **Lifecycle states**: `Draft → In Progress → Active | Failed`, plus `Active → Migrating → Active | Failed` and `Active|Failed → Deleting → [doc deleted] | Failed`. Cancellation rotates the operation token, marks the row `Failed`, and best-effort deletes the Job. Cancelling `Migrating` is confirmation-gated because killing `bench migrate` can leave MariaDB schema changes half-applied.
 - **Deletion (`bench drop-site`)** runs with `--no-backup --force`. On a confirmed-missing probe, reconciliation removes the `Frappe Site` row itself via `frappe.delete_doc`. On a still-present probe (drop-site Job ran but the bench still has the site), the row lands in `Failed` with the Job logs in `status_detail` so the operator can retry.
 - **Migration (`bench migrate`)** does not need credentials — bench reads them from `site_config.json`. Reconciliation runs the same functional probe used for creation; if the Job exit code is non-zero but the site is still functional (false negative), the row recovers to `Active`.
 - **Credentials flow through Kubernetes Secrets, never as plaintext env vars.** Create-site builds a `{job_name}-creds` Secret with `ADMIN_PASSWORD` (and `DB_ROOT_PASSWORD` when the user chose the plaintext field). Drop-site builds the same Secret shape but only with `DB_ROOT_PASSWORD` (no admin involved). Migrate needs no Secret at all. All Secrets are owner-referenced to their Job so they are garbage-collected alongside the Job's TTL cleanup. The Job reads values via `secretKeyRef`.
 - Only MariaDB is supported as a database backend. The `db_type` field is fixed to `mariadb`; postgres plumbing has been intentionally removed — there is no forward-compatibility shim and no UI path to select it.
 - Supports both direct database root password and Kubernetes Secret references.
 - Per-run operation tokens for concurrency safety, reused across all three operations.
-- **`on_trash` refuses direct deletion of `Active` rows** to prevent orphaning the real site on the bench PVC; the operator must go through Delete Site first. For in-flight rows (`In Progress`/`Deleting`/`Migrating`), `on_trash` rotates the operation token and best-effort deletes the K8s Job with `propagation_policy="Background"` (which also cleans up the creds Secret via owner-reference GC).
+- **`on_trash` refuses direct deletion of `Active` rows** to prevent orphaning the real site on the bench PVC; the operator must go through Delete Site first. It also refuses `Migrating` rows so operators must use the destructive-confirmation cancel path. For any other row with `operation_job_name`, `on_trash` rotates the operation token and best-effort deletes the K8s Job with `propagation_policy="Background"` (which also cleans up the creds Secret via owner-reference GC).
 - On Job TTL expiration before reconciliation reads the final status, reconciliation falls back to the same bench ground-truth probe used for the Job-failed branch, transitioning the row appropriately or deferring on `unknown`.
 - Every operation Job carries `activeDeadlineSeconds` (30 min default) so a pod stuck in `ImagePullBackOff` or unable to reach the DB eventually flips to `failed` instead of leaving the row in an in-flight state forever.
 - Reconciliation validates each Job's `kubeport.io/frappe-site` label before trusting its status, defending against hash collisions and stale `operation_job_name` values.
-- **Orphan-Job sweep**: each reconciliation tick lists Jobs labeled `app.kubernetes.io/managed-by=kubeport,kubeport.io/frappe-site` in every cluster/namespace pair that has any `Frappe Site` row and deletes those not referenced by any row's `operation_job_name`. Covers the narrow failure mode where a worker is hard-killed between applying the Job and recording its name. The sweep is operation-agnostic — it picks up orphaned create, delete, and migrate Jobs equally.
+- **Orphan-Job sweep**: each reconciliation tick lists Jobs labeled `app.kubernetes.io/managed-by=kubeport,kubeport.io/frappe-site` in every cluster/namespace pair that has any `Frappe Site` row and deletes those not referenced by any row's `operation_job_name`. Jobs younger than one reconciliation tick are skipped so the sweep cannot race a worker that has applied a Job but has not recorded it yet. The sweep is operation-agnostic — it picks up orphaned create, delete, and migrate Jobs equally.
 - Site names are validated to hostname-style labels (lowercase alphanumerics plus `.`, `-`, `_`, starting/ending alphanumeric) so they are safe for the `{bench_release}/{site_name}` docname, the K8s Job slug, and the bench environment.
 
 ### Live Discovery
@@ -97,8 +98,10 @@ The codebase actively defends against imperfect cluster conditions:
 | Transient probe failures do not mark sites failed | Site probe returns `unknown` on exec errors; status transition deferred |
 | Hung lifecycle Jobs are reaped | `activeDeadlineSeconds` on every create/delete/migrate Job |
 | Orphan Jobs are swept | Label-based sweep in each reconciliation tick (operation-agnostic) |
+| Orphan sweep does not race workers | Jobs younger than the reconciliation tick are excluded from the sweep |
 | Job identity is validated | `kubeport.io/frappe-site` label checked before any status write |
 | Active rows cannot be silently orphaned | `on_trash` refuses direct deletion of `Active` Frappe Site rows |
+| Destructive cancellation is gated | `cancel_site` requires `confirm_destructive=True` for `Migrating`; UI requires typed `CANCEL` |
 | Drop-site exit code is not trusted blindly | Bench probe is the source of truth for "site really gone" |
 | Job failure messages are operation-specific | `_extract_job_failure_detail` receives an `operation_label` so logs clearly name which `bench` command failed (`bench new-site`, `bench drop-site`, `bench migrate`) |
 
@@ -131,7 +134,7 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Testing Depth
 
-- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, Frappe Site creation task orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, and full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession).
+- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, shared Frappe Site operation orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, direct delete/migrate reconciliation branch behavior, and full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession).
 - Weak coverage: Helm Repository sync integration, Helm Chart metadata flows, broader cross-DocType integration tests.
 
 ### Operator Documentation

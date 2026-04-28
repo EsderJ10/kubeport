@@ -21,7 +21,8 @@ Design rationale (direct Job submission, not Helm upgrade):
 from __future__ import annotations
 
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import frappe
 from kubernetes import client
@@ -54,164 +55,90 @@ MANAGED_BY_VALUE = "kubeport"
 _APP_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
+@dataclass(frozen=True)
+class SiteOpConfig:
+	"""Per-operation configuration for ``_run_site_op``."""
+
+	op_kind: str
+	expected_status: str
+	container_label: str
+	failure_log_title: str
+	failure_detail_prefix: str
+
+
+_CREATE_OP_CONFIG = SiteOpConfig(
+	op_kind="create",
+	expected_status="In Progress",
+	container_label="create-site",
+	failure_log_title="Frappe Site Job Submission Failed",
+	failure_detail_prefix="Job submission failed",
+)
+
+
+_DELETE_OP_CONFIG = SiteOpConfig(
+	op_kind="delete",
+	expected_status="Deleting",
+	container_label="delete-site",
+	failure_log_title="Frappe Site Drop Submission Failed",
+	failure_detail_prefix="Drop-site Job submission failed",
+)
+
+
+_MIGRATE_OP_CONFIG = SiteOpConfig(
+	op_kind="migrate",
+	expected_status="Migrating",
+	container_label="migrate-site",
+	failure_log_title="Frappe Site Migrate Submission Failed",
+	failure_detail_prefix="Migrate Job submission failed",
+)
+
+
+def _create_command(doc: Any) -> str:
+	install_apps = _parse_install_apps(doc.install_apps)
+	return _bench_new_site_command(doc.site_name, install_apps, bool(doc.force_create))
+
+
+def _create_env(doc: Any, creds_secret_name: str | None) -> list[dict[str, Any]]:
+	if creds_secret_name is None:
+		raise RuntimeError("create_site_task requires a creds Secret name.")
+
+	db_root_secret = doc.db_root_secret or ""
+	db_root_secret_key = doc.db_root_secret_key or "mariadb-root-password"
+	needs_db_root_in_creds = not db_root_secret
+	return _build_env(
+		site_name=doc.site_name,
+		db_type=doc.db_type or "mariadb",
+		creds_secret_name=creds_secret_name,
+		db_root_in_creds=needs_db_root_in_creds,
+		db_root_secret=db_root_secret,
+		db_root_secret_key=db_root_secret_key,
+	)
+
+
+def _create_creds_secret(doc: Any, job_name: str) -> dict[str, Any]:
+	admin_password = doc.get_password("admin_password") or ""
+	db_root_secret = doc.db_root_secret or ""
+	needs_db_root_in_creds = not db_root_secret
+	db_root_password = doc.get_password("db_root_password") or "" if needs_db_root_in_creds else None
+	return _build_creds_secret_manifest(
+		secret_name=f"{job_name}-creds",
+		namespace=doc.namespace or "default",
+		site_docname=doc.name,
+		admin_password=admin_password,
+		db_root_password=db_root_password,
+	)
+
+
 def create_site_task(site_docname: str, operation_token: str):
-	"""Background task: submit a Kubernetes Job that runs ``bench new-site``.
-
-	Reads the reference pod from the bench namespace to clone its image and
-	sites PVC mount, then submits a per-Job credentials Secret and the Job
-	manifest via server-side apply.  Reconciliation polls the Job status and
-	transitions the site to Active or Failed once the Job finishes.
-
-	The admin password (and, when the user chose the plaintext path, the DB
-	root password) are stored in a per-Job ``Secret`` and referenced by the
-	Job via ``secretKeyRef`` instead of being injected as plaintext env
-	values.  The Secret is owner-referenced to the Job so it is garbage
-	collected along with the Job's ``ttlSecondsAfterFinished`` cleanup.
-	"""
-	if not _site_operation_matches(site_docname, operation_token, "In Progress"):
-		return
-
-	doc = frappe.get_doc("Frappe Site", site_docname)
-	creds_secret_name: str | None = None
-	job_name_for_cleanup: str | None = None
-	job_applied = False
-	namespace = ""
-	api_client = None
-
-	try:
-		release = frappe.get_doc("Helm Release", doc.bench_release)
-		cluster = release.cluster
-		namespace = release.namespace or "default"
-		release_name = release.release_name
-
-		api_client = get_k8s_api_client(cluster)
-		core_v1 = client.CoreV1Api(api_client=api_client)
-
-		ref_pod = _select_site_discovery_pod(
-			core_v1=core_v1,
-			namespace=namespace,
-			release_name=release_name,
-		)
-
-		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
-
-		job_name = _job_name(doc.site_name, operation_token)
-		job_name_for_cleanup = job_name
-		creds_secret_name = f"{job_name}-creds"
-		install_apps = _parse_install_apps(doc.install_apps)
-		db_type = doc.db_type or "mariadb"
-		admin_password = doc.get_password("admin_password") or ""
-		db_root_secret = doc.db_root_secret or ""
-		db_root_secret_key = doc.db_root_secret_key or "mariadb-root-password"
-
-		# Plaintext DB root password is only needed when the user did not
-		# provide a Kubernetes Secret — we route it through our creds Secret
-		# so it never lands as a plaintext env var.
-		needs_db_root_in_creds = not db_root_secret
-		db_root_password = doc.get_password("db_root_password") or ""
-
-		creds_secret_manifest = _build_creds_secret_manifest(
-			secret_name=creds_secret_name,
-			namespace=namespace,
-			site_docname=site_docname,
-			admin_password=admin_password,
-			db_root_password=db_root_password if needs_db_root_in_creds else None,
-		)
-		apply_resource(api_client, creds_secret_manifest, namespace)
-
-		bench_cmd = _bench_new_site_command(doc.site_name, install_apps, bool(doc.force_create))
-		container_env = _build_env(
-			site_name=doc.site_name,
-			db_type=db_type,
-			creds_secret_name=creds_secret_name,
-			db_root_in_creds=needs_db_root_in_creds,
-			db_root_secret=db_root_secret,
-			db_root_secret_key=db_root_secret_key,
-		)
-		job_manifest = _build_op_job_manifest(
-			job_name=job_name,
-			namespace=namespace,
-			site_docname=site_docname,
-			operation_label="create-site",
-			container_command=bench_cmd,
-			container_env=container_env,
-			ref_spec=ref_spec,
-		)
-
-		apply_resource(api_client, job_manifest, namespace)
-		job_applied = True
-
-		# Now that the Job exists, adopt the Secret via ownerReferences so it
-		# gets garbage-collected whenever the Job is deleted (cancellation,
-		# TTL-based cleanup after completion, on_trash cascade).  Best-effort:
-		# if this fails, the Secret still exists and will be cleaned up by
-		# cancel_site_task or by orphan-sweep logic outside this branch.
-		try:
-			batch_v1 = client.BatchV1Api(api_client=api_client)
-			job_read = batch_v1.read_namespaced_job(name=job_name, namespace=namespace)
-			job_uid = getattr(getattr(job_read, "metadata", None), "uid", None)
-			if job_uid:
-				creds_secret_manifest["metadata"]["ownerReferences"] = [{
-					"apiVersion": "batch/v1",
-					"kind": "Job",
-					"name": job_name,
-					"uid": job_uid,
-					"controller": True,
-					"blockOwnerDeletion": True,
-				}]
-				apply_resource(api_client, creds_secret_manifest, namespace)
-		except Exception as owner_err:
-			frappe.logger("kubeport").warning(
-				"Could not attach ownerReference for creds Secret '%s': %s",
-				creds_secret_name,
-				owner_err,
-			)
-
-		if not _site_operation_matches(site_docname, operation_token, "In Progress"):
-			# Doc was cancelled / deleted / force-recreated while we were
-			# applying. The Job we just created is now untracked: nothing in the
-			# DB references it, so reconciliation and cancel_site_task cannot
-			# reach it. Tear it down here so it does not run to completion and
-			# create an orphan site on the bench PVC.
-			_best_effort_delete_job(api_client, job_name, namespace)
-			_best_effort_delete_secret(api_client, creds_secret_name, namespace)
-			return
-
-		doc.db_set("operation_job_name", job_name)
-		doc.db_set("operation_job_token", operation_token)
-		frappe.publish_realtime(
-			"frappe_site_status_update",
-			{"site_docname": site_docname, "status": "In Progress", "job_name": job_name},
-			doctype="Frappe Site",
-			docname=site_docname,
-		)
-
-	except Exception as e:
-		# Best-effort cleanup of anything we created before the exception.
-		# Order matters: drop the Job first (which would otherwise GC the
-		# Secret via ownerRef once it starts running anyway), then the Secret
-		# as a backstop for the case where the ownerRef was never attached.
-		if api_client is not None and namespace:
-			if job_applied and job_name_for_cleanup:
-				_best_effort_delete_job(api_client, job_name_for_cleanup, namespace)
-			if creds_secret_name:
-				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
-
-		if not _site_operation_matches(site_docname, operation_token, "In Progress"):
-			return
-
-		doc.db_set("status", "Failed")
-		doc.db_set("status_detail", _truncate(f"Job submission failed: {e}"))
-		frappe.log_error(
-			title=f"Frappe Site Job Submission Failed: {site_docname}",
-			message=str(e),
-		)
-		frappe.publish_realtime(
-			"frappe_site_status_update",
-			{"site_docname": site_docname, "status": "Failed"},
-			doctype="Frappe Site",
-			docname=site_docname,
-		)
+	"""Background task: submit a Kubernetes Job that runs ``bench new-site``."""
+	_run_site_op(
+		site_docname=site_docname,
+		operation_token=operation_token,
+		config=_CREATE_OP_CONFIG,
+		build_command=_create_command,
+		build_env=_create_env,
+		build_creds_secret=_create_creds_secret,
+	)
 
 
 def cancel_site_task(cluster: str, namespace: str, job_name: str):
@@ -263,22 +190,114 @@ def cancel_site_task(cluster: str, namespace: str, job_name: str):
 	_best_effort_delete_secret(api_client, f"{job_name}-creds", namespace)
 
 
-def delete_site_task(site_docname: str, operation_token: str):
-	"""Background task: submit a Kubernetes Job that runs ``bench drop-site``.
+def _delete_command(doc: Any) -> str:
+	return _bench_drop_site_command(doc.site_name)
 
-	Mirrors ``create_site_task`` for the Job/Secret apply pattern: clone the
-	reference pod to inherit image and volumes, optionally build a per-Job
-	creds Secret carrying ``DB_ROOT_PASSWORD`` (only when the user did not
-	supply an external Secret), apply the Job.  Reconciliation polls the Job
-	and probes the bench: a confirmed-missing site causes the row itself to
-	be deleted via ``frappe.delete_doc``; a still-present site lands the row
-	in ``Failed`` so the operator can retry.
-	"""
-	if not _site_operation_matches(site_docname, operation_token, "Deleting"):
+
+def _delete_env(doc: Any, creds_secret_name: str | None) -> list[dict[str, Any]]:
+	db_root_secret = doc.db_root_secret or ""
+	db_root_secret_key = doc.db_root_secret_key or "mariadb-root-password"
+	needs_db_root_in_creds = not db_root_secret
+	return _build_drop_env(
+		site_name=doc.site_name,
+		db_type=doc.db_type or "mariadb",
+		creds_secret_name=creds_secret_name,
+		db_root_in_creds=needs_db_root_in_creds,
+		db_root_secret=db_root_secret,
+		db_root_secret_key=db_root_secret_key,
+	)
+
+
+def _delete_creds_secret(doc: Any, job_name: str) -> dict[str, Any] | None:
+	if doc.db_root_secret:
+		return None
+
+	db_root_password = doc.get_password("db_root_password") or ""
+	return _build_drop_creds_secret_manifest(
+		secret_name=f"{job_name}-creds",
+		namespace=doc.namespace or "default",
+		site_docname=doc.name,
+		db_root_password=db_root_password,
+	)
+
+
+def delete_site_task(site_docname: str, operation_token: str):
+	"""Background task: submit a Kubernetes Job that runs ``bench drop-site``."""
+	_run_site_op(
+		site_docname=site_docname,
+		operation_token=operation_token,
+		config=_DELETE_OP_CONFIG,
+		build_command=_delete_command,
+		build_env=_delete_env,
+		build_creds_secret=_delete_creds_secret,
+	)
+
+
+def _migrate_command(doc: Any) -> str:
+	return _bench_migrate_command(doc.site_name)
+
+
+def _migrate_env(doc: Any, creds_secret_name: str | None) -> list[dict[str, Any]]:
+	return [{"name": "SITE_NAME", "value": doc.site_name}]
+
+
+def migrate_site_task(site_docname: str, operation_token: str):
+	"""Background task: submit a Kubernetes Job that runs ``bench migrate``."""
+	_run_site_op(
+		site_docname=site_docname,
+		operation_token=operation_token,
+		config=_MIGRATE_OP_CONFIG,
+		build_command=_migrate_command,
+		build_env=_migrate_env,
+		build_creds_secret=None,
+	)
+
+
+def _attach_creds_secret_owner_ref(
+	api_client: "client.ApiClient",
+	creds_secret_manifest: dict[str, Any],
+	job_name: str,
+	namespace: str,
+) -> None:
+	"""Re-apply a creds Secret with an ownerReference pointing at the Job."""
+	try:
+		batch_v1 = client.BatchV1Api(api_client=api_client)
+		job_read = batch_v1.read_namespaced_job(name=job_name, namespace=namespace)
+		job_uid = getattr(getattr(job_read, "metadata", None), "uid", None)
+		if not job_uid:
+			return
+		creds_secret_manifest["metadata"]["ownerReferences"] = [{
+			"apiVersion": "batch/v1",
+			"kind": "Job",
+			"name": job_name,
+			"uid": job_uid,
+			"controller": True,
+			"blockOwnerDeletion": True,
+		}]
+		apply_resource(api_client, creds_secret_manifest, namespace)
+	except Exception as owner_err:
+		frappe.logger("kubeport").warning(
+			"Could not attach ownerReference for creds Secret '%s': %s",
+			creds_secret_manifest.get("metadata", {}).get("name", "?"),
+			owner_err,
+		)
+
+
+def _run_site_op(
+	site_docname: str,
+	operation_token: str,
+	config: SiteOpConfig,
+	build_command: Callable[[Any], str],
+	build_env: Callable[[Any, str | None], list[dict[str, Any]]],
+	build_creds_secret: Callable[[Any, str], dict[str, Any] | None] | None = None,
+) -> None:
+	"""Run a one-shot bench operation Job under the shared lifecycle scaffolding."""
+	if not _site_operation_matches(site_docname, operation_token, config.expected_status):
 		return
 
 	doc = frappe.get_doc("Frappe Site", site_docname)
 	creds_secret_name: str | None = None
+	creds_secret_manifest: dict[str, Any] | None = None
 	job_name_for_cleanup: str | None = None
 	job_applied = False
 	namespace = ""
@@ -289,6 +308,7 @@ def delete_site_task(site_docname: str, operation_token: str):
 		cluster = release.cluster
 		namespace = release.namespace or "default"
 		release_name = release.release_name
+		doc.namespace = namespace
 
 		api_client = get_k8s_api_client(cluster)
 		core_v1 = client.CoreV1Api(api_client=api_client)
@@ -298,43 +318,24 @@ def delete_site_task(site_docname: str, operation_token: str):
 			namespace=namespace,
 			release_name=release_name,
 		)
-
 		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
 
 		job_name = _job_name(doc.site_name, operation_token)
 		job_name_for_cleanup = job_name
-		db_type = doc.db_type or "mariadb"
-		db_root_secret = doc.db_root_secret or ""
-		db_root_secret_key = doc.db_root_secret_key or "mariadb-root-password"
 
-		needs_db_root_in_creds = not db_root_secret
-		if needs_db_root_in_creds:
-			creds_secret_name = f"{job_name}-creds"
-			db_root_password = doc.get_password("db_root_password") or ""
-			creds_secret_manifest = _build_drop_creds_secret_manifest(
-				secret_name=creds_secret_name,
-				namespace=namespace,
-				site_docname=site_docname,
-				db_root_password=db_root_password,
-			)
-			apply_resource(api_client, creds_secret_manifest, namespace)
-		else:
-			creds_secret_manifest = None
+		if build_creds_secret is not None:
+			creds_secret_manifest = build_creds_secret(doc, job_name)
+			if creds_secret_manifest is not None:
+				creds_secret_name = creds_secret_manifest["metadata"]["name"]
+				apply_resource(api_client, creds_secret_manifest, namespace)
 
-		bench_cmd = _bench_drop_site_command(doc.site_name)
-		container_env = _build_drop_env(
-			site_name=doc.site_name,
-			db_type=db_type,
-			creds_secret_name=creds_secret_name,
-			db_root_in_creds=needs_db_root_in_creds,
-			db_root_secret=db_root_secret,
-			db_root_secret_key=db_root_secret_key,
-		)
+		bench_cmd = build_command(doc)
+		container_env = build_env(doc, creds_secret_name)
 		job_manifest = _build_op_job_manifest(
 			job_name=job_name,
 			namespace=namespace,
 			site_docname=site_docname,
-			operation_label="delete-site",
+			operation_label=config.container_label,
 			container_command=bench_cmd,
 			container_env=container_env,
 			ref_spec=ref_spec,
@@ -343,35 +344,15 @@ def delete_site_task(site_docname: str, operation_token: str):
 		apply_resource(api_client, job_manifest, namespace)
 		job_applied = True
 
-		# Adopt the creds Secret via ownerRef so K8s GC cascades it with the
-		# Job's TTL cleanup.  Best-effort; the cancel/sweep paths cover the
-		# rest.
 		if creds_secret_manifest is not None:
-			try:
-				batch_v1 = client.BatchV1Api(api_client=api_client)
-				job_read = batch_v1.read_namespaced_job(name=job_name, namespace=namespace)
-				job_uid = getattr(getattr(job_read, "metadata", None), "uid", None)
-				if job_uid:
-					creds_secret_manifest["metadata"]["ownerReferences"] = [{
-						"apiVersion": "batch/v1",
-						"kind": "Job",
-						"name": job_name,
-						"uid": job_uid,
-						"controller": True,
-						"blockOwnerDeletion": True,
-					}]
-					apply_resource(api_client, creds_secret_manifest, namespace)
-			except Exception as owner_err:
-				frappe.logger("kubeport").warning(
-					"Could not attach ownerReference for drop-site creds Secret '%s': %s",
-					creds_secret_name,
-					owner_err,
-				)
+			_attach_creds_secret_owner_ref(
+				api_client=api_client,
+				creds_secret_manifest=creds_secret_manifest,
+				job_name=job_name,
+				namespace=namespace,
+			)
 
-		if not _site_operation_matches(site_docname, operation_token, "Deleting"):
-			# Doc was cancelled / superseded while we were applying.  Tear down
-			# the Job so it does not run untracked and accidentally drop a site
-			# the user no longer wants dropped.
+		if not _site_operation_matches(site_docname, operation_token, config.expected_status):
 			_best_effort_delete_job(api_client, job_name, namespace)
 			if creds_secret_name:
 				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
@@ -381,7 +362,7 @@ def delete_site_task(site_docname: str, operation_token: str):
 		doc.db_set("operation_job_token", operation_token)
 		frappe.publish_realtime(
 			"frappe_site_status_update",
-			{"site_docname": site_docname, "status": "Deleting", "job_name": job_name},
+			{"site_docname": site_docname, "status": config.expected_status, "job_name": job_name},
 			doctype="Frappe Site",
 			docname=site_docname,
 		)
@@ -393,103 +374,13 @@ def delete_site_task(site_docname: str, operation_token: str):
 			if creds_secret_name:
 				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
 
-		if not _site_operation_matches(site_docname, operation_token, "Deleting"):
+		if not _site_operation_matches(site_docname, operation_token, config.expected_status):
 			return
 
 		doc.db_set("status", "Failed")
-		doc.db_set("status_detail", _truncate(f"Drop-site Job submission failed: {e}"))
+		doc.db_set("status_detail", _truncate(f"{config.failure_detail_prefix}: {e}"))
 		frappe.log_error(
-			title=f"Frappe Site Drop Submission Failed: {site_docname}",
-			message=str(e),
-		)
-		frappe.publish_realtime(
-			"frappe_site_status_update",
-			{"site_docname": site_docname, "status": "Failed"},
-			doctype="Frappe Site",
-			docname=site_docname,
-		)
-
-
-def migrate_site_task(site_docname: str, operation_token: str):
-	"""Background task: submit a Kubernetes Job that runs ``bench migrate``.
-
-	``bench migrate`` reads its DB credentials from ``site_config.json`` on
-	the sites PVC, so unlike create/delete this task has no creds Secret —
-	the Job only needs the cloned reference pod spec and the site name.
-	Reconciliation runs the same functional probe used for creation to
-	transition the row back to ``Active`` (or to ``Failed`` if migrations
-	broke the site).
-	"""
-	if not _site_operation_matches(site_docname, operation_token, "Migrating"):
-		return
-
-	doc = frappe.get_doc("Frappe Site", site_docname)
-	job_name_for_cleanup: str | None = None
-	job_applied = False
-	namespace = ""
-	api_client = None
-
-	try:
-		release = frappe.get_doc("Helm Release", doc.bench_release)
-		cluster = release.cluster
-		namespace = release.namespace or "default"
-		release_name = release.release_name
-
-		api_client = get_k8s_api_client(cluster)
-		core_v1 = client.CoreV1Api(api_client=api_client)
-
-		ref_pod = _select_site_discovery_pod(
-			core_v1=core_v1,
-			namespace=namespace,
-			release_name=release_name,
-		)
-
-		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
-
-		job_name = _job_name(doc.site_name, operation_token)
-		job_name_for_cleanup = job_name
-
-		bench_cmd = _bench_migrate_command(doc.site_name)
-		container_env = [{"name": "SITE_NAME", "value": doc.site_name}]
-		job_manifest = _build_op_job_manifest(
-			job_name=job_name,
-			namespace=namespace,
-			site_docname=site_docname,
-			operation_label="migrate-site",
-			container_command=bench_cmd,
-			container_env=container_env,
-			ref_spec=ref_spec,
-		)
-
-		apply_resource(api_client, job_manifest, namespace)
-		job_applied = True
-
-		if not _site_operation_matches(site_docname, operation_token, "Migrating"):
-			# Cancelled / superseded mid-apply.  Stop the Job so it does not
-			# alter the site's DB schema after the operator changed their mind.
-			_best_effort_delete_job(api_client, job_name, namespace)
-			return
-
-		doc.db_set("operation_job_name", job_name)
-		doc.db_set("operation_job_token", operation_token)
-		frappe.publish_realtime(
-			"frappe_site_status_update",
-			{"site_docname": site_docname, "status": "Migrating", "job_name": job_name},
-			doctype="Frappe Site",
-			docname=site_docname,
-		)
-
-	except Exception as e:
-		if api_client is not None and namespace and job_applied and job_name_for_cleanup:
-			_best_effort_delete_job(api_client, job_name_for_cleanup, namespace)
-
-		if not _site_operation_matches(site_docname, operation_token, "Migrating"):
-			return
-
-		doc.db_set("status", "Failed")
-		doc.db_set("status_detail", _truncate(f"Migrate Job submission failed: {e}"))
-		frappe.log_error(
-			title=f"Frappe Site Migrate Submission Failed: {site_docname}",
+			title=f"{config.failure_log_title}: {site_docname}",
 			message=str(e),
 		)
 		frappe.publish_realtime(

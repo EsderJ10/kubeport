@@ -6,6 +6,67 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-04-27 — Frappe Site lifecycle: pre-merge hardening
+
+### Context
+
+Pre-merge audit of `feat/site-lifecycle` surfaced five items: cancelling a running migration is unsafe
+because MariaDB DDL is not atomic, the orphan sweep could race the worker's Job apply to `db_set` window,
+`on_trash` ignored `Failed` rows that still held a Job pointer, the new `Deleting`/`Migrating`
+reconciliation branches lacked direct behavioural tests, and the three site-task functions duplicated most
+of their apply scaffolding.
+
+### Decision
+
+- **Confirmation-gated cancel for `Migrating`.** `cancel_site` accepts
+  `confirm_destructive: bool = False`; `Migrating` requires it. Status detail records
+  "destructive cancel acknowledged". The client uses a typed `CANCEL` dialog, and `on_trash` refuses
+  `Migrating` rows so operators must use the gated path.
+- **Orphan-sweep grace period.** `_sweep_orphan_site_jobs` skips Jobs younger than
+  `_ORPHAN_SWEEP_GRACE_SECONDS` (5 minutes, matching the reconciliation tick), closing the worker
+  apply-to-DB race.
+- **`on_trash` cleanup widened.** After the `Active` and `Migrating` refusals, cleanup runs whenever
+  `operation_job_name` is set, regardless of row status.
+- **D1 orchestrator refactor.** `create_site_task`, `delete_site_task`, and `migrate_site_task` are thin
+  wrappers over `_run_site_op(...)`. Per-op behavior lives in `SiteOpConfig` plus plain callables for
+  command, env, and optional creds Secret construction.
+- **H4 behavioural tests.** Direct tests now cover `Deleting` and `Migrating` reconciliation branch
+  transitions, orphan-sweep grace behavior, and the shared `_run_site_op` success/supersession paths.
+
+### Rejected alternatives
+
+- **Block cancel for `Migrating` entirely.** Too harsh for genuinely hung migrations; the operator would
+  have to wait for `activeDeadlineSeconds`.
+- **SIGTERM with a long grace period.** `bench migrate` has no safe DDL-boundary signal handler, so this
+  only delays the same risk.
+- **Shorter orphan-sweep grace.** A shorter grace would work, but five minutes matches the scheduler cadence:
+  a Job younger than one full reconciliation tick is never swept.
+- **Object-oriented operation classes.** Heavier than the codebase's plain-function style; dataclass config
+  plus callables keeps the operation-specific code explicit and local.
+- **Add a `Cancelling` lifecycle state.** Mostly cosmetic and would require new reconciliation branches for
+  a state that usually lasts seconds.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `cancel_site` now accepts
+  `confirm_destructive`, gates `Migrating`, and records destructive acknowledgement in `status_detail`.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.js`: cancelling `Migrating` opens a custom dialog whose
+  primary action is disabled until the operator types `CANCEL`; it submits `confirm_destructive: 1`.
+- `kubeport/tasks/site_tasks.py`: added `SiteOpConfig`, `_run_site_op`, and
+  `_attach_creds_secret_owner_ref`; public create/delete/migrate tasks delegate to the orchestrator.
+- `kubeport/tasks/reconciliation.py`: added `_ORPHAN_SWEEP_GRACE_SECONDS = 300` and skips recent orphan
+  candidates by Kubernetes `creation_timestamp`.
+- Tests: added controller confirmation tests, orchestrator tests, orphan-sweep age tests, and direct
+  behavioural tests for delete/migrate reconciliation.
+
+### Known follow-ups
+
+D2 (terminal `Deleted` state for audit trail), D3 (force-drop for `Failed` without a Job), D4 (`Cancelling`
+state), H5 (migrate pre-flight bench probe), and H6 (maintenance-mode wrapping) remain out of scope for this
+cycle.
+
+---
+
 ## 2026-04-26 — Frappe Site: post-creation lifecycle (delete + migrate)
 
 ### Context

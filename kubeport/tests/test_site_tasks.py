@@ -1005,3 +1005,317 @@ class UnitTestOnTrashCleanup(UnitTestCase):
 		doc = self._doc(status="Draft", operation_job_name=None)
 		doc.on_trash()
 		mock_enqueue.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_refuses_migrating_row(self, mock_enqueue):
+		doc = self._doc(status="Migrating", operation_job_name="ks-demo-abc123abc123")
+		with self.assertRaises(frappe.ValidationError):
+			doc.on_trash()
+		mock_enqueue.assert_not_called()
+
+
+class UnitTestCancelSiteConfirmation(UnitTestCase):
+	"""H1: cancel_site requires confirm_destructive when status is Migrating."""
+
+	def _doc(self, **overrides):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+		doc = MagicMock(spec=FrappeSite)
+		doc.name = overrides.get("name", "rel-a/demo")
+		doc.status = overrides.get("status", "Migrating")
+		doc.operation_job_name = overrides.get("operation_job_name", "ks-demo-abc123abc123")
+		doc.cluster = overrides.get("cluster", "cluster-a")
+		doc.namespace = overrides.get("namespace", "ns")
+		doc.site_name = overrides.get("site_name", "demo")
+		doc.cancel_site = FrappeSite.cancel_site.__get__(doc, FrappeSite)
+		return doc
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_cancel_migrating_throws_without_confirm(
+		self,
+		mock_enqueue,
+		mock_msgprint,
+		mock_publish,
+		mock_session,
+	):
+		mock_session.user = "alice@example.com"
+		doc = self._doc(status="Migrating")
+		with self.assertRaises(frappe.ValidationError):
+			doc.cancel_site()
+		mock_enqueue.assert_not_called()
+		mock_msgprint.assert_not_called()
+		mock_publish.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_cancel_migrating_succeeds_with_confirm(
+		self,
+		mock_enqueue,
+		mock_msgprint,
+		mock_publish,
+		mock_session,
+	):
+		mock_session.user = "alice@example.com"
+		doc = self._doc(status="Migrating")
+		doc.cancel_site(confirm_destructive=True)
+		mock_enqueue.assert_called_once()
+		detail_calls = [
+			c for c in doc.db_set.call_args_list
+			if c.args and c.args[0] == "status_detail"
+		]
+		self.assertTrue(detail_calls, "expected a status_detail db_set call")
+		detail_value = detail_calls[-1].args[1]
+		self.assertIn("destructive cancel acknowledged", detail_value)
+		self.assertIn("alice@example.com", detail_value)
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_cancel_in_progress_does_not_require_confirm(
+		self,
+		mock_enqueue,
+		mock_msgprint,
+		mock_publish,
+		mock_session,
+	):
+		mock_session.user = "alice@example.com"
+		doc = self._doc(status="In Progress")
+		doc.cancel_site()
+		mock_enqueue.assert_called_once()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_cancel_deleting_does_not_require_confirm(
+		self,
+		mock_enqueue,
+		mock_msgprint,
+		mock_publish,
+		mock_session,
+	):
+		mock_session.user = "alice@example.com"
+		doc = self._doc(status="Deleting")
+		doc.cancel_site()
+		mock_enqueue.assert_called_once()
+
+
+class UnitTestRunSiteOp(UnitTestCase):
+	"""D1: orchestrator behavior under stubbed K8s apply calls."""
+
+	def _config(self, op_kind="create", expected_status="In Progress"):
+		from kubeport.tasks.site_tasks import SiteOpConfig
+
+		labels = {
+			"create": ("create-site", "Frappe Site Job Submission Failed", "Job submission failed"),
+			"delete": ("delete-site", "Frappe Site Drop Submission Failed", "Drop-site Job submission failed"),
+			"migrate": ("migrate-site", "Frappe Site Migrate Submission Failed", "Migrate Job submission failed"),
+		}
+		container_label, failure_log_title, failure_detail_prefix = labels[op_kind]
+		return SiteOpConfig(
+			op_kind=op_kind,
+			expected_status=expected_status,
+			container_label=container_label,
+			failure_log_title=failure_log_title,
+			failure_detail_prefix=failure_detail_prefix,
+		)
+
+	def _doc(self, **overrides):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+		doc = MagicMock(spec=FrappeSite)
+		doc.name = overrides.get("name", "rel-a/demo")
+		doc.bench_release = overrides.get("bench_release", "rel-a")
+		doc.site_name = overrides.get("site_name", "demo")
+		doc.db_type = overrides.get("db_type", "mariadb")
+		doc.db_root_secret = overrides.get("db_root_secret", "")
+		doc.db_root_secret_key = overrides.get("db_root_secret_key", "mariadb-root-password")
+		doc.install_apps = overrides.get("install_apps", "")
+		doc.force_create = overrides.get("force_create", False)
+		doc.get_password = MagicMock(return_value="pw")
+		return doc
+
+	def _stub_release(self):
+		return SimpleNamespace(
+			cluster="cluster-a",
+			namespace="ns",
+			release_name="rel-a",
+		)
+
+	def _ref_spec(self):
+		return {
+			"image": "img:1",
+			"pod_level": {},
+			"container_env": [],
+			"container_env_from": [],
+			"container_resources": None,
+			"container_security_context": None,
+			"volume_mounts": [],
+			"volumes": [],
+		}
+
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.site_tasks._site_operation_matches")
+	def test_orchestrator_exits_early_when_token_superseded(
+		self,
+		mock_matches,
+		mock_get_doc,
+	):
+		from kubeport.tasks.site_tasks import _run_site_op
+
+		mock_matches.return_value = False
+		_run_site_op(
+			site_docname="rel-a/demo",
+			operation_token="t1",
+			config=self._config("create"),
+			build_command=lambda doc: "echo noop",
+			build_env=lambda doc, secret: [],
+		)
+		mock_get_doc.assert_not_called()
+
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks._clone_reference_pod_spec")
+	@patch("kubeport.tasks.site_tasks._select_site_discovery_pod")
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client")
+	@patch("kubeport.tasks.site_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.site_tasks._site_operation_matches")
+	def test_orchestrator_happy_path_creates_secret_then_job_then_sets_tokens(
+		self,
+		mock_matches,
+		mock_get_doc,
+		mock_publish,
+		mock_get_api_client,
+		mock_select_pod,
+		mock_clone_spec,
+		mock_apply,
+	):
+		from kubeport.tasks.site_tasks import _run_site_op
+
+		mock_matches.side_effect = [True, True]
+		doc = self._doc()
+		mock_get_doc.side_effect = [doc, self._stub_release()]
+		mock_clone_spec.return_value = self._ref_spec()
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"):
+			mock_batch_api.return_value.read_namespaced_job.return_value = SimpleNamespace(
+				metadata=SimpleNamespace(uid="job-uid-123"),
+			)
+			_run_site_op(
+				site_docname="rel-a/demo",
+				operation_token="t1",
+				config=self._config("create"),
+				build_command=lambda doc: "bench new-site x",
+				build_env=lambda doc, secret: [{"name": "SITE_NAME", "value": "demo"}],
+				build_creds_secret=lambda doc, job_name: {
+					"apiVersion": "v1",
+					"kind": "Secret",
+					"type": "Opaque",
+					"metadata": {"name": f"{job_name}-creds", "namespace": "ns", "labels": {}},
+					"stringData": {"ADMIN_PASSWORD": "pw"},
+				},
+			)
+
+		self.assertEqual(mock_apply.call_count, 3)
+		set_keys = [c.args[0] for c in doc.db_set.call_args_list]
+		self.assertIn("operation_job_name", set_keys)
+		self.assertIn("operation_job_token", set_keys)
+		mock_publish.assert_called_once()
+
+	@patch("kubeport.tasks.site_tasks._best_effort_delete_secret")
+	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks._clone_reference_pod_spec")
+	@patch("kubeport.tasks.site_tasks._select_site_discovery_pod")
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client")
+	@patch("kubeport.tasks.site_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.site_tasks._site_operation_matches")
+	def test_orchestrator_post_apply_token_mismatch_deletes_orphan_resources(
+		self,
+		mock_matches,
+		mock_get_doc,
+		mock_publish,
+		mock_get_api_client,
+		mock_select_pod,
+		mock_clone_spec,
+		mock_apply,
+		mock_delete_job,
+		mock_delete_secret,
+	):
+		from kubeport.tasks.site_tasks import _run_site_op
+
+		mock_matches.side_effect = [True, False]
+		doc = self._doc()
+		mock_get_doc.side_effect = [doc, self._stub_release()]
+		mock_clone_spec.return_value = self._ref_spec()
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"):
+			mock_batch_api.return_value.read_namespaced_job.return_value = SimpleNamespace(
+				metadata=SimpleNamespace(uid="job-uid-123"),
+			)
+			_run_site_op(
+				site_docname="rel-a/demo",
+				operation_token="t1",
+				config=self._config("create"),
+				build_command=lambda doc: "bench new-site x",
+				build_env=lambda doc, secret: [],
+				build_creds_secret=lambda doc, job_name: {
+					"apiVersion": "v1",
+					"kind": "Secret",
+					"type": "Opaque",
+					"metadata": {"name": f"{job_name}-creds", "namespace": "ns", "labels": {}},
+					"stringData": {"ADMIN_PASSWORD": "pw"},
+				},
+			)
+
+		mock_delete_job.assert_called_once()
+		mock_delete_secret.assert_called_once()
+		set_keys = [c.args[0] for c in doc.db_set.call_args_list]
+		self.assertNotIn("operation_job_name", set_keys)
+		mock_publish.assert_not_called()
+
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks._clone_reference_pod_spec")
+	@patch("kubeport.tasks.site_tasks._select_site_discovery_pod")
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client")
+	@patch("kubeport.tasks.site_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.site_tasks._site_operation_matches")
+	def test_orchestrator_skips_secret_when_build_creds_secret_returns_none(
+		self,
+		mock_matches,
+		mock_get_doc,
+		mock_publish,
+		mock_get_api_client,
+		mock_select_pod,
+		mock_clone_spec,
+		mock_apply,
+	):
+		from kubeport.tasks.site_tasks import _run_site_op
+
+		mock_matches.side_effect = [True, True]
+		doc = self._doc()
+		mock_get_doc.side_effect = [doc, self._stub_release()]
+		mock_clone_spec.return_value = self._ref_spec()
+
+		with patch("kubernetes.client.BatchV1Api"), patch("kubernetes.client.CoreV1Api"):
+			_run_site_op(
+				site_docname="rel-a/demo",
+				operation_token="t1",
+				config=self._config("migrate", expected_status="Migrating"),
+				build_command=lambda doc: "bench --site x migrate",
+				build_env=lambda doc, secret: [{"name": "SITE_NAME", "value": "demo"}],
+				build_creds_secret=None,
+			)
+
+		self.assertEqual(mock_apply.call_count, 1)
+		mock_publish.assert_called_once()
