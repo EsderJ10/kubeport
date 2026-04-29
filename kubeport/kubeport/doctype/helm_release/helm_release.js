@@ -11,6 +11,7 @@ frappe.ui.form.on('Helm Release', {
         if (frm.doc.status) {
             frm.page.set_indicator(frm.doc.status, status_map[frm.doc.status] || 'grey');
         }
+        kubeport_configure_release_actions(frm);
 
         if (!frm.__helm_release_status_listener_bound) {
             frm.__helm_release_status_listener_bound = true;
@@ -113,8 +114,146 @@ frappe.ui.form.on('Helm Release', {
                 });
             }
         );
+    },
+
+    show_history: function(frm) {
+        kubeport_show_release_history(frm);
     }
 });
+
+function kubeport_configure_release_actions(frm) {
+    if (!frm.doc || frm.is_new()) return;
+
+    const is_in_flight = ['In Progress', 'Uninstalling'].includes(frm.doc.status);
+    const can_history = ['Deployed', 'Degraded', 'Failed'].includes(frm.doc.status);
+    frm.toggle_enable('deploy_release', !is_in_flight);
+    frm.toggle_enable('uninstall_release', can_history);
+    frm.toggle_enable('show_history', can_history);
+
+    let deploy_label = __('Install / Upgrade');
+    if (frm.doc.status === 'Draft') {
+        deploy_label = __('Install');
+    } else if (frm.doc.status === 'Failed') {
+        deploy_label = __('Retry');
+    } else if (frm.doc.pending_changes) {
+        deploy_label = __('Upgrade');
+    } else if (['Deployed', 'Degraded'].includes(frm.doc.status)) {
+        deploy_label = __('Redeploy');
+    }
+    frm.set_df_property('deploy_release', 'label', deploy_label);
+
+    frm.clear_custom_buttons();
+    if (can_history) {
+        frm.add_custom_button(__('Force Uninstall'), () => {
+            kubeport_force_uninstall(frm);
+        }, __('Danger'));
+    }
+
+    if (frm.doc.pending_changes) {
+        frm.set_intro(
+            __('Saved desired state differs from the last successfully applied Helm spec.'),
+            'orange'
+        );
+    }
+}
+
+function kubeport_force_uninstall(frm) {
+    const expected = `UNINSTALL ${frm.doc.release_name}`;
+    frappe.prompt(
+        [{
+            fieldname: 'confirmation',
+            fieldtype: 'Data',
+            label: __('Type {0}', [expected]),
+            reqd: 1
+        }],
+        (values) => {
+            frappe.call({
+                doc: frm.doc,
+                method: 'uninstall_release',
+                args: {
+                    force: 1,
+                    confirmation: values.confirmation
+                },
+                callback: function(r) {
+                    if (!r.exc) frm.reload_doc();
+                }
+            });
+        },
+        __('Force Uninstall'),
+        __('Uninstall')
+    );
+}
+
+function kubeport_show_release_history(frm) {
+    frappe.call({
+        doc: frm.doc,
+        method: 'get_release_history',
+        freeze: true,
+        freeze_message: __('Loading release history...'),
+        callback: function(r) {
+            if (r.exc) return;
+            const rows = r.message || [];
+            const dialog = new frappe.ui.Dialog({
+                title: __('Release History'),
+                fields: [{
+                    fieldname: 'history_html',
+                    fieldtype: 'HTML',
+                    options: kubeport_render_history_table(rows)
+                }]
+            });
+            dialog.show();
+            dialog.$wrapper.find('.kubeport-rollback').on('click', function() {
+                const revision = parseInt($(this).attr('data-revision'), 10);
+                if (!revision) return;
+                frappe.confirm(
+                    __('Roll back release "{0}" to revision {1}?',
+                        [frm.doc.release_name, revision]),
+                    () => {
+                        dialog.hide();
+                        frappe.call({
+                            doc: frm.doc,
+                            method: 'rollback_release',
+                            args: { revision },
+                            callback: function(resp) {
+                                if (!resp.exc) frm.reload_doc();
+                            }
+                        });
+                    }
+                );
+            });
+        }
+    });
+}
+
+function kubeport_render_history_table(rows) {
+    if (!rows.length) {
+        return `<div class="text-muted small">${__('No release history was returned by Helm.')}</div>`;
+    }
+
+    let html = '<div class="table-responsive">';
+    html += '<table class="table table-bordered" style="margin-bottom: 0;">';
+    html += '<thead><tr>';
+    [__('Revision'), __('Status'), __('Chart'), __('App Version'), __('Updated'), ''].forEach((column) => {
+        html += `<th>${frappe.utils.escape_html(column)}</th>`;
+    });
+    html += '</tr></thead><tbody>';
+    rows.forEach((row) => {
+        const revision = row.revision || row.version || '';
+        html += '<tr>';
+        html += `<td>${frappe.utils.escape_html(String(revision))}</td>`;
+        html += `<td>${frappe.utils.escape_html(row.status || '')}</td>`;
+        html += `<td>${frappe.utils.escape_html(row.chart || '')}</td>`;
+        html += `<td>${frappe.utils.escape_html(row.app_version || row.appVersion || '')}</td>`;
+        html += `<td>${frappe.utils.escape_html(row.updated || '')}</td>`;
+        html += `<td><button class="btn btn-xs btn-default kubeport-rollback"
+                    data-revision="${frappe.utils.escape_html(String(revision))}">
+                    ${__('Rollback')}
+                </button></td>`;
+        html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    return html;
+}
 
 // Workload-readiness drilldown.  Loads via xcall AFTER document refresh so a
 // slow cluster cannot block the form; the panel re-fetches whenever a

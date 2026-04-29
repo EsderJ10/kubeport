@@ -1,16 +1,18 @@
 # Copyright (c) 2026, Los Favs and contributors
 # For license information, please see license.txt
 
-"""
-Helm Release Controller
+"""Helm Release Controller.
 
 Manages real Helm chart deployments via the Helm CLI.  Each document
 represents a single Helm release on a target cluster, backed by
-``helm upgrade --install`` and ``helm uninstall`` commands executed
-in background tasks.
+``helm upgrade --install``, ``helm rollback``, and ``helm uninstall``
+commands executed in background tasks.
 """
 
+import hashlib
+import json
 import secrets
+from typing import Any
 
 import frappe
 import yaml
@@ -20,6 +22,8 @@ from frappe.model.document import Document
 # ``Failed`` releases may still have Helm-owned objects and must go through
 # uninstall before direct row deletion.
 _DELETE_ALLOWED_STATUS = "Draft"
+_BLOCKING_SITE_STATUSES = {"Active", "In Progress", "Deleting", "Migrating"}
+_FORCE_UNINSTALL_PREFIX = "UNINSTALL "
 
 
 class HelmRelease(Document):
@@ -34,16 +38,22 @@ class HelmRelease(Document):
 		chart: DF.Link
 		chart_version: DF.Data | None
 		cluster: DF.Link
+		desired_spec_hash: DF.Data | None
 		helm_revision: DF.Int
 		helm_status_detail: DF.SmallText | None
+		last_applied_chart_version: DF.Data | None
+		last_applied_spec_hash: DF.Data | None
 		namespace: DF.Data
+		operation_started_at: DF.Datetime | None
 		operation_token: DF.Data | None
+		operation_type: DF.Literal["", "Deploy", "Upgrade", "Rollback", "Uninstall"]
+		pending_changes: DF.Check
 		release_name: DF.Data
 		status: DF.Literal["Draft", "In Progress", "Deployed", "Degraded", "Uninstalling", "Failed"]
 		values: DF.Code | None
 	# end: auto-generated types
 
-	def validate(self):
+	def validate(self) -> None:
 		"""Validate YAML syntax in the values field."""
 		if not self.is_new() and self.name != build_release_docname(
 			self.cluster,
@@ -66,14 +76,26 @@ class HelmRelease(Document):
 			except yaml.YAMLError as e:
 				frappe.throw(f"Invalid YAML in values: {e}")
 
-	def autoname(self):
+		self.desired_spec_hash = calculate_release_spec_hash(
+			chart=self.chart,
+			chart_version=self._resolve_chart_version(),
+			namespace=self.namespace,
+			release_name=self.release_name,
+			values_yaml=self.values,
+		)
+		self.pending_changes = int(bool(
+			self.last_applied_spec_hash
+			and self.desired_spec_hash != self.last_applied_spec_hash
+		))
+
+	def autoname(self) -> None:
 		self.name = build_release_docname(
 			self.cluster,
 			self.namespace,
 			self.release_name,
 		)
 
-	def on_trash(self):
+	def on_trash(self) -> None:
 		"""Refuse to delete a row that still owns cluster resources.
 
 		The desired-vs-observed split means the row IS the only authority that
@@ -90,7 +112,7 @@ class HelmRelease(Document):
 			)
 
 	@frappe.whitelist()
-	def deploy_release(self):
+	def deploy_release(self) -> None:
 		"""Install or upgrade the Helm release via background task.
 
 		Uses ``helm upgrade --install`` for idempotency — creating on first
@@ -107,6 +129,9 @@ class HelmRelease(Document):
 
 		operation_token = secrets.token_hex(16)
 		self.db_set("operation_token", operation_token)
+		self.db_set("operation_type", "Deploy" if self.status == "Draft" else "Upgrade")
+		self.db_set("operation_started_at", frappe.utils.now_datetime())
+		self.db_set("helm_status_detail", "")
 		self.db_set("status", "In Progress")
 
 		frappe.enqueue(
@@ -125,15 +150,35 @@ class HelmRelease(Document):
 		)
 
 	@frappe.whitelist()
-	def uninstall_release(self):
+	def uninstall_release(self, force: bool = False, confirmation: str = "") -> None:
 		"""Uninstall the Helm release via background task."""
+		if isinstance(force, str):
+			force = force.lower() in ("1", "true", "yes")
+
 		if self.status not in ["Deployed", "Degraded", "Failed"]:
 			frappe.throw(
 				"Only deployed, degraded, or failed releases can be uninstalled."
 			)
 
+		blocking_sites = _get_uninstall_blocking_sites(self.name)
+		if blocking_sites:
+			if not force:
+				frappe.throw(
+					"Cannot uninstall this Helm release while Frappe Site rows still depend on it: "
+					f"{_format_blocking_sites(blocking_sites)}. Drop or delete those sites first."
+				)
+			expected_confirmation = f"{_FORCE_UNINSTALL_PREFIX}{self.release_name}"
+			if confirmation != expected_confirmation:
+				frappe.throw(
+					"Force uninstall requires typed confirmation "
+					f"'{expected_confirmation}'."
+				)
+
 		operation_token = secrets.token_hex(16)
 		self.db_set("operation_token", operation_token)
+		self.db_set("operation_type", "Uninstall")
+		self.db_set("operation_started_at", frappe.utils.now_datetime())
+		self.db_set("helm_status_detail", "")
 		self.db_set("status", "Uninstalling")
 
 		frappe.enqueue(
@@ -146,6 +191,44 @@ class HelmRelease(Document):
 
 		frappe.msgprint(
 			"Release uninstallation has been queued. Status will update automatically.",
+			alert=True,
+			indicator="blue",
+		)
+
+	@frappe.whitelist()
+	def rollback_release(self, revision: int) -> None:
+		"""Roll back the release to a prior Helm revision via background task."""
+		if self.status in ("In Progress", "Uninstalling"):
+			frappe.throw("Another release operation is already in progress.")
+		if self.status not in ("Deployed", "Degraded", "Failed"):
+			frappe.throw("Rollback is only available for deployed, degraded, or failed releases.")
+
+		try:
+			revision = int(revision)
+		except (TypeError, ValueError):
+			frappe.throw("A numeric Helm revision is required.")
+		if revision < 1:
+			frappe.throw("Helm revision must be greater than zero.")
+
+		operation_token = secrets.token_hex(16)
+		self.db_set("operation_token", operation_token)
+		self.db_set("operation_type", "Rollback")
+		self.db_set("operation_started_at", frappe.utils.now_datetime())
+		self.db_set("helm_status_detail", "")
+		self.db_set("status", "In Progress")
+
+		frappe.enqueue(
+			"kubeport.tasks.helm_tasks.rollback_release",
+			release_name=self.name,
+			operation_token=operation_token,
+			target_revision=revision,
+			queue="long",
+			enqueue_after_commit=True,
+		)
+
+		frappe.msgprint(
+			f"Rollback of '{self.release_name}' to revision {revision} has been queued. "
+			"Status will update automatically.",
 			alert=True,
 			indicator="blue",
 		)
@@ -202,6 +285,38 @@ class HelmRelease(Document):
 		version = self.chart_version or chart_doc.latest_version
 		return show_values(chart_ref, version=version)
 
+	@frappe.whitelist()
+	def get_release_history(self) -> list[dict[str, Any]]:
+		"""Return live Helm revision history for this release."""
+		from kubeport.utils import helm
+
+		try:
+			history = helm.history(
+				release_name=self.release_name,
+				namespace=self.namespace or "default",
+				cluster_name=self.cluster,
+			)
+			return history if isinstance(history, list) else []
+		except Exception as e:
+			frappe.logger("kubeport").warning(
+				"Could not read Helm Release history for '%s': %s",
+				self.name,
+				e,
+			)
+			return []
+
+	def _resolve_chart_version(self) -> str:
+		if self.chart_version:
+			return str(self.chart_version)
+		if not self.chart:
+			return ""
+
+		try:
+			chart_doc = frappe.get_doc("Helm Chart", self.chart)
+			return str(chart_doc.latest_version or "")
+		except Exception:
+			return ""
+
 
 def _validate_storage_access_modes(values: dict | None) -> None:
 	"""Reject storage settings that cannot schedule on common local-path setups."""
@@ -227,6 +342,74 @@ def build_release_docname(cluster: str | None, namespace: str | None, release_na
 		str(namespace or "default").strip() or "default",
 		str(release_name or "").strip(),
 	])
+
+
+def calculate_release_spec_hash(
+	chart: str | None,
+	chart_version: str | None,
+	namespace: str | None,
+	release_name: str | None,
+	values_yaml: str | None,
+) -> str:
+	"""Return a stable hash for the Helm desired-state fields Kubeport applies."""
+	payload = {
+		"chart": str(chart or "").strip(),
+		"chart_version": str(chart_version or "").strip(),
+		"namespace": str(namespace or "default").strip() or "default",
+		"release_name": str(release_name or "").strip(),
+		"values": _normalize_values_for_hash(values_yaml),
+	}
+	encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+	return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _normalize_values_for_hash(values_yaml: str | None) -> Any:
+	if not values_yaml:
+		return {}
+
+	parsed = yaml.safe_load(values_yaml)
+	if parsed is None:
+		return {}
+	return parsed
+
+
+def _get_uninstall_blocking_sites(release_docname: str) -> list[dict[str, str]]:
+	try:
+		sites = frappe.get_all(
+			"Frappe Site",
+			filters={"bench_release": release_docname},
+			fields=["name", "site_name", "status", "operation_job_name"],
+		)
+	except Exception:
+		# Frappe Site may not exist during partial installs/migrations; do not
+		# block Helm cleanup in that bootstrap edge case.
+		return []
+
+	blocking_sites: list[dict[str, str]] = []
+	for site in sites:
+		status = str(_site_value(site, "status") or "")
+		operation_job_name = str(_site_value(site, "operation_job_name") or "")
+		if status in _BLOCKING_SITE_STATUSES or (status == "Failed" and operation_job_name):
+			blocking_sites.append({
+				"name": str(_site_value(site, "name") or ""),
+				"site_name": str(_site_value(site, "site_name") or ""),
+				"status": status,
+			})
+
+	return blocking_sites
+
+
+def _site_value(site: Any, fieldname: str) -> Any:
+	if isinstance(site, dict):
+		return site.get(fieldname)
+	return getattr(site, fieldname, None)
+
+
+def _format_blocking_sites(sites: list[dict[str, str]]) -> str:
+	return ", ".join(
+		f"{site.get('site_name') or site.get('name')} ({site.get('status')})"
+		for site in sites
+	)
 
 
 def _iter_storage_configs(

@@ -10,6 +10,7 @@ from kubeport.tasks.helm_tasks import (
 	_group_chart_inventory,
 	_sync_charts,
 	install_or_upgrade_release,
+	rollback_release,
 	sync_repo_charts,
 	sync_all_repos,
 	uninstall_release,
@@ -206,11 +207,14 @@ class UnitTestHelmTasks(UnitTestCase):
 			values_yaml="jobs:\n  createSite:\n    enabled: true\n",
 			chart_version="8.0.41",
 		)
-		mock_set_helm_release_fields.assert_called_once_with("bench-a", {
-			"status": "Deployed",
-			"helm_revision": 3,
-			"helm_status_detail": "deployed (no workload resources)",
-		})
+		mock_set_helm_release_fields.assert_called_once()
+		_, fields = mock_set_helm_release_fields.call_args.args
+		self.assertEqual(fields["status"], "Deployed")
+		self.assertEqual(fields["helm_revision"], 3)
+		self.assertEqual(fields["helm_status_detail"], "deployed (no workload resources)")
+		self.assertEqual(fields["last_applied_chart_version"], "8.0.41")
+		self.assertEqual(fields["pending_changes"], 0)
+		self.assertEqual(fields["operation_type"], "")
 		mock_publish_realtime.assert_called_once()
 
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
@@ -251,11 +255,12 @@ class UnitTestHelmTasks(UnitTestCase):
 
 		install_or_upgrade_release("bench-a", "tok-1")
 
-		mock_set_helm_release_fields.assert_called_once_with("bench-a", {
-			"status": "Failed",
-			"helm_revision": 3,
-			"helm_status_detail": "Helm reports: failed",
-		})
+		mock_set_helm_release_fields.assert_called_once()
+		_, fields = mock_set_helm_release_fields.call_args.args
+		self.assertEqual(fields["status"], "Failed")
+		self.assertEqual(fields["helm_revision"], 3)
+		self.assertEqual(fields["helm_status_detail"], "Helm reports: failed")
+		self.assertNotIn("last_applied_spec_hash", fields)
 		mock_publish_realtime.assert_called_once_with(
 			"helm_release_status_update",
 			{
@@ -310,6 +315,62 @@ class UnitTestHelmTasks(UnitTestCase):
 		self.assertEqual(fields["status"], "Failed")
 		self.assertIn("stuck", fields["helm_status_detail"])
 		self.assertIn("pending-upgrade", fields["helm_status_detail"])
+
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks._safe_walk", return_value=([], None))
+	@patch("kubeport.tasks.helm_tasks.helm.get_values", return_value="workers:\n  replicaCount: 2\n")
+	@patch("kubeport.tasks.helm_tasks.helm.rollback")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_rollback_release_updates_desired_state_to_rolled_back_revision(
+		self,
+		mock_get_value,
+		mock_get_doc,
+		mock_rollback,
+		_mock_get_values,
+		_mock_safe_walk,
+		mock_set_helm_release_fields,
+		mock_publish_realtime,
+	):
+		mock_get_value.side_effect = [
+			{"operation_token": "tok-1", "status": "In Progress"},
+			{
+				"release_name": "bench-a",
+				"chart": "ERPNext",
+				"chart_version": "8.0.42",
+				"namespace": "tfg",
+				"cluster": "cluster-a",
+				"values": "",
+			},
+			{"operation_token": "tok-1", "status": "In Progress"},
+		]
+		mock_get_doc.return_value = SimpleNamespace(
+			chart_name="erpnext",
+			latest_version="8.0.42",
+		)
+		mock_rollback.return_value = {
+			"version": 4,
+			"chart": "erpnext-8.0.41",
+			"info": {"status": "deployed"},
+		}
+
+		rollback_release("cluster-a/tfg/bench-a", "tok-1", 2)
+
+		mock_rollback.assert_called_once_with(
+			release_name="bench-a",
+			revision=2,
+			namespace="tfg",
+			cluster_name="cluster-a",
+		)
+		mock_set_helm_release_fields.assert_called_once()
+		_, fields = mock_set_helm_release_fields.call_args.args
+		self.assertEqual(fields["status"], "Deployed")
+		self.assertEqual(fields["chart_version"], "8.0.41")
+		self.assertIn("replicaCount", fields["values"])
+		self.assertEqual(fields["last_applied_chart_version"], "8.0.41")
+		self.assertEqual(fields["pending_changes"], 0)
+		mock_publish_realtime.assert_called_once()
 
 	@patch("kubeport.tasks.helm_tasks.frappe.logger")
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
@@ -406,11 +467,14 @@ class UnitTestHelmTasks(UnitTestCase):
 
 		uninstall_release("cluster-a/tfg/bench-a", "tok-1")
 
-		mock_set_helm_release_fields.assert_called_once_with("cluster-a/tfg/bench-a", {
-			"status": "Draft",
-			"helm_revision": 0,
-			"helm_status_detail": "",
-		})
+		mock_set_helm_release_fields.assert_called_once()
+		_, fields = mock_set_helm_release_fields.call_args.args
+		self.assertEqual(fields["status"], "Draft")
+		self.assertEqual(fields["helm_revision"], 0)
+		self.assertEqual(fields["helm_status_detail"], "")
+		self.assertEqual(fields["last_applied_spec_hash"], "")
+		self.assertEqual(fields["pending_changes"], 0)
+		self.assertEqual(fields["operation_type"], "")
 		mock_publish_realtime.assert_called_once_with(
 			"helm_release_status_update",
 			{

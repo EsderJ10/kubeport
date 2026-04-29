@@ -12,9 +12,13 @@ from kubeport.utils.release_health import (
 	classify_release_state,
 	_check_daemon_set,
 	_check_deployment,
+	_check_ingress,
 	_check_job,
 	_check_pod,
+	_check_pvc,
+	_check_service,
 	_check_stateful_set,
+	_attach_warning_events,
 	summarize,
 	walk,
 )
@@ -239,6 +243,85 @@ class UnitTestReleaseHealth(UnitTestCase):
 		health = _check_job(obj, "tfg")
 		self.assertFalse(health.ready)
 		self.assertEqual(health.reason, "in progress")
+
+	# -----------------------------------------------------------------------
+	# PVC / Service / Ingress
+	# -----------------------------------------------------------------------
+
+	def test_check_pvc_ready_when_bound(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="sites"),
+			status=SimpleNamespace(phase="Bound", conditions=[]),
+		)
+		health = _check_pvc(obj, "tfg")
+		self.assertTrue(health.ready)
+
+	def test_check_pvc_pending_is_unready(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="sites"),
+			status=SimpleNamespace(phase="Pending", conditions=[]),
+		)
+		health = _check_pvc(obj, "tfg")
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "Pending")
+
+	def test_check_service_requires_ready_endpoints_for_selector_service(self):
+		core_v1 = SimpleNamespace(
+			read_namespaced_endpoints=lambda name, namespace: SimpleNamespace(subsets=[]),
+		)
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="frappe"),
+			spec=SimpleNamespace(type="ClusterIP", selector={"app": "frappe"}),
+			status=SimpleNamespace(load_balancer=None),
+		)
+		health = _check_service(obj, "tfg", core_v1)
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "no ready endpoints")
+
+	def test_check_service_load_balancer_requires_ingress(self):
+		core_v1 = SimpleNamespace(
+			read_namespaced_endpoints=lambda name, namespace: SimpleNamespace(
+				subsets=[SimpleNamespace(addresses=[SimpleNamespace(ip="10.0.0.10")])]
+			),
+		)
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="frappe"),
+			spec=SimpleNamespace(type="LoadBalancer", selector={"app": "frappe"}),
+			status=SimpleNamespace(load_balancer=SimpleNamespace(ingress=[])),
+		)
+		health = _check_service(obj, "tfg", core_v1)
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "load balancer pending")
+
+	def test_check_ingress_ready_when_load_balancer_has_address(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="frappe"),
+			status=SimpleNamespace(
+				load_balancer=SimpleNamespace(
+					ingress=[SimpleNamespace(hostname="frappe.example.com")]
+				)
+			),
+		)
+		health = _check_ingress(obj, "tfg")
+		self.assertTrue(health.ready)
+
+	def test_attach_warning_events_appends_recent_warning_summary(self):
+		core_v1 = SimpleNamespace(
+			list_namespaced_event=lambda **kwargs: SimpleNamespace(items=[
+				SimpleNamespace(
+					type="Warning",
+					reason="FailedScheduling",
+					message="0/1 nodes available",
+					last_timestamp="2026-04-12T10:00:00Z",
+				),
+			]),
+		)
+		health = ResourceHealth("Pod", "worker-1", "tfg", False, "Pending", "phase=Pending")
+
+		with_events = _attach_warning_events(health, core_v1)
+
+		self.assertIn("Events:", with_events.message)
+		self.assertIn("FailedScheduling", with_events.message)
 
 	# -----------------------------------------------------------------------
 	# summarize

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from frappe.tests import UnitTestCase
 
-from kubeport.api.discovery import get_cluster_discovery
+from kubeport.api.discovery import adopt_helm_release, get_cluster_discovery
 from kubeport.utils.discovery import (
 	_parse_site_names,
 	_normalize_release_row,
@@ -243,3 +243,54 @@ class UnitTestClusterDiscoveryAPI(UnitTestCase):
 		self.assertEqual(result["sites"], [])
 		self.assertEqual(len(result["errors"]), 1)
 		self.assertIn("Failed to list Helm releases", result["errors"][0]["message"])
+
+	@patch("kubeport.api.discovery.frappe.db.set_value")
+	@patch("kubeport.utils.release_health.walk", return_value=[])
+	@patch("kubeport.api.discovery.frappe.get_doc")
+	@patch("kubeport.api.discovery.frappe.get_all")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.utils.helm.get_values", return_value="workers:\n  replicaCount: 2\n")
+	@patch("kubeport.api.discovery.discover_cluster_releases")
+	@patch("kubeport.api.discovery.frappe.db.exists", return_value=False)
+	def test_adopt_helm_release_creates_tracking_doc_from_live_release(
+		self,
+		_mock_exists,
+		mock_discover_cluster_releases,
+		_mock_get_values,
+		mock_status,
+		mock_get_all,
+		mock_get_doc,
+		_mock_walk,
+		mock_set_value,
+	):
+		mock_discover_cluster_releases.return_value = [{
+			"release_name": "bench-a",
+			"namespace": "erp",
+			"chart_name": "erpnext",
+			"chart_version": "8.0.41",
+			"status": "deployed",
+		}]
+		mock_get_all.return_value = [SimpleNamespace(name="repo/erpnext")]
+		doc = SimpleNamespace(
+			name="cluster-a/erp/bench-a",
+			insert=lambda: None,
+		)
+		mock_get_doc.return_value = doc
+		mock_status.return_value = {
+			"version": 3,
+			"info": {"status": "deployed"},
+		}
+
+		result = adopt_helm_release("cluster-a", "erp", "bench-a")
+
+		self.assertTrue(result["created"])
+		self.assertEqual(result["name"], "cluster-a/erp/bench-a")
+		mock_get_doc.assert_called_once()
+		doc_payload = mock_get_doc.call_args.args[0]
+		self.assertEqual(doc_payload["doctype"], "Helm Release")
+		self.assertEqual(doc_payload["chart"], "repo/erpnext")
+		self.assertIn("replicaCount", doc_payload["values"])
+		mock_set_value.assert_called_once()
+		_, _, fields = mock_set_value.call_args.args
+		self.assertEqual(fields["status"], "Deployed")
+		self.assertEqual(fields["last_applied_chart_version"], "8.0.41")

@@ -20,7 +20,9 @@ import re
 import secrets
 
 import frappe
+import yaml
 
+from kubeport.kubeport.doctype.helm_release.helm_release import calculate_release_spec_hash
 from kubeport.utils import helm
 from kubeport.utils.release_health import ResourceHealth, classify_release_state
 
@@ -223,11 +225,29 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 		if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
 			return
 
-		_set_helm_release_fields(release_name, {
+		fields: dict[str, object] = {
 			"status": doc_status,
 			"helm_revision": revision,
 			"helm_status_detail": _truncate_status_detail(status_detail),
-		})
+			"operation_type": "",
+			"operation_started_at": None,
+		}
+		if doc_status in ("Deployed", "Degraded"):
+			spec_hash = calculate_release_spec_hash(
+				chart=release["chart"],
+				chart_version=version,
+				namespace=release["namespace"],
+				release_name=release["release_name"],
+				values_yaml=release.get("values"),
+			)
+			fields.update({
+				"last_applied_chart_version": version,
+				"desired_spec_hash": spec_hash,
+				"last_applied_spec_hash": spec_hash,
+				"pending_changes": 0,
+			})
+
+		_set_helm_release_fields(release_name, fields)
 
 		frappe.publish_realtime(
 			"helm_release_status_update",
@@ -247,9 +267,128 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 		_set_helm_release_fields(release_name, {
 			"status": "Failed",
 			"helm_status_detail": _truncate_status_detail(str(e)),
+			"operation_type": "",
+			"operation_started_at": None,
 		})
 		frappe.log_error(
 			title=f"Helm Install/Upgrade Failed: {release_name}",
+			message=str(e),
+		)
+		frappe.publish_realtime(
+			"helm_release_status_update",
+			{
+				"release_docname": release_name,
+				"release_name": release.get("release_name", release_name),
+				"status": "Failed",
+			},
+			doctype="Helm Release",
+			docname=release_name,
+		)
+
+
+def rollback_release(release_name: str, operation_token: str, target_revision: int):
+	"""Roll back a Helm release to a previous revision on the target cluster."""
+	if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
+		return
+
+	release = frappe.db.get_value(
+		"Helm Release",
+		release_name,
+		["release_name", "chart", "chart_version", "namespace", "cluster", "values"],
+		as_dict=True,
+	)
+	if not release:
+		frappe.throw(f"Helm Release '{release_name}' was not found.")
+
+	chart_doc = frappe.get_doc("Helm Chart", release["chart"])
+
+	try:
+		namespace = release["namespace"] or "default"
+		result = helm.rollback(
+			release_name=release["release_name"],
+			revision=int(target_revision),
+			namespace=namespace,
+			cluster_name=release["cluster"],
+		)
+
+		revision = 0
+		runtime_status = ""
+		if isinstance(result, dict):
+			revision = result.get("version", 0)
+			info = result.get("info", {})
+			if isinstance(info, dict):
+				runtime_status = info.get("status", "")
+
+		walker_results, walker_error = _safe_walk(release_name)
+		doc_status, status_detail = classify_release_state(
+			runtime_status=runtime_status,
+			walker_results=walker_results,
+			walker_error=walker_error,
+		)
+
+		if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
+			return
+
+		fields: dict[str, object] = {
+			"status": doc_status,
+			"helm_revision": revision,
+			"helm_status_detail": _truncate_status_detail(status_detail),
+			"operation_type": "",
+			"operation_started_at": None,
+		}
+
+		if doc_status in ("Deployed", "Degraded"):
+			values_yaml = _normalize_helm_values_output(helm.get_values(
+				release_name=release["release_name"],
+				namespace=namespace,
+				cluster_name=release["cluster"],
+			))
+			chart_version = _extract_chart_version_from_status(
+				status_result=result,
+				chart_doc=chart_doc,
+				fallback=release["chart_version"] or chart_doc.latest_version,
+			)
+			spec_hash = calculate_release_spec_hash(
+				chart=release["chart"],
+				chart_version=chart_version,
+				namespace=namespace,
+				release_name=release["release_name"],
+				values_yaml=values_yaml,
+			)
+			fields.update({
+				"values": values_yaml,
+				"chart_version": chart_version,
+				"last_applied_chart_version": chart_version,
+				"desired_spec_hash": spec_hash,
+				"last_applied_spec_hash": spec_hash,
+				"pending_changes": 0,
+			})
+
+		_set_helm_release_fields(release_name, fields)
+
+		frappe.publish_realtime(
+			"helm_release_status_update",
+			{
+				"release_docname": release_name,
+				"release_name": release["release_name"],
+				"status": doc_status,
+			},
+			doctype="Helm Release",
+			docname=release_name,
+		)
+
+	except Exception as e:
+		if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
+			return
+
+		_set_helm_release_fields(release_name, {
+			"status": "Failed",
+			"helm_status_detail": _truncate_status_detail(str(e)),
+			"operation_type": "",
+			"operation_started_at": None,
+		})
+		frappe.log_error(
+			title=f"Helm Rollback Failed: {release_name}",
 			message=str(e),
 		)
 		frappe.publish_realtime(
@@ -298,6 +437,8 @@ def uninstall_release(release_name: str, operation_token: str):
 		_set_helm_release_fields(release_name, {
 			"status": "Failed",
 			"helm_status_detail": _truncate_status_detail(str(e)),
+			"operation_type": "",
+			"operation_started_at": None,
 		})
 		frappe.log_error(
 			title=f"Helm Uninstall Failed: {release_name}",
@@ -356,6 +497,11 @@ def _finalize_uninstall_success(
 		"status": "Draft",
 		"helm_revision": 0,
 		"helm_status_detail": "",
+		"last_applied_chart_version": "",
+		"last_applied_spec_hash": "",
+		"pending_changes": 0,
+		"operation_type": "",
+		"operation_started_at": None,
 	})
 
 	frappe.publish_realtime(
@@ -373,6 +519,42 @@ def _finalize_uninstall_success(
 def _is_release_not_found_error(error: Exception) -> bool:
 	message = str(error).lower()
 	return "release: not found" in message or "release not found" in message
+
+
+def _normalize_helm_values_output(values_yaml: str | None) -> str:
+	if not values_yaml:
+		return ""
+
+	try:
+		parsed = yaml.safe_load(values_yaml)
+	except yaml.YAMLError:
+		return values_yaml
+
+	if parsed in (None, {}):
+		return ""
+	if not isinstance(parsed, dict):
+		return values_yaml
+	return yaml.safe_dump(parsed, default_flow_style=False, sort_keys=True)
+
+
+def _extract_chart_version_from_status(
+	status_result: dict,
+	chart_doc,
+	fallback: str | None = "",
+) -> str:
+	chart_obj = status_result.get("chart") if isinstance(status_result, dict) else None
+	if isinstance(chart_obj, dict):
+		metadata = chart_obj.get("metadata", {})
+		if isinstance(metadata, dict) and metadata.get("version"):
+			return str(metadata["version"])
+
+	chart_text = str(chart_obj or status_result.get("chart_name") or "")
+	chart_name = str(getattr(chart_doc, "chart_name", "") or "")
+	prefix = f"{chart_name}-"
+	if chart_name and chart_text.startswith(prefix):
+		return chart_text[len(prefix):]
+
+	return str(fallback or "")
 
 
 def _release_operation_matches(

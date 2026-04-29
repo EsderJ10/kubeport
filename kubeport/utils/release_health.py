@@ -10,12 +10,10 @@ persisted to MariaDB — and is used by:
 - ``reconciliation._reconcile_helm_releases`` (periodic recheck)
 - ``HelmRelease.get_release_health`` (form-side drilldown via xcall)
 
-Resource-kind coverage is intentionally narrow.  Workloads (Deployment,
-StatefulSet, DaemonSet, Pod, Job) are the only kinds with a meaningful
-"ready" signal that maps cleanly onto the document's ``Deployed`` /
-``Degraded`` states.  Service / PVC / Ingress / CRDs are out of scope: they
-either have no readiness or their semantics tie into separate milestones
-(storage strategy, custom resources).
+Resource-kind coverage intentionally stays on built-in Kubernetes resources
+with clear readiness semantics: workloads, PVCs, Services/endpoints, and
+Ingress load-balancer status.  CRDs remain out of scope because each CRD
+defines its own health contract.
 """
 
 from __future__ import annotations
@@ -30,11 +28,22 @@ from kubernetes.client.rest import ApiException
 from kubeport.utils import helm
 from kubeport.utils.k8s_client import get_k8s_api_client
 
-_WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "Pod", "Job")
+_HEALTH_KINDS = (
+	"Deployment",
+	"StatefulSet",
+	"DaemonSet",
+	"Pod",
+	"Job",
+	"PersistentVolumeClaim",
+	"Service",
+	"Ingress",
+)
 _HELM_PENDING_STATUSES = frozenset({
 	"pending-install", "pending-upgrade", "pending-rollback",
 	"uninstalling",
 })
+_EVENT_LIST_TIMEOUT_SECONDS = 10.0
+_WARNING_EVENT_LIMIT = 2
 
 
 @dataclass(frozen=True)
@@ -99,11 +108,12 @@ def walk(release_docname: str) -> list[ResourceHealth]:
 	apps_v1 = client.AppsV1Api(api_client=api_client)
 	core_v1 = client.CoreV1Api(api_client=api_client)
 	batch_v1 = client.BatchV1Api(api_client=api_client)
+	networking_v1 = client.NetworkingV1Api(api_client=api_client)
 
 	results: list[ResourceHealth] = []
 	for resource in manifest:
 		kind = str(resource.get("kind") or "")
-		if kind not in _WORKLOAD_KINDS:
+		if kind not in _HEALTH_KINDS:
 			continue
 
 		metadata = resource.get("metadata") or {}
@@ -121,12 +131,16 @@ def walk(release_docname: str) -> list[ResourceHealth]:
 					apps_v1=apps_v1,
 					core_v1=core_v1,
 					batch_v1=batch_v1,
+					networking_v1=networking_v1,
 				)
 			)
 		except ApiException as e:
 			results.append(_resource_health_from_api_error(kind, name, obj_namespace, e))
 
-	return results
+	return [
+		_attach_warning_events(result, core_v1)
+		for result in results
+	]
 
 
 def summarize(results: list[ResourceHealth]) -> tuple[bool, str]:
@@ -224,6 +238,7 @@ def _check_workload(
 	apps_v1: "client.AppsV1Api",
 	core_v1: "client.CoreV1Api",
 	batch_v1: "client.BatchV1Api",
+	networking_v1: "client.NetworkingV1Api",
 ) -> ResourceHealth:
 	if kind == "Deployment":
 		obj = apps_v1.read_namespaced_deployment(name=name, namespace=namespace)
@@ -240,8 +255,17 @@ def _check_workload(
 	if kind == "Job":
 		obj = batch_v1.read_namespaced_job(name=name, namespace=namespace)
 		return _check_job(obj, namespace)
+	if kind == "PersistentVolumeClaim":
+		obj = core_v1.read_namespaced_persistent_volume_claim(name=name, namespace=namespace)
+		return _check_pvc(obj, namespace)
+	if kind == "Service":
+		obj = core_v1.read_namespaced_service(name=name, namespace=namespace)
+		return _check_service(obj, namespace, core_v1)
+	if kind == "Ingress":
+		obj = networking_v1.read_namespaced_ingress(name=name, namespace=namespace)
+		return _check_ingress(obj, namespace)
 
-	# Should never reach here — caller filters on _WORKLOAD_KINDS.
+	# Should never reach here — caller filters on _HEALTH_KINDS.
 	return ResourceHealth(kind, name, namespace, False, "unsupported kind", "")
 
 
@@ -395,6 +419,112 @@ def _check_job(obj: Any, namespace: str) -> ResourceHealth:
 	)
 
 
+def _check_pvc(obj: Any, namespace: str) -> ResourceHealth:
+	name = _meta_name(obj)
+	status_obj = getattr(obj, "status", None)
+	phase = getattr(status_obj, "phase", None) or "Unknown"
+	if phase == "Bound":
+		return ResourceHealth("PersistentVolumeClaim", name, namespace, True, "", "phase=Bound")
+
+	conditions = getattr(status_obj, "conditions", None) or []
+	condition = next(iter(conditions), None)
+	reason = getattr(condition, "reason", None) if condition else ""
+	message = getattr(condition, "message", None) if condition else ""
+	return ResourceHealth(
+		"PersistentVolumeClaim",
+		name,
+		namespace,
+		False,
+		reason or phase,
+		message or f"phase={phase}",
+	)
+
+
+def _check_service(
+	obj: Any,
+	namespace: str,
+	core_v1: "client.CoreV1Api",
+) -> ResourceHealth:
+	name = _meta_name(obj)
+	spec_obj = getattr(obj, "spec", None)
+	status_obj = getattr(obj, "status", None)
+	service_type = getattr(spec_obj, "type", None) or "ClusterIP"
+	selector = getattr(spec_obj, "selector", None) or {}
+
+	if service_type == "ExternalName":
+		return ResourceHealth("Service", name, namespace, True, "", "type=ExternalName")
+
+	if selector:
+		try:
+			endpoints = core_v1.read_namespaced_endpoints(name=name, namespace=namespace)
+		except ApiException as e:
+			return ResourceHealth(
+				"Service",
+				name,
+				namespace,
+				False,
+				f"endpoints-api-error-{e.status}",
+				e.reason or "",
+			)
+		if not _has_ready_endpoint(endpoints):
+			return ResourceHealth(
+				"Service",
+				name,
+				namespace,
+				False,
+				"no ready endpoints",
+				"Service selector has no ready endpoint addresses.",
+			)
+
+	if service_type == "LoadBalancer":
+		ingress = _load_balancer_ingress(status_obj)
+		if not ingress:
+			return ResourceHealth(
+				"Service",
+				name,
+				namespace,
+				False,
+				"load balancer pending",
+				"Service has no load-balancer ingress address.",
+			)
+		return ResourceHealth(
+			"Service",
+			name,
+			namespace,
+			True,
+			"",
+			f"load balancer ready: {', '.join(ingress)}",
+		)
+
+	if selector:
+		return ResourceHealth("Service", name, namespace, True, "", "ready endpoints present")
+
+	return ResourceHealth("Service", name, namespace, True, "", "no selector")
+
+
+def _check_ingress(obj: Any, namespace: str) -> ResourceHealth:
+	name = _meta_name(obj)
+	ingress = _load_balancer_ingress(getattr(obj, "status", None))
+	if ingress:
+		return ResourceHealth(
+			"Ingress",
+			name,
+			namespace,
+			True,
+			"",
+			f"load balancer ready: {', '.join(ingress)}",
+		)
+
+	return ResourceHealth(
+		"Ingress",
+		name,
+		namespace,
+		False,
+		"load balancer pending",
+		"Ingress has no load-balancer ingress address.",
+	)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -455,6 +585,88 @@ def _pod_failure_reason(status_obj: Any, phase: str) -> tuple[str, str]:
 
 	# No actionable container status — fall back to the pod phase.
 	return phase, f"phase={phase}"
+
+
+def _has_ready_endpoint(endpoints: Any) -> bool:
+	subsets = getattr(endpoints, "subsets", None) or []
+	for subset in subsets:
+		if getattr(subset, "addresses", None):
+			return True
+	return False
+
+
+def _load_balancer_ingress(status_obj: Any) -> list[str]:
+	load_balancer = getattr(status_obj, "load_balancer", None)
+	ingress_rows = getattr(load_balancer, "ingress", None) or []
+	addresses: list[str] = []
+	for row in ingress_rows:
+		hostname = getattr(row, "hostname", None)
+		ip = getattr(row, "ip", None)
+		if hostname:
+			addresses.append(str(hostname))
+		elif ip:
+			addresses.append(str(ip))
+	return addresses
+
+
+def _attach_warning_events(
+	health: ResourceHealth,
+	core_v1: "client.CoreV1Api",
+) -> ResourceHealth:
+	if health.ready:
+		return health
+
+	warnings = _list_warning_events(core_v1, health.kind, health.name, health.namespace)
+	if not warnings:
+		return health
+
+	event_summary = "; ".join(warnings)
+	message = f"{health.message}\nEvents: {event_summary}" if health.message else f"Events: {event_summary}"
+	return ResourceHealth(
+		health.kind,
+		health.name,
+		health.namespace,
+		health.ready,
+		health.reason,
+		message,
+	)
+
+
+def _list_warning_events(
+	core_v1: "client.CoreV1Api",
+	kind: str,
+	name: str,
+	namespace: str,
+) -> list[str]:
+	try:
+		events = core_v1.list_namespaced_event(
+			namespace=namespace,
+			field_selector=f"involvedObject.kind={kind},involvedObject.name={name}",
+			_request_timeout=_EVENT_LIST_TIMEOUT_SECONDS,
+		)
+	except Exception:
+		return []
+
+	warning_events = [
+		event for event in (getattr(events, "items", None) or [])
+		if str(getattr(event, "type", "") or "") == "Warning"
+	]
+	warning_events.sort(key=_event_sort_key, reverse=True)
+
+	summaries: list[str] = []
+	for event in warning_events[:_WARNING_EVENT_LIMIT]:
+		reason = str(getattr(event, "reason", "") or "Warning")
+		message = str(getattr(event, "message", "") or "").strip()
+		summaries.append(f"{reason}: {message}" if message else reason)
+	return summaries
+
+
+def _event_sort_key(event: Any) -> str:
+	for fieldname in ("event_time", "last_timestamp", "first_timestamp"):
+		value = getattr(event, fieldname, None)
+		if value:
+			return str(value)
+	return ""
 
 
 def _resource_health_from_api_error(

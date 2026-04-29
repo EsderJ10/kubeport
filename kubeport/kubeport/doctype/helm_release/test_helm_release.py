@@ -8,6 +8,7 @@ from frappe.tests import IntegrationTestCase, UnitTestCase
 from kubeport.kubeport.doctype.helm_release.helm_release import (
 	HelmRelease,
 	build_release_docname,
+	calculate_release_spec_hash,
 	_iter_storage_configs,
 	_validate_storage_access_modes,
 )
@@ -19,6 +20,24 @@ class UnitTestHelmRelease(UnitTestCase):
 			build_release_docname("cluster-a", "erp", "bench-a"),
 			"cluster-a/erp/bench-a",
 		)
+
+	def test_calculate_release_spec_hash_normalizes_yaml_key_order(self):
+		hash_a = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 2\nimage:\n  tag: v1\n",
+		)
+		hash_b = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="image:\n  tag: v1\nworkers:\n  replicaCount: 2\n",
+		)
+
+		self.assertEqual(hash_a, hash_b)
 
 	def test_iter_storage_configs_finds_nested_persistence_blocks(self):
 		configs = _iter_storage_configs({
@@ -96,6 +115,33 @@ class UnitTestHelmRelease(UnitTestCase):
 		with self.assertRaisesRegex(RuntimeError, "immutable after creation"):
 			doc.validate()
 
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.get_doc")
+	def test_validate_marks_pending_changes_when_desired_hash_differs_from_last_applied(
+		self,
+		mock_get_doc,
+	):
+		mock_get_doc.return_value = MagicMock(latest_version="8.0.41")
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+		doc.cluster = "cluster-a"
+		doc.namespace = "default"
+		doc.release_name = "bench-a"
+		doc.chart = "repo/erpnext"
+		doc.chart_version = "8.0.41"
+		doc.values = "workers:\n  replicaCount: 2\n"
+		doc.last_applied_spec_hash = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="default",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 1\n",
+		)
+		doc.is_new = lambda: False
+
+		doc.validate()
+
+		self.assertTrue(doc.pending_changes)
+
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
 	def test_on_trash_refuses_resource_owning_statuses(self, mock_throw):
 		mock_throw.side_effect = RuntimeError("Uninstall the release first")
@@ -151,8 +197,10 @@ class UnitTestHelmRelease(UnitTestCase):
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex", return_value="tok-2")
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.enqueue")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.get_all", return_value=[])
 	def test_uninstall_release_rotates_operation_token_and_enqueues_with_it(
 		self,
+		_mock_get_all,
 		mock_enqueue,
 		_mock_msgprint,
 		_mock_token_hex,
@@ -178,8 +226,10 @@ class UnitTestHelmRelease(UnitTestCase):
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex", return_value="tok-3")
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.enqueue")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.get_all", return_value=[])
 	def test_uninstall_release_allows_failed_rows(
 		self,
+		_mock_get_all,
 		mock_enqueue,
 		_mock_msgprint,
 		_mock_token_hex,
@@ -195,6 +245,57 @@ class UnitTestHelmRelease(UnitTestCase):
 		doc.db_set.assert_any_call("operation_token", "tok-3")
 		doc.db_set.assert_any_call("status", "Uninstalling")
 		mock_enqueue.assert_called_once()
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.get_all")
+	def test_uninstall_release_blocks_active_frappe_sites(
+		self,
+		mock_get_all,
+		mock_throw,
+	):
+		mock_get_all.return_value = [{
+			"name": "cluster-a/default/bench-a/site.local",
+			"site_name": "site.local",
+			"status": "Active",
+			"operation_job_name": "",
+		}]
+		mock_throw.side_effect = RuntimeError("still depend")
+		doc = object.__new__(HelmRelease)
+		doc.status = "Deployed"
+		doc.name = "cluster-a/default/bench-a"
+		doc.release_name = "bench-a"
+
+		with self.assertRaisesRegex(RuntimeError, "still depend"):
+			doc.uninstall_release()
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex", return_value="tok-4")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.enqueue")
+	def test_rollback_release_rotates_operation_token_and_enqueues_revision(
+		self,
+		mock_enqueue,
+		_mock_msgprint,
+		_mock_token_hex,
+	):
+		doc = object.__new__(HelmRelease)
+		doc.status = "Deployed"
+		doc.name = "cluster-a/default/bench-a"
+		doc.release_name = "bench-a"
+		doc.db_set = MagicMock()
+
+		doc.rollback_release(2)
+
+		doc.db_set.assert_any_call("operation_token", "tok-4")
+		doc.db_set.assert_any_call("operation_type", "Rollback")
+		doc.db_set.assert_any_call("status", "In Progress")
+		mock_enqueue.assert_called_once_with(
+			"kubeport.tasks.helm_tasks.rollback_release",
+			release_name="cluster-a/default/bench-a",
+			operation_token="tok-4",
+			target_revision=2,
+			queue="long",
+			enqueue_after_commit=True,
+		)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.logger")
 	@patch("kubeport.utils.release_health.walk")

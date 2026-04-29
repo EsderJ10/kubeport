@@ -12,6 +12,7 @@ from kubeport.tasks.reconciliation import (
 	_reconcile_frappe_sites,
 	_reconcile_helm_releases,
 	_reconcile_service_bundles,
+	_reconcile_stale_helm_operations,
 	_sweep_orphan_site_jobs,
 	reconcile_all_releases,
 )
@@ -22,10 +23,12 @@ class UnitTestReconciliation(UnitTestCase):
 	@patch("kubeport.tasks.reconciliation._sweep_orphan_site_jobs")
 	@patch("kubeport.tasks.reconciliation._reconcile_frappe_sites")
 	@patch("kubeport.tasks.reconciliation._reconcile_service_bundles")
+	@patch("kubeport.tasks.reconciliation._reconcile_stale_helm_operations")
 	@patch("kubeport.tasks.reconciliation._reconcile_helm_releases")
 	def test_reconcile_all_releases_only_runs_active_sweeps(
 		self,
 		mock_reconcile_helm_releases,
+		mock_reconcile_stale_helm_operations,
 		mock_reconcile_service_bundles,
 		mock_reconcile_frappe_sites,
 		mock_sweep_orphan_site_jobs,
@@ -33,6 +36,7 @@ class UnitTestReconciliation(UnitTestCase):
 		reconcile_all_releases()
 
 		mock_reconcile_helm_releases.assert_called_once_with()
+		mock_reconcile_stale_helm_operations.assert_called_once_with()
 		mock_reconcile_service_bundles.assert_called_once_with()
 		mock_reconcile_frappe_sites.assert_called_once_with()
 		mock_sweep_orphan_site_jobs.assert_called_once_with()
@@ -202,6 +206,99 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_set_value.assert_not_called()
 		mock_publish.assert_not_called()
 		mock_logger.return_value.info.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.tasks.reconciliation._helm_operation_is_stale", return_value=True)
+	@patch("kubeport.utils.release_health.walk")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_stale_helm_operation_recovers_successful_deploy(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_helm_status,
+		mock_walk,
+		_mock_is_stale,
+		mock_get_value,
+		mock_publish,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="cluster-a/default/bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				chart="repo/erpnext",
+				chart_version="8.0.41",
+				values="",
+				status="In Progress",
+				operation_token="tok-1",
+				operation_started_at="2026-04-12 10:00:00",
+				modified="2026-04-12 10:00:00",
+			),
+		]
+		mock_helm_status.return_value = {"info": {"status": "deployed"}}
+		mock_walk.return_value = []
+		mock_get_value.return_value = {
+			"operation_token": "tok-1",
+			"status": "In Progress",
+		}
+
+		_reconcile_stale_helm_operations()
+
+		mock_set_value.assert_called_once()
+		_, _, fields = mock_set_value.call_args.args
+		self.assertEqual(fields["status"], "Deployed")
+		self.assertEqual(fields["last_applied_chart_version"], "8.0.41")
+		self.assertEqual(fields["pending_changes"], 0)
+		self.assertEqual(fields["operation_type"], "")
+		mock_publish.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.tasks.reconciliation._helm_operation_is_stale", return_value=True)
+	@patch("kubeport.utils.helm.status", side_effect=RuntimeError("release: not found"))
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_stale_uninstall_returns_missing_release_to_draft(
+		self,
+		mock_get_all,
+		mock_set_value,
+		_mock_helm_status,
+		_mock_is_stale,
+		mock_get_value,
+		mock_publish,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="cluster-a/default/bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				chart="repo/erpnext",
+				chart_version="8.0.41",
+				values="",
+				status="Uninstalling",
+				operation_token="tok-1",
+				operation_started_at="2026-04-12 10:00:00",
+				modified="2026-04-12 10:00:00",
+			),
+		]
+		mock_get_value.return_value = {
+			"operation_token": "tok-1",
+			"status": "Uninstalling",
+		}
+
+		_reconcile_stale_helm_operations()
+
+		mock_set_value.assert_called_once()
+		_, _, fields = mock_set_value.call_args.args
+		self.assertEqual(fields["status"], "Draft")
+		self.assertEqual(fields["last_applied_spec_hash"], "")
+		self.assertEqual(fields["pending_changes"], 0)
+		mock_publish.assert_called_once()
 
 	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")

@@ -19,11 +19,18 @@
   "section_break_actions",
   "deploy_release",
   "uninstall_release",
+  "show_history",
   "section_break_status",
   "status",
+  "pending_changes",
+  "operation_type",
+  "operation_started_at",
   "column_break_status",
   "helm_revision",
+  "last_applied_chart_version",
   "helm_status_detail",
+  "desired_spec_hash",
+  "last_applied_spec_hash",
   "operation_token"
  ],
  "fields": [
@@ -113,6 +120,12 @@
    "label": "Uninstall"
   },
   {
+   "button_color": "Default",
+   "fieldname": "show_history",
+   "fieldtype": "Button",
+   "label": "History / Rollback"
+  },
+  {
    "fieldname": "section_break_status",
    "fieldtype": "Section Break",
    "label": "Release Status"
@@ -124,6 +137,28 @@
    "in_list_view": 1,
    "label": "Status",
    "options": "Draft\nIn Progress\nDeployed\nDegraded\nUninstalling\nFailed",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "pending_changes",
+   "fieldtype": "Check",
+   "label": "Pending Changes",
+   "read_only": 1,
+   "description": "Checked when the saved desired state differs from the last successfully applied Helm spec."
+  },
+  {
+   "fieldname": "operation_type",
+   "fieldtype": "Select",
+   "label": "Current Operation",
+   "options": "\nDeploy\nUpgrade\nRollback\nUninstall",
+   "read_only": 1,
+   "description": "The in-flight Helm operation, if any."
+  },
+  {
+   "fieldname": "operation_started_at",
+   "fieldtype": "Datetime",
+   "label": "Operation Started At",
    "read_only": 1
   },
   {
@@ -139,11 +174,33 @@
    "description": "The Helm release revision number."
   },
   {
+   "fieldname": "last_applied_chart_version",
+   "fieldtype": "Data",
+   "label": "Last Applied Chart Version",
+   "read_only": 1
+  },
+  {
    "fieldname": "helm_status_detail",
    "fieldtype": "Small Text",
    "label": "Status Detail",
    "read_only": 1,
    "description": "Detailed status information from the Helm CLI."
+  },
+  {
+   "fieldname": "desired_spec_hash",
+   "fieldtype": "Data",
+   "label": "Desired Spec Hash",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "last_applied_spec_hash",
+   "fieldtype": "Data",
+   "label": "Last Applied Spec Hash",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1
   },
   {
    "fieldname": "operation_token",
@@ -152,7 +209,7 @@
    "hidden": 1,
    "read_only": 1,
    "no_copy": 1,
-   "description": "Per-operation token used by background workers and reconciliation to detect supersession; rotated on every deploy / uninstall."
+   "description": "Per-operation token used by background workers and reconciliation to detect supersession; rotated on every deploy, rollback, or uninstall."
   }
  ],
  "grid_page_length": 50,

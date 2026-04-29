@@ -202,6 +202,30 @@ def uninstall(
 		return _run_helm(cmd, timeout=_HELM_WORKER_TIMEOUT_SECONDS)
 
 
+def rollback(
+	release_name: str,
+	revision: int,
+	namespace: str,
+	cluster_name: str,
+) -> dict:
+	"""Roll back a Helm release to a previous revision and return fresh status."""
+	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
+		cmd = [
+			"helm", "rollback", release_name, str(revision),
+			"--namespace", namespace,
+		]
+		if kubeconfig_path:
+			cmd.extend(["--kubeconfig", kubeconfig_path])
+
+		_run_helm(cmd, timeout=_HELM_WORKER_TIMEOUT_SECONDS)
+
+	return status(
+		release_name=release_name,
+		namespace=namespace,
+		cluster_name=cluster_name,
+	)
+
+
 def status(
 	release_name: str,
 	namespace: str,
@@ -214,6 +238,29 @@ def status(
 	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 		cmd = [
 			"helm", "status", release_name,
+			"--namespace", namespace,
+			"--output", "json",
+		]
+		if kubeconfig_path:
+			cmd.extend(["--kubeconfig", kubeconfig_path])
+
+		output = _run_helm(cmd, timeout=_HELM_READ_TIMEOUT_SECONDS)
+
+	return _parse_json_or_empty(output)
+
+
+def history(
+	release_name: str,
+	namespace: str,
+	cluster_name: str,
+) -> list[dict]:
+	"""Return Helm release revision history.
+
+	Equivalent to ``helm history <release> -n <ns> --output json``.
+	"""
+	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
+		cmd = [
+			"helm", "history", release_name,
 			"--namespace", namespace,
 			"--output", "json",
 		]
@@ -265,6 +312,27 @@ def get_manifest(
 		frappe.throw(f"Helm returned a manifest that could not be parsed: {e}")
 
 	return [doc for doc in documents if isinstance(doc, dict) and doc.get("kind")]
+
+
+def get_values(
+	release_name: str,
+	namespace: str,
+	cluster_name: str,
+	all_values: bool = False,
+) -> str:
+	"""Return the values stored on a Helm release as YAML."""
+	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
+		cmd = [
+			"helm", "get", "values", release_name,
+			"--namespace", namespace,
+			"--output", "yaml",
+		]
+		if all_values:
+			cmd.append("--all")
+		if kubeconfig_path:
+			cmd.extend(["--kubeconfig", kubeconfig_path])
+
+		return _run_helm(cmd, timeout=_HELM_READ_TIMEOUT_SECONDS)
 
 
 def list_releases(

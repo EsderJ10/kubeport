@@ -228,17 +228,30 @@ function _render_release_table(frm, benches) {
         __('Status'),
         __('Chart'),
         __('App Version'),
-        __('Updated')
+        __('Updated'),
+        __('Kubeport')
     ];
 
-    const rows = benches.map((bench) => ([
-        _escape_cell(bench.release_name),
-        _escape_cell(bench.namespace),
-        _escape_cell(bench.status),
-        _escape_cell(bench.chart),
-        _escape_cell(bench.app_version || 'N/A'),
-        _escape_cell(bench.updated || 'N/A')
-    ]));
+    const rows = benches.map((bench) => {
+        const docname = bench.helm_release_docname || '';
+        const action = bench.is_tracked
+            ? `<button class="btn btn-xs btn-default kubeport-open-release"
+                    data-docname="${_escape_attr(docname)}">${__('Open')}</button>`
+            : `<button class="btn btn-xs btn-primary kubeport-track-release"
+                    data-release="${_escape_attr(bench.release_name)}"
+                    data-namespace="${_escape_attr(bench.namespace || 'default')}">
+                    ${__('Track')}
+               </button>`;
+        return [
+            _escape_cell(bench.release_name),
+            _escape_cell(bench.namespace),
+            _escape_cell(bench.status),
+            _escape_cell(bench.chart),
+            _escape_cell(bench.app_version || 'N/A'),
+            _escape_cell(bench.updated || 'N/A'),
+            action
+        ];
+    });
 
     _render_table(
         frm,
@@ -247,6 +260,7 @@ function _render_release_table(frm, benches) {
         rows,
         __('No Helm releases found in this cluster.')
     );
+    _bind_release_tracking_actions(frm);
 }
 
 function _render_site_table(frm, sites) {
@@ -330,6 +344,41 @@ function _set_wrapper_html(frm, fieldname, html) {
 
 function _escape_cell(value) {
     return frappe.utils.escape_html(value == null ? '' : String(value));
+}
+
+function _escape_attr(value) {
+    return _escape_cell(value).replace(/"/g, '&quot;');
+}
+
+function _bind_release_tracking_actions(frm) {
+    const field = frm.fields_dict.discovered_releases_html;
+    if (!field || !field.$wrapper) return;
+
+    field.$wrapper.find('.kubeport-open-release').on('click', function() {
+        const docname = $(this).attr('data-docname');
+        if (docname) {
+            frappe.set_route('Form', 'Helm Release', docname);
+        }
+    });
+
+    field.$wrapper.find('.kubeport-track-release').on('click', function() {
+        const release_name = $(this).attr('data-release');
+        const namespace = $(this).attr('data-namespace') || 'default';
+        frappe.call({
+            method: 'kubeport.api.discovery.adopt_helm_release',
+            args: {
+                cluster_name: frm.doc.name,
+                namespace,
+                release_name
+            },
+            freeze: true,
+            freeze_message: __('Tracking Helm release...'),
+            callback: function(r) {
+                if (r.exc || !r.message) return;
+                frappe.set_route('Form', 'Helm Release', r.message.name);
+            }
+        });
+    });
 }
 
 
