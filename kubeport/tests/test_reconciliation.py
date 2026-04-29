@@ -15,6 +15,7 @@ from kubeport.tasks.reconciliation import (
 	_sweep_orphan_site_jobs,
 	reconcile_all_releases,
 )
+from kubeport.utils.release_health import ResourceHealth
 
 
 class UnitTestReconciliation(UnitTestCase):
@@ -36,6 +37,9 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_reconcile_frappe_sites.assert_called_once_with()
 		mock_sweep_orphan_site_jobs.assert_called_once_with()
 
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.release_health.walk")
 	@patch("kubeport.utils.helm.status")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
 	@patch("kubeport.tasks.reconciliation.frappe.get_all")
@@ -44,6 +48,9 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_get_all,
 		mock_set_value,
 		mock_helm_status,
+		mock_walk,
+		mock_get_value,
+		mock_publish,
 	):
 		mock_get_all.return_value = [
 			SimpleNamespace(
@@ -52,17 +59,151 @@ class UnitTestReconciliation(UnitTestCase):
 				namespace="default",
 				release_name="bench-a",
 				status="Degraded",
+				operation_token="tok-1",
 			),
 		]
 		mock_helm_status.return_value = {"info": {"status": "deployed"}}
+		mock_walk.return_value = []
+		mock_get_value.return_value = {
+			"operation_token": "tok-1",
+			"status": "Degraded",
+		}
 
 		_reconcile_helm_releases()
 
-		self.assertEqual(mock_set_value.call_args_list, [
-			call("Helm Release", "bench-a", "status", "Deployed"),
-			call("Helm Release", "bench-a", "helm_status_detail", "deployed"),
-		])
+		mock_set_value.assert_called_once_with("Helm Release", "bench-a", {
+			"status": "Deployed",
+			"helm_status_detail": "deployed (no workload resources)",
+		})
+		mock_publish.assert_called_once()
 
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.release_health.walk")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_helm_releases_marks_unready_workloads_degraded(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_helm_status,
+		mock_walk,
+		mock_get_value,
+		mock_publish,
+		mock_log_error,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				status="Deployed",
+				operation_token="tok-1",
+			),
+		]
+		mock_helm_status.return_value = {"info": {"status": "deployed"}}
+		mock_walk.return_value = [
+			ResourceHealth("Deployment", "bench-a-web", "default", False, "ImagePullBackOff", ""),
+		]
+		mock_get_value.return_value = {
+			"operation_token": "tok-1",
+			"status": "Deployed",
+		}
+
+		_reconcile_helm_releases()
+
+		mock_set_value.assert_called_once()
+		_, _, fields = mock_set_value.call_args.args
+		self.assertEqual(fields["status"], "Degraded")
+		self.assertIn("ImagePullBackOff", fields["helm_status_detail"])
+		mock_publish.assert_called_once()
+		mock_log_error.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.release_health.walk")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_helm_releases_skips_when_row_enters_worker_status_mid_check(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_helm_status,
+		mock_walk,
+		mock_get_value,
+		mock_publish,
+	):
+		for worker_status in ("In Progress", "Uninstalling"):
+			with self.subTest(worker_status=worker_status):
+				mock_get_all.return_value = [
+					SimpleNamespace(
+						name="bench-a",
+						cluster="cluster-a",
+						namespace="default",
+						release_name="bench-a",
+						status="Deployed",
+						operation_token="tok-1",
+					),
+				]
+				mock_helm_status.return_value = {"info": {"status": "deployed"}}
+				mock_walk.return_value = []
+				mock_get_value.return_value = {
+					"operation_token": "tok-1",
+					"status": worker_status,
+				}
+
+				_reconcile_helm_releases()
+
+				mock_set_value.assert_not_called()
+				mock_publish.assert_not_called()
+				mock_set_value.reset_mock()
+				mock_publish.reset_mock()
+
+	@patch("kubeport.tasks.reconciliation.frappe.logger")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.release_health.walk")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_helm_releases_skips_when_operation_token_rotates_mid_check(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_helm_status,
+		mock_walk,
+		mock_get_value,
+		mock_publish,
+		mock_logger,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				status="Degraded",
+				operation_token="tok-old",
+			),
+		]
+		mock_helm_status.return_value = {"info": {"status": "deployed"}}
+		mock_walk.return_value = []
+		mock_get_value.return_value = {
+			"operation_token": "tok-new",
+			"status": "Degraded",
+		}
+
+		_reconcile_helm_releases()
+
+		mock_set_value.assert_not_called()
+		mock_publish.assert_not_called()
+		mock_logger.return_value.info.assert_called_once()
+
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
 	@patch("kubeport.tasks.reconciliation.check_resources_exist")
 	@patch("kubeport.tasks.reconciliation.frappe.get_all")
@@ -71,6 +212,7 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_get_all,
 		mock_check_resources_exist,
 		mock_set_value,
+		_mock_get_api_client,
 	):
 		mock_get_all.return_value = [
 			SimpleNamespace(
@@ -90,6 +232,7 @@ class UnitTestReconciliation(UnitTestCase):
 			call("Service Bundle", "bundle-a", "status_detail", ""),
 		])
 
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
 	@patch("kubeport.tasks.reconciliation.frappe.log_error")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
 	@patch("kubeport.tasks.reconciliation.check_resources_exist")
@@ -100,6 +243,7 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_check_resources_exist,
 		mock_set_value,
 		mock_log_error,
+		_mock_get_api_client,
 	):
 		mock_get_all.return_value = [
 			SimpleNamespace(

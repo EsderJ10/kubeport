@@ -97,27 +97,25 @@ class UnitTestHelmRelease(UnitTestCase):
 			doc.validate()
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
-	def test_on_trash_refuses_active_statuses(self, mock_throw):
+	def test_on_trash_refuses_resource_owning_statuses(self, mock_throw):
 		mock_throw.side_effect = RuntimeError("Uninstall the release first")
 
-		for active_status in ("In Progress", "Deployed", "Degraded", "Uninstalling"):
-			with self.subTest(status=active_status):
+		for resource_owning_status in ("In Progress", "Deployed", "Degraded", "Uninstalling", "Failed"):
+			with self.subTest(status=resource_owning_status):
 				doc = object.__new__(HelmRelease)
 				doc.name = "cluster-a/default/bench-a"
-				doc.status = active_status
+				doc.status = resource_owning_status
 
 				with self.assertRaisesRegex(RuntimeError, "Uninstall the release first"):
 					doc.on_trash()
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
-	def test_on_trash_allows_draft_and_failed(self, mock_throw):
-		for inactive_status in ("Draft", "Failed"):
-			with self.subTest(status=inactive_status):
-				doc = object.__new__(HelmRelease)
-				doc.name = "cluster-a/default/bench-a"
-				doc.status = inactive_status
+	def test_on_trash_allows_draft_only(self, mock_throw):
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+		doc.status = "Draft"
 
-				doc.on_trash()
+		doc.on_trash()
 
 		mock_throw.assert_not_called()
 
@@ -176,6 +174,59 @@ class UnitTestHelmRelease(UnitTestCase):
 			queue="long",
 			enqueue_after_commit=True,
 		)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex", return_value="tok-3")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.enqueue")
+	def test_uninstall_release_allows_failed_rows(
+		self,
+		mock_enqueue,
+		_mock_msgprint,
+		_mock_token_hex,
+	):
+		doc = object.__new__(HelmRelease)
+		doc.status = "Failed"
+		doc.name = "cluster-a/default/bench-a"
+		doc.release_name = "bench-a"
+		doc.db_set = MagicMock()
+
+		doc.uninstall_release()
+
+		doc.db_set.assert_any_call("operation_token", "tok-3")
+		doc.db_set.assert_any_call("status", "Uninstalling")
+		mock_enqueue.assert_called_once()
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.logger")
+	@patch("kubeport.utils.release_health.walk")
+	def test_get_release_health_returns_structured_rows(self, mock_walk, _mock_logger):
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+		mock_walk.return_value = [
+			MagicMock(to_dict=lambda: {
+				"kind": "Deployment",
+				"name": "bench-a",
+				"namespace": "default",
+				"ready": True,
+				"reason": "",
+				"message": "1/1 available",
+			}),
+		]
+
+		result = doc.get_release_health()
+
+		self.assertEqual(result["error"], "")
+		self.assertEqual(result["rows"][0]["kind"], "Deployment")
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.logger")
+	@patch("kubeport.utils.release_health.walk", side_effect=RuntimeError("helm get manifest failed"))
+	def test_get_release_health_returns_structured_error(self, _mock_walk, _mock_logger):
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+
+		result = doc.get_release_health()
+
+		self.assertEqual(result["rows"], [])
+		self.assertIn("helm get manifest failed", result["error"])
 
 
 # On IntegrationTestCase, the doctype test records and all

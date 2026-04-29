@@ -6,7 +6,7 @@ Periodic task that compares desired state (Frappe DB) with actual state
 ``hooks.py`` every 5 minutes.
 
 Covers three DocTypes:
-- **Helm Release** — uses ``helm status`` to check Helm-managed releases
+- **Helm Release** — combines ``helm status`` with workload readiness checks
 - **Service Bundle** — uses K8s API to check raw manifest resources
 - **Frappe Site** — polls Kubernetes Job status for in-progress site creations
 """
@@ -20,13 +20,6 @@ from kubeport.utils.k8s_resources import check_resources_exist
 
 _HEALTHY_RELEASE_STATUSES = ["Deployed", "Degraded"]
 _HELM_STATUS_DETAIL_LIMIT = 500
-# Helm runtime statuses that mean "in-flight, no terminal decision" (mirror
-# of ``_HELM_PENDING_STATUSES`` in ``helm_tasks.py``).  Reconciliation pulls
-# the row out of healthy state so operators see exactly what is stuck.
-_HELM_PENDING_STATUSES = frozenset({
-	"pending-install", "pending-upgrade", "pending-rollback",
-	"uninstalling",
-})
 
 # Three-state result from the bench ground-truth probe.  "unknown" means the
 # probe could not reach the bench pod or exec failed transiently — the caller
@@ -65,7 +58,7 @@ def _reconcile_helm_releases():
 	write would race the worker's terminal write.
 	"""
 	from kubeport.utils import helm
-	from kubeport.utils.release_health import walk
+	from kubeport.utils.release_health import classify_release_from_cluster, walk
 
 	releases = frappe.get_all(
 		"Helm Release",
@@ -87,8 +80,8 @@ def _reconcile_helm_releases():
 				if isinstance(info, dict):
 					runtime_status = info.get("status", "")
 
-			next_status, detail = _classify_release_state(
-				release_name=release.name,
+			next_status, detail = classify_release_from_cluster(
+				release_docname=release.name,
 				runtime_status=runtime_status,
 				walk_fn=walk,
 			)
@@ -119,41 +112,6 @@ def _reconcile_helm_releases():
 				title=f"Helm Reconciliation Error: {release.name}",
 				message=str(e),
 			)
-
-
-def _classify_release_state(
-	release_name: str,
-	runtime_status: str,
-	walk_fn,
-) -> tuple[str, str]:
-	"""Combine helm runtime status + walker readiness into (status, detail).
-
-	Mirrors ``helm_tasks._map_release_status`` but kept here so the
-	reconciliation module has a single import-time path through
-	``release_health.walk`` and can mock it in tests without reaching across
-	module boundaries.
-	"""
-	from kubeport.utils.release_health import summarize
-
-	if runtime_status in _HELM_PENDING_STATUSES:
-		return "Failed", (
-			f"stuck: helm reports '{runtime_status}'. "
-			"Re-run Install / Upgrade or run `helm rollback` manually to recover."
-		)
-
-	if runtime_status != "deployed":
-		return "Failed", f"Helm reports: {runtime_status or 'unknown'}"
-
-	try:
-		walker_results = walk_fn(release_name)
-	except Exception as e:
-		# helm side is fine; only the readiness probe failed.  Stay Degraded
-		# with the walker error so the operator can fix cluster access without
-		# misreading the row as Failed.
-		return "Degraded", f"deployed | readiness probe failed: {e}"
-
-	all_ready, summary = summarize(walker_results)
-	return ("Deployed" if all_ready else "Degraded"), summary
 
 
 def _reconcile_service_bundles():

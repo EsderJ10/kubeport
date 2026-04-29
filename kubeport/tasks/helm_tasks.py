@@ -22,20 +22,11 @@ import secrets
 import frappe
 
 from kubeport.utils import helm
-from kubeport.utils.release_health import ResourceHealth
+from kubeport.utils.release_health import ResourceHealth, classify_release_state
 
 _HELM_STATUS_DETAIL_LIMIT = 500
 _DEPLOYABLE_WORKER_STATUS = "In Progress"
 _UNINSTALLING_WORKER_STATUS = "Uninstalling"
-
-# Helm runtime statuses that mean "in-flight, no terminal decision".  We treat
-# these as Failed so the row never sits opaque — operators see exactly what is
-# stuck and can rerun deploy or `helm rollback` manually.
-_HELM_PENDING_STATUSES = frozenset({
-	"pending-install", "pending-upgrade", "pending-rollback",
-	"uninstalling",
-})
-
 
 # ---------------------------------------------------------------------------
 # Repository Tasks
@@ -223,7 +214,7 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 		# clear reason — better than masking them as Deployed.
 		walker_results, walker_error = _safe_walk(release_name)
 
-		doc_status, status_detail = _map_release_status(
+		doc_status, status_detail = classify_release_state(
 			runtime_status=runtime_status,
 			walker_results=walker_results,
 			walker_error=walker_error,
@@ -294,28 +285,14 @@ def uninstall_release(release_name: str, operation_token: str):
 			cluster_name=release["cluster"],
 		)
 
-		if not _release_operation_matches(release_name, operation_token, _UNINSTALLING_WORKER_STATUS):
-			return
-
-		_set_helm_release_fields(release_name, {
-			"status": "Draft",
-			"helm_revision": 0,
-			"helm_status_detail": "",
-		})
-
-		frappe.publish_realtime(
-			"helm_release_status_update",
-			{
-				"release_docname": release_name,
-				"release_name": release["release_name"],
-				"status": "Draft",
-			},
-			doctype="Helm Release",
-			docname=release_name,
-		)
+		_finalize_uninstall_success(release_name, release["release_name"], operation_token)
 
 	except Exception as e:
 		if not _release_operation_matches(release_name, operation_token, _UNINSTALLING_WORKER_STATUS):
+			return
+
+		if _is_release_not_found_error(e):
+			_finalize_uninstall_success(release_name, release["release_name"], operation_token)
 			return
 
 		_set_helm_release_fields(release_name, {
@@ -348,38 +325,6 @@ def _set_helm_release_fields(release_name: str, values: dict[str, object]) -> No
 		frappe.db.set_value("Helm Release", release_name, fieldname, value)
 
 
-def _map_release_status(
-	runtime_status: str,
-	walker_results: list[ResourceHealth] | None,
-	walker_error: str | None = None,
-) -> tuple[str, str]:
-	"""Combine helm runtime status + walker output into (doc_status, detail).
-
-	- ``deployed`` + all workloads ready → ``Deployed``
-	- ``deployed`` + some unready → ``Degraded`` (with first failing line)
-	- ``pending-*`` / ``uninstalling`` → ``Failed`` (stuck-state guidance)
-	- anything else (``failed``, ``superseded``, "") → ``Failed``
-	- walker errored after a successful helm call → ``Degraded`` with the
-	  walker error so the operator knows to investigate cluster access
-	"""
-	from kubeport.utils.release_health import summarize
-
-	if runtime_status in _HELM_PENDING_STATUSES:
-		return "Failed", (
-			f"stuck: helm reports '{runtime_status}'. "
-			"Re-run Install / Upgrade or run `helm rollback` manually to recover."
-		)
-
-	if runtime_status != "deployed":
-		return "Failed", f"Helm reports: {runtime_status or 'unknown'}"
-
-	if walker_error is not None:
-		return "Degraded", f"deployed | readiness probe failed: {walker_error}"
-
-	all_ready, summary = summarize(walker_results or [])
-	return ("Deployed" if all_ready else "Degraded"), summary
-
-
 def _safe_walk(release_name: str) -> tuple[list[ResourceHealth], str | None]:
 	"""Run the readiness walker, swallowing exceptions into a string error.
 
@@ -397,6 +342,37 @@ def _safe_walk(release_name: str) -> tuple[list[ResourceHealth], str | None]:
 			release_name, e,
 		)
 		return [], str(e)
+
+
+def _finalize_uninstall_success(
+	release_docname: str,
+	release_name: str,
+	operation_token: str,
+) -> None:
+	if not _release_operation_matches(release_docname, operation_token, _UNINSTALLING_WORKER_STATUS):
+		return
+
+	_set_helm_release_fields(release_docname, {
+		"status": "Draft",
+		"helm_revision": 0,
+		"helm_status_detail": "",
+	})
+
+	frappe.publish_realtime(
+		"helm_release_status_update",
+		{
+			"release_docname": release_docname,
+			"release_name": release_name,
+			"status": "Draft",
+		},
+		doctype="Helm Release",
+		docname=release_docname,
+	)
+
+
+def _is_release_not_found_error(error: Exception) -> bool:
+	message = str(error).lower()
+	return "release: not found" in message or "release not found" in message
 
 
 def _release_operation_matches(

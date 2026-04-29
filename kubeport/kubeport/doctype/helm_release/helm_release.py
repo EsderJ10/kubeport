@@ -16,12 +16,10 @@ import frappe
 import yaml
 from frappe.model.document import Document
 
-# Statuses that own real cluster resources.  ``on_trash`` refuses these so a
-# direct delete cannot orphan a live release; the operator must uninstall
-# first, which lands the row in ``Draft``.
-_ACTIVE_RELEASE_STATUSES = frozenset({
-	"In Progress", "Deployed", "Degraded", "Uninstalling",
-})
+# ``Draft`` is the only state that is known not to own cluster resources.
+# ``Failed`` releases may still have Helm-owned objects and must go through
+# uninstall before direct row deletion.
+_DELETE_ALLOWED_STATUS = "Draft"
 
 
 class HelmRelease(Document):
@@ -84,7 +82,7 @@ class HelmRelease(Document):
 		nothing tracking it on the control plane side.  Operator must call
 		``uninstall_release`` (lands the row in ``Draft``) before trash.
 		"""
-		if self.status in _ACTIVE_RELEASE_STATUSES:
+		if self.status != _DELETE_ALLOWED_STATUS:
 			frappe.throw(
 				f"Cannot delete '{self.name}' while status is '{self.status}'. "
 				"Uninstall the release first to release its cluster resources, "
@@ -153,7 +151,7 @@ class HelmRelease(Document):
 		)
 
 	@frappe.whitelist()
-	def get_release_health(self) -> list[dict]:
+	def get_release_health(self) -> dict[str, object]:
 		"""Return per-resource readiness for the form drilldown panel.
 
 		Pure observed state — never persisted.  Called from the client form
@@ -162,7 +160,21 @@ class HelmRelease(Document):
 		"""
 		from kubeport.utils.release_health import walk
 
-		return [r.to_dict() for r in walk(self.name)]
+		try:
+			return {
+				"rows": [r.to_dict() for r in walk(self.name)],
+				"error": "",
+			}
+		except Exception as e:
+			frappe.logger("kubeport").warning(
+				"Could not read Helm Release health for '%s': %s",
+				self.name,
+				e,
+			)
+			return {
+				"rows": [],
+				"error": str(e),
+			}
 
 	@frappe.whitelist()
 	def load_defaults(self) -> str:

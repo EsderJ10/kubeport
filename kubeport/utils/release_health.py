@@ -31,6 +31,10 @@ from kubeport.utils import helm
 from kubeport.utils.k8s_client import get_k8s_api_client
 
 _WORKLOAD_KINDS = ("Deployment", "StatefulSet", "DaemonSet", "Pod", "Job")
+_HELM_PENDING_STATUSES = frozenset({
+	"pending-install", "pending-upgrade", "pending-rollback",
+	"uninstalling",
+})
 
 
 @dataclass(frozen=True)
@@ -150,6 +154,62 @@ def summarize(results: list[ResourceHealth]) -> tuple[bool, str]:
 			f"{header}\n- {first_unready.kind}/{first_unready.name}: {first_unready.reason}"
 		)
 	return False, header
+
+
+def classify_release_state(
+	runtime_status: str,
+	walker_results: list[ResourceHealth] | None = None,
+	walker_error: str | None = None,
+) -> tuple[str, str]:
+	"""Map Helm runtime state + workload readiness onto persisted fields.
+
+	Policy:
+	- ``deployed`` + all workloads ready -> ``Deployed``
+	- ``deployed`` + unready workloads or probe error -> ``Degraded``
+	- pending or non-deployed Helm states -> ``Failed``
+	"""
+	if runtime_status in _HELM_PENDING_STATUSES:
+		return "Failed", (
+			f"stuck: helm reports '{runtime_status}'. "
+			"Re-run Install / Upgrade or run `helm rollback` manually to recover."
+		)
+
+	if runtime_status != "deployed":
+		return "Failed", f"Helm reports: {runtime_status or 'unknown'}"
+
+	if walker_error is not None:
+		return "Degraded", f"deployed | readiness probe failed: {walker_error}"
+
+	all_ready, summary = summarize(walker_results or [])
+	return ("Deployed" if all_ready else "Degraded"), summary
+
+
+def classify_release_from_cluster(
+	release_docname: str,
+	runtime_status: str,
+	walk_fn=None,
+) -> tuple[str, str]:
+	"""Classify a release using a live readiness walk.
+
+	Walker failures do not become ``Failed`` because Helm says the release
+	exists and is deployed; they mean readiness could not be proven.
+	"""
+	if runtime_status != "deployed":
+		return classify_release_state(runtime_status=runtime_status)
+
+	if walk_fn is None:
+		walk_fn = walk
+
+	try:
+		return classify_release_state(
+			runtime_status=runtime_status,
+			walker_results=walk_fn(release_docname),
+		)
+	except Exception as e:
+		return classify_release_state(
+			runtime_status=runtime_status,
+			walker_error=str(e),
+		)
 
 
 # ---------------------------------------------------------------------------

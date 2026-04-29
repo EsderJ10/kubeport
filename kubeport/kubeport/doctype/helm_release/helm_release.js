@@ -17,7 +17,6 @@ frappe.ui.form.on('Helm Release', {
             frappe.realtime.on('helm_release_status_update', (data) => {
                 if (data.release_docname === frm.doc.name) {
                     frm.reload_doc();
-                    kubeport_render_release_health(frm);
                 }
             });
         }
@@ -136,18 +135,24 @@ function kubeport_render_release_health(frm) {
 
     $wrapper.html(`<div class="text-muted small">${__('Loading workload readiness…')}</div>`);
 
+    const request_id = (frm.__helm_release_health_request_id || 0) + 1;
+    frm.__helm_release_health_request_id = request_id;
+
     frappe.call({
         doc: frm.doc,
         method: 'get_release_health',
     }).then((r) => {
+        if (request_id !== frm.__helm_release_health_request_id) return;
         if (r && !r.exc) {
-            kubeport_paint_health_rows($wrapper, r.message || []);
+            const payload = r.message || {};
+            kubeport_paint_health_rows($wrapper, payload.rows || [], payload.error || '');
         } else {
             $wrapper.html(
                 `<div class="text-muted small">${__('Could not fetch workload readiness.')}</div>`
             );
         }
     }, () => {
+        if (request_id !== frm.__helm_release_health_request_id) return;
         $wrapper.html(
             `<div class="text-muted small">${__('Could not fetch workload readiness.')}</div>`
         );
@@ -184,10 +189,17 @@ function kubeport_get_health_wrapper(frm) {
     return $panel.find('.kubeport-release-health-body');
 }
 
-function kubeport_paint_health_rows($body, rows) {
+function kubeport_paint_health_rows($body, rows, error) {
+    const error_html = error
+        ? `<div class="text-muted small" style="margin-bottom: 8px;">
+                ${__('Readiness check error:')} ${frappe.utils.escape_html(error)}
+           </div>`
+        : '';
+
     if (!rows.length) {
         $body.html(
-            `<div class="text-muted small">${__('No workload resources found in this release.')}</div>`
+            `${error_html}
+             <div class="text-muted small">${__('No workload resources found in this release.')}</div>`
         );
         return;
     }
@@ -198,7 +210,7 @@ function kubeport_paint_health_rows($body, rows) {
             : '<span style="color: var(--red-500);">●</span>';
         const reason = row.ready
             ? (row.message || __('ready'))
-            : `${row.reason}${row.message ? ' — ' + row.message : ''}`;
+            : `${row.reason}${row.message ? ' - ' + row.message : ''}`;
         return `
             <div style="display: grid;
                         grid-template-columns: 16px 110px 1fr 1.4fr;
@@ -214,7 +226,7 @@ function kubeport_paint_health_rows($body, rows) {
             </div>
         `;
     }).join('');
-    $body.html(lines);
+    $body.html(`${error_html}${lines}`);
 }
 
 // Namespace autocomplete — fetches live namespaces from the selected cluster

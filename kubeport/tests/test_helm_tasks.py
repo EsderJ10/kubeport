@@ -8,13 +8,12 @@ from frappe.tests import UnitTestCase
 
 from kubeport.tasks.helm_tasks import (
 	_group_chart_inventory,
-	_map_release_status,
 	_sync_charts,
 	install_or_upgrade_release,
 	sync_repo_charts,
 	sync_all_repos,
+	uninstall_release,
 )
-from kubeport.utils.release_health import ResourceHealth
 
 
 class UnitTestHelmTasks(UnitTestCase):
@@ -382,6 +381,103 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_set_helm_release_fields.assert_not_called()
 		mock_publish_realtime.assert_not_called()
 
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks.helm.uninstall")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_uninstall_release_treats_helm_not_found_as_success(
+		self,
+		mock_get_value,
+		mock_uninstall,
+		mock_set_helm_release_fields,
+		mock_publish_realtime,
+	):
+		mock_get_value.side_effect = [
+			{"operation_token": "tok-1", "status": "Uninstalling"},
+			{
+				"release_name": "bench-a",
+				"namespace": "tfg",
+				"cluster": "cluster-a",
+			},
+			{"operation_token": "tok-1", "status": "Uninstalling"},
+			{"operation_token": "tok-1", "status": "Uninstalling"},
+		]
+		mock_uninstall.side_effect = RuntimeError("Helm command failed: release: not found")
+
+		uninstall_release("cluster-a/tfg/bench-a", "tok-1")
+
+		mock_set_helm_release_fields.assert_called_once_with("cluster-a/tfg/bench-a", {
+			"status": "Draft",
+			"helm_revision": 0,
+			"helm_status_detail": "",
+		})
+		mock_publish_realtime.assert_called_once_with(
+			"helm_release_status_update",
+			{
+				"release_docname": "cluster-a/tfg/bench-a",
+				"release_name": "bench-a",
+				"status": "Draft",
+			},
+			doctype="Helm Release",
+			docname="cluster-a/tfg/bench-a",
+		)
+
+	@patch("kubeport.tasks.helm_tasks.frappe.logger")
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks.helm.uninstall")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_uninstall_release_skips_stale_worker_execution(
+		self,
+		mock_get_value,
+		mock_uninstall,
+		mock_set_helm_release_fields,
+		mock_publish_realtime,
+		mock_logger,
+	):
+		mock_get_value.return_value = {
+			"operation_token": "tok-2",
+			"status": "Uninstalling",
+		}
+
+		uninstall_release("cluster-a/tfg/bench-a", "tok-1")
+
+		mock_uninstall.assert_not_called()
+		mock_set_helm_release_fields.assert_not_called()
+		mock_publish_realtime.assert_not_called()
+		mock_logger.return_value.info.assert_called_once()
+
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks.helm.uninstall")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_uninstall_release_drops_writeback_when_token_rotates_mid_helm_call(
+		self,
+		mock_get_value,
+		mock_uninstall,
+		mock_set_helm_release_fields,
+		mock_publish_realtime,
+	):
+		mock_get_value.side_effect = [
+			{"operation_token": "tok-1", "status": "Uninstalling"},
+			{
+				"release_name": "bench-a",
+				"namespace": "tfg",
+				"cluster": "cluster-a",
+			},
+			{"operation_token": "tok-2", "status": "Uninstalling"},
+		]
+
+		uninstall_release("cluster-a/tfg/bench-a", "tok-1")
+
+		mock_uninstall.assert_called_once_with(
+			release_name="bench-a",
+			namespace="tfg",
+			cluster_name="cluster-a",
+		)
+		mock_set_helm_release_fields.assert_not_called()
+		mock_publish_realtime.assert_not_called()
+
 	@patch("kubeport.tasks.helm_tasks.frappe.enqueue")
 	@patch("kubeport.tasks.helm_tasks.frappe.db.set_value")
 	@patch("kubeport.tasks.helm_tasks.frappe.get_all")
@@ -509,45 +605,3 @@ class UnitTestHelmTasks(UnitTestCase):
 			"bitnami/redis",
 			ignore_permissions=True,
 		)
-
-	def test_map_release_status_marks_deployed_when_helm_and_walker_agree(self):
-		results = [
-			ResourceHealth("Deployment", "frappe-prod", "tfg", True, "", "1/1 available"),
-			ResourceHealth("StatefulSet", "frappe-prod-mariadb", "tfg", True, "", "1/1 ready"),
-		]
-		status, detail = _map_release_status("deployed", results)
-		self.assertEqual(status, "Deployed")
-		self.assertEqual(detail, "deployed | 2/2 ready")
-
-	def test_map_release_status_marks_degraded_when_walker_finds_unready_resource(self):
-		results = [
-			ResourceHealth("Deployment", "frappe-prod", "tfg", False, "ImagePullBackOff", ""),
-			ResourceHealth("StatefulSet", "frappe-prod-mariadb", "tfg", True, "", "1/1 ready"),
-		]
-		status, detail = _map_release_status("deployed", results)
-		self.assertEqual(status, "Degraded")
-		self.assertIn("1/2 ready", detail)
-		self.assertIn("ImagePullBackOff", detail)
-
-	def test_map_release_status_keeps_degraded_when_walker_errored(self):
-		status, detail = _map_release_status(
-			"deployed",
-			walker_results=None,
-			walker_error="kubernetes API timeout",
-		)
-		self.assertEqual(status, "Degraded")
-		self.assertIn("readiness probe failed", detail)
-		self.assertIn("kubernetes API timeout", detail)
-
-	def test_map_release_status_marks_pending_helm_states_as_failed(self):
-		for runtime in ("pending-install", "pending-upgrade", "pending-rollback"):
-			with self.subTest(runtime=runtime):
-				status, detail = _map_release_status(runtime, walker_results=[])
-				self.assertEqual(status, "Failed")
-				self.assertIn("stuck", detail)
-				self.assertIn(runtime, detail)
-
-	def test_map_release_status_marks_unknown_helm_state_as_failed(self):
-		status, detail = _map_release_status("failed", walker_results=[])
-		self.assertEqual(status, "Failed")
-		self.assertIn("failed", detail)

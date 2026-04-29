@@ -2,17 +2,21 @@
 # See license.txt
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from frappe.tests import UnitTestCase
+from kubernetes.client.rest import ApiException
 
 from kubeport.utils.release_health import (
 	ResourceHealth,
+	classify_release_state,
 	_check_daemon_set,
 	_check_deployment,
 	_check_job,
 	_check_pod,
 	_check_stateful_set,
 	summarize,
+	walk,
 )
 
 
@@ -265,3 +269,130 @@ class UnitTestReleaseHealth(UnitTestCase):
 		self.assertIn("1/3 ready", summary)
 		self.assertIn("Pod/redis-0", summary)
 		self.assertIn("ImagePullBackOff", summary)
+
+	# -----------------------------------------------------------------------
+	# classify_release_state
+	# -----------------------------------------------------------------------
+
+	def test_classify_release_state_marks_deployed_when_helm_and_walker_agree(self):
+		results = [
+			ResourceHealth("Deployment", "frappe-prod", "tfg", True, "", "1/1 available"),
+			ResourceHealth("StatefulSet", "frappe-prod-mariadb", "tfg", True, "", "1/1 ready"),
+		]
+		status, detail = classify_release_state("deployed", results)
+		self.assertEqual(status, "Deployed")
+		self.assertEqual(detail, "deployed | 2/2 ready")
+
+	def test_classify_release_state_marks_degraded_when_workload_is_unready(self):
+		results = [
+			ResourceHealth("Deployment", "frappe-prod", "tfg", False, "ImagePullBackOff", ""),
+			ResourceHealth("StatefulSet", "frappe-prod-mariadb", "tfg", True, "", "1/1 ready"),
+		]
+		status, detail = classify_release_state("deployed", results)
+		self.assertEqual(status, "Degraded")
+		self.assertIn("1/2 ready", detail)
+		self.assertIn("ImagePullBackOff", detail)
+
+	def test_classify_release_state_keeps_degraded_when_walker_errored(self):
+		status, detail = classify_release_state(
+			"deployed",
+			walker_results=None,
+			walker_error="kubernetes API timeout",
+		)
+		self.assertEqual(status, "Degraded")
+		self.assertIn("readiness probe failed", detail)
+		self.assertIn("kubernetes API timeout", detail)
+
+	def test_classify_release_state_marks_pending_helm_states_as_failed(self):
+		for runtime in ("pending-install", "pending-upgrade", "pending-rollback", "uninstalling"):
+			with self.subTest(runtime=runtime):
+				status, detail = classify_release_state(runtime, walker_results=[])
+				self.assertEqual(status, "Failed")
+				self.assertIn("stuck", detail)
+				self.assertIn(runtime, detail)
+
+	def test_classify_release_state_marks_unknown_helm_state_as_failed(self):
+		status, detail = classify_release_state("failed", walker_results=[])
+		self.assertEqual(status, "Failed")
+		self.assertIn("failed", detail)
+
+	# -----------------------------------------------------------------------
+	# walk
+	# -----------------------------------------------------------------------
+
+	@patch("kubeport.utils.release_health.client.BatchV1Api")
+	@patch("kubeport.utils.release_health.client.CoreV1Api")
+	@patch("kubeport.utils.release_health.client.AppsV1Api")
+	@patch("kubeport.utils.release_health.get_k8s_api_client")
+	@patch("kubeport.utils.release_health.helm.get_manifest")
+	@patch("kubeport.utils.release_health.frappe.db.get_value")
+	def test_walk_reports_ready_unready_and_missing_resources(
+		self,
+		mock_get_value,
+		mock_get_manifest,
+		_mock_get_api_client,
+		mock_apps_api,
+		mock_core_api,
+		_mock_batch_api,
+	):
+		mock_get_value.return_value = {
+			"release_name": "bench-a",
+			"namespace": "tfg",
+			"cluster": "cluster-a",
+		}
+		mock_get_manifest.return_value = [
+			{"kind": "Deployment", "metadata": {"name": "bench-a-web"}},
+			{"kind": "Pod", "metadata": {"name": "bench-a-worker"}},
+			{"kind": "Service", "metadata": {"name": "bench-a"}},
+		]
+		mock_apps_api.return_value.read_namespaced_deployment.return_value = SimpleNamespace(
+			metadata=SimpleNamespace(name="bench-a-web"),
+			spec=SimpleNamespace(replicas=1),
+			status=SimpleNamespace(
+				available_replicas=1,
+				updated_replicas=1,
+				conditions=[],
+			),
+		)
+		mock_core_api.return_value.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+
+		results = walk("cluster-a/tfg/bench-a")
+
+		self.assertEqual(len(results), 2)
+		self.assertTrue(results[0].ready)
+		self.assertFalse(results[1].ready)
+		self.assertEqual(results[1].reason, "missing")
+
+	@patch("kubeport.utils.release_health.client.BatchV1Api")
+	@patch("kubeport.utils.release_health.client.CoreV1Api")
+	@patch("kubeport.utils.release_health.client.AppsV1Api")
+	@patch("kubeport.utils.release_health.get_k8s_api_client")
+	@patch("kubeport.utils.release_health.helm.get_manifest")
+	@patch("kubeport.utils.release_health.frappe.db.get_value")
+	def test_walk_turns_resource_api_errors_into_unready_rows(
+		self,
+		mock_get_value,
+		mock_get_manifest,
+		_mock_get_api_client,
+		_mock_apps_api,
+		mock_core_api,
+		_mock_batch_api,
+	):
+		mock_get_value.return_value = {
+			"release_name": "bench-a",
+			"namespace": "tfg",
+			"cluster": "cluster-a",
+		}
+		mock_get_manifest.return_value = [
+			{"kind": "Pod", "metadata": {"name": "bench-a-worker"}},
+		]
+		mock_core_api.return_value.read_namespaced_pod.side_effect = ApiException(
+			status=500,
+			reason="Internal Server Error",
+		)
+
+		results = walk("cluster-a/tfg/bench-a")
+
+		self.assertEqual(len(results), 1)
+		self.assertFalse(results[0].ready)
+		self.assertEqual(results[0].reason, "api-error-500")
