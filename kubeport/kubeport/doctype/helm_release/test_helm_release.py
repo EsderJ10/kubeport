@@ -96,6 +96,87 @@ class UnitTestHelmRelease(UnitTestCase):
 		with self.assertRaisesRegex(RuntimeError, "immutable after creation"):
 			doc.validate()
 
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	def test_on_trash_refuses_active_statuses(self, mock_throw):
+		mock_throw.side_effect = RuntimeError("Uninstall the release first")
+
+		for active_status in ("In Progress", "Deployed", "Degraded", "Uninstalling"):
+			with self.subTest(status=active_status):
+				doc = object.__new__(HelmRelease)
+				doc.name = "cluster-a/default/bench-a"
+				doc.status = active_status
+
+				with self.assertRaisesRegex(RuntimeError, "Uninstall the release first"):
+					doc.on_trash()
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	def test_on_trash_allows_draft_and_failed(self, mock_throw):
+		for inactive_status in ("Draft", "Failed"):
+			with self.subTest(status=inactive_status):
+				doc = object.__new__(HelmRelease)
+				doc.name = "cluster-a/default/bench-a"
+				doc.status = inactive_status
+
+				doc.on_trash()
+
+		mock_throw.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex", return_value="tok-1")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.enqueue")
+	def test_deploy_release_rotates_operation_token_and_enqueues_with_it(
+		self,
+		mock_enqueue,
+		_mock_msgprint,
+		_mock_token_hex,
+	):
+		doc = object.__new__(HelmRelease)
+		doc.chart = "ERPNext"
+		doc.cluster = "cluster-a"
+		doc.status = "Draft"
+		doc.name = "cluster-a/default/bench-a"
+		doc.release_name = "bench-a"
+		doc.db_set = MagicMock()
+
+		doc.deploy_release()
+
+		doc.db_set.assert_any_call("operation_token", "tok-1")
+		doc.db_set.assert_any_call("status", "In Progress")
+		mock_enqueue.assert_called_once_with(
+			"kubeport.tasks.helm_tasks.install_or_upgrade_release",
+			release_name="cluster-a/default/bench-a",
+			operation_token="tok-1",
+			queue="long",
+			enqueue_after_commit=True,
+		)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex", return_value="tok-2")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.enqueue")
+	def test_uninstall_release_rotates_operation_token_and_enqueues_with_it(
+		self,
+		mock_enqueue,
+		_mock_msgprint,
+		_mock_token_hex,
+	):
+		doc = object.__new__(HelmRelease)
+		doc.status = "Deployed"
+		doc.name = "cluster-a/default/bench-a"
+		doc.release_name = "bench-a"
+		doc.db_set = MagicMock()
+
+		doc.uninstall_release()
+
+		doc.db_set.assert_any_call("operation_token", "tok-2")
+		doc.db_set.assert_any_call("status", "Uninstalling")
+		mock_enqueue.assert_called_once_with(
+			"kubeport.tasks.helm_tasks.uninstall_release",
+			release_name="cluster-a/default/bench-a",
+			operation_token="tok-2",
+			queue="long",
+			enqueue_after_commit=True,
+		)
+
 
 # On IntegrationTestCase, the doctype test records and all
 # link-field test record dependencies are recursively loaded

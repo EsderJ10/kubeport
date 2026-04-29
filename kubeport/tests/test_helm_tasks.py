@@ -8,11 +8,13 @@ from frappe.tests import UnitTestCase
 
 from kubeport.tasks.helm_tasks import (
 	_group_chart_inventory,
+	_map_release_status,
 	_sync_charts,
 	install_or_upgrade_release,
 	sync_repo_charts,
 	sync_all_repos,
 )
+from kubeport.utils.release_health import ResourceHealth
 
 
 class UnitTestHelmTasks(UnitTestCase):
@@ -157,6 +159,7 @@ class UnitTestHelmTasks(UnitTestCase):
 
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
 	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks._safe_walk", return_value=([], None))
 	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
 	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
 	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
@@ -165,18 +168,25 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_get_value,
 		mock_get_doc,
 		mock_install_or_upgrade,
+		_mock_safe_walk,
 		mock_set_helm_release_fields,
 		mock_publish_realtime,
 	):
-		mock_get_value.return_value = {
-			"status": "In Progress",
-			"release_name": "bench-a",
-			"chart": "ERPNext",
-			"chart_version": "8.0.41",
-			"namespace": "tfg",
-			"cluster": "cluster-a",
-			"values": "jobs:\n  createSite:\n    enabled: true\n",
-		}
+		mock_get_value.side_effect = [
+			# First call: token + status guard.
+			{"operation_token": "tok-1", "status": "In Progress"},
+			# Second call: release fields.
+			{
+				"release_name": "bench-a",
+				"chart": "ERPNext",
+				"chart_version": "8.0.41",
+				"namespace": "tfg",
+				"cluster": "cluster-a",
+				"values": "jobs:\n  createSite:\n    enabled: true\n",
+			},
+			# Third call: token re-check before writeback.
+			{"operation_token": "tok-1", "status": "In Progress"},
+		]
 		mock_get_doc.return_value = SimpleNamespace(
 			latest_version="8.0.41",
 			get_chart_reference=lambda: "repo/erpnext",
@@ -186,14 +196,8 @@ class UnitTestHelmTasks(UnitTestCase):
 			"info": {"status": "deployed"},
 		}
 
-		install_or_upgrade_release("bench-a")
+		install_or_upgrade_release("bench-a", "tok-1")
 
-		mock_get_value.assert_called_once_with(
-			"Helm Release",
-			"bench-a",
-			["status", "release_name", "chart", "chart_version", "namespace", "cluster", "values"],
-			as_dict=True,
-		)
 		mock_get_doc.assert_called_once_with("Helm Chart", "ERPNext")
 		mock_install_or_upgrade.assert_called_once_with(
 			release_name="bench-a",
@@ -206,32 +210,37 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_set_helm_release_fields.assert_called_once_with("bench-a", {
 			"status": "Deployed",
 			"helm_revision": 3,
-			"helm_status_detail": "deployed",
+			"helm_status_detail": "deployed (no workload resources)",
 		})
 		mock_publish_realtime.assert_called_once()
 
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
 	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks._safe_walk", return_value=([], None))
 	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
 	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
 	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
-	def test_install_or_upgrade_release_marks_non_deployed_runtime_state_as_degraded(
+	def test_install_or_upgrade_release_marks_non_deployed_runtime_state_as_failed(
 		self,
 		mock_get_value,
 		mock_get_doc,
 		mock_install_or_upgrade,
+		_mock_safe_walk,
 		mock_set_helm_release_fields,
 		mock_publish_realtime,
 	):
-		mock_get_value.return_value = {
-			"status": "In Progress",
-			"release_name": "bench-a",
-			"chart": "ERPNext",
-			"chart_version": "8.0.41",
-			"namespace": "tfg",
-			"cluster": "cluster-a",
-			"values": "",
-		}
+		mock_get_value.side_effect = [
+			{"operation_token": "tok-1", "status": "In Progress"},
+			{
+				"release_name": "bench-a",
+				"chart": "ERPNext",
+				"chart_version": "8.0.41",
+				"namespace": "tfg",
+				"cluster": "cluster-a",
+				"values": "",
+			},
+			{"operation_token": "tok-1", "status": "In Progress"},
+		]
 		mock_get_doc.return_value = SimpleNamespace(
 			latest_version="8.0.41",
 			get_chart_reference=lambda: "repo/erpnext",
@@ -241,23 +250,67 @@ class UnitTestHelmTasks(UnitTestCase):
 			"info": {"status": "failed"},
 		}
 
-		install_or_upgrade_release("bench-a")
+		install_or_upgrade_release("bench-a", "tok-1")
 
 		mock_set_helm_release_fields.assert_called_once_with("bench-a", {
-			"status": "Degraded",
+			"status": "Failed",
 			"helm_revision": 3,
-			"helm_status_detail": "failed",
+			"helm_status_detail": "Helm reports: failed",
 		})
 		mock_publish_realtime.assert_called_once_with(
 			"helm_release_status_update",
 			{
 				"release_docname": "bench-a",
 				"release_name": "bench-a",
-				"status": "Degraded",
+				"status": "Failed",
 			},
 			doctype="Helm Release",
 			docname="bench-a",
 		)
+
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks._safe_walk", return_value=([], None))
+	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_install_or_upgrade_release_marks_pending_helm_state_as_failed_with_recovery_hint(
+		self,
+		mock_get_value,
+		mock_get_doc,
+		mock_install_or_upgrade,
+		_mock_safe_walk,
+		mock_set_helm_release_fields,
+		_mock_publish_realtime,
+	):
+		mock_get_value.side_effect = [
+			{"operation_token": "tok-1", "status": "In Progress"},
+			{
+				"release_name": "bench-a",
+				"chart": "ERPNext",
+				"chart_version": "8.0.41",
+				"namespace": "tfg",
+				"cluster": "cluster-a",
+				"values": "",
+			},
+			{"operation_token": "tok-1", "status": "In Progress"},
+		]
+		mock_get_doc.return_value = SimpleNamespace(
+			latest_version="8.0.41",
+			get_chart_reference=lambda: "repo/erpnext",
+		)
+		mock_install_or_upgrade.return_value = {
+			"version": 3,
+			"info": {"status": "pending-upgrade"},
+		}
+
+		install_or_upgrade_release("bench-a", "tok-1")
+
+		mock_set_helm_release_fields.assert_called_once()
+		_, fields = mock_set_helm_release_fields.call_args.args
+		self.assertEqual(fields["status"], "Failed")
+		self.assertIn("stuck", fields["helm_status_detail"])
+		self.assertIn("pending-upgrade", fields["helm_status_detail"])
 
 	@patch("kubeport.tasks.helm_tasks.frappe.logger")
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
@@ -274,23 +327,60 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_publish_realtime,
 		mock_logger,
 	):
+		# Token mismatch: row was rotated by a newer operation before this
+		# worker began executing.
 		mock_get_value.return_value = {
-			"status": "Draft",
-			"release_name": "bench-a",
-			"chart": "ERPNext",
-			"chart_version": "8.0.41",
-			"namespace": "tfg",
-			"cluster": "cluster-a",
-			"values": "",
+			"operation_token": "tok-2",
+			"status": "In Progress",
 		}
 
-		install_or_upgrade_release("bench-a")
+		install_or_upgrade_release("bench-a", "tok-1")
 
 		mock_get_doc.assert_not_called()
 		mock_install_or_upgrade.assert_not_called()
 		mock_set_helm_release_fields.assert_not_called()
 		mock_publish_realtime.assert_not_called()
 		mock_logger.return_value.info.assert_called_once()
+
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks._safe_walk", return_value=([], None))
+	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_install_or_upgrade_release_drops_writeback_when_token_rotates_mid_helm_call(
+		self,
+		mock_get_value,
+		mock_get_doc,
+		_mock_install_or_upgrade,
+		_mock_safe_walk,
+		mock_set_helm_release_fields,
+		mock_publish_realtime,
+	):
+		mock_get_value.side_effect = [
+			# Initial guard passes.
+			{"operation_token": "tok-1", "status": "In Progress"},
+			# Release fields read.
+			{
+				"release_name": "bench-a",
+				"chart": "ERPNext",
+				"chart_version": "8.0.41",
+				"namespace": "tfg",
+				"cluster": "cluster-a",
+				"values": "",
+			},
+			# Re-check after helm returns: a newer operation has taken over.
+			{"operation_token": "tok-2", "status": "In Progress"},
+		]
+		mock_get_doc.return_value = SimpleNamespace(
+			latest_version="8.0.41",
+			get_chart_reference=lambda: "repo/erpnext",
+		)
+
+		install_or_upgrade_release("bench-a", "tok-1")
+
+		mock_set_helm_release_fields.assert_not_called()
+		mock_publish_realtime.assert_not_called()
 
 	@patch("kubeport.tasks.helm_tasks.frappe.enqueue")
 	@patch("kubeport.tasks.helm_tasks.frappe.db.set_value")
@@ -419,3 +509,45 @@ class UnitTestHelmTasks(UnitTestCase):
 			"bitnami/redis",
 			ignore_permissions=True,
 		)
+
+	def test_map_release_status_marks_deployed_when_helm_and_walker_agree(self):
+		results = [
+			ResourceHealth("Deployment", "frappe-prod", "tfg", True, "", "1/1 available"),
+			ResourceHealth("StatefulSet", "frappe-prod-mariadb", "tfg", True, "", "1/1 ready"),
+		]
+		status, detail = _map_release_status("deployed", results)
+		self.assertEqual(status, "Deployed")
+		self.assertEqual(detail, "deployed | 2/2 ready")
+
+	def test_map_release_status_marks_degraded_when_walker_finds_unready_resource(self):
+		results = [
+			ResourceHealth("Deployment", "frappe-prod", "tfg", False, "ImagePullBackOff", ""),
+			ResourceHealth("StatefulSet", "frappe-prod-mariadb", "tfg", True, "", "1/1 ready"),
+		]
+		status, detail = _map_release_status("deployed", results)
+		self.assertEqual(status, "Degraded")
+		self.assertIn("1/2 ready", detail)
+		self.assertIn("ImagePullBackOff", detail)
+
+	def test_map_release_status_keeps_degraded_when_walker_errored(self):
+		status, detail = _map_release_status(
+			"deployed",
+			walker_results=None,
+			walker_error="kubernetes API timeout",
+		)
+		self.assertEqual(status, "Degraded")
+		self.assertIn("readiness probe failed", detail)
+		self.assertIn("kubernetes API timeout", detail)
+
+	def test_map_release_status_marks_pending_helm_states_as_failed(self):
+		for runtime in ("pending-install", "pending-upgrade", "pending-rollback"):
+			with self.subTest(runtime=runtime):
+				status, detail = _map_release_status(runtime, walker_results=[])
+				self.assertEqual(status, "Failed")
+				self.assertIn("stuck", detail)
+				self.assertIn(runtime, detail)
+
+	def test_map_release_status_marks_unknown_helm_state_as_failed(self):
+		status, detail = _map_release_status("failed", walker_results=[])
+		self.assertEqual(status, "Failed")
+		self.assertIn("failed", detail)

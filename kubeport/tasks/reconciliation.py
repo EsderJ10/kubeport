@@ -20,6 +20,13 @@ from kubeport.utils.k8s_resources import check_resources_exist
 
 _HEALTHY_RELEASE_STATUSES = ["Deployed", "Degraded"]
 _HELM_STATUS_DETAIL_LIMIT = 500
+# Helm runtime statuses that mean "in-flight, no terminal decision" (mirror
+# of ``_HELM_PENDING_STATUSES`` in ``helm_tasks.py``).  Reconciliation pulls
+# the row out of healthy state so operators see exactly what is stuck.
+_HELM_PENDING_STATUSES = frozenset({
+	"pending-install", "pending-upgrade", "pending-rollback",
+	"uninstalling",
+})
 
 # Three-state result from the bench ground-truth probe.  "unknown" means the
 # probe could not reach the bench pod or exec failed transiently — the caller
@@ -45,59 +52,108 @@ def reconcile_all_releases():
 
 
 def _reconcile_helm_releases():
-	"""Check all Deployed Helm Releases via ``helm status``.
+	"""Check all Deployed/Degraded Helm Releases.
 
-	Uses the Helm CLI to query the real Helm release state, rather than
-	checking individual K8s resources.  This is more accurate because Helm
-	tracks release state in its own metadata (secrets in the release namespace).
+	Combines ``helm status`` (release-level state) with the workload-readiness
+	walker (per-resource Ready signals) to decide between ``Deployed``,
+	``Degraded``, and ``Failed``.  ``pending-*`` helm states are treated as
+	``Failed`` so a release stuck mid-upgrade no longer hides as "Degraded"
+	indefinitely.
+
+	Worker-owned states (``In Progress``, ``Uninstalling``) are deliberately
+	skipped — those rows are owned by their workers and a reconciliation
+	write would race the worker's terminal write.
 	"""
 	from kubeport.utils import helm
+	from kubeport.utils.release_health import walk
 
-	deployed_releases = frappe.get_all(
+	releases = frappe.get_all(
 		"Helm Release",
 		filters={"status": ["in", _HEALTHY_RELEASE_STATUSES]},
-		fields=["name", "cluster", "namespace", "release_name", "status"],
+		fields=["name", "cluster", "namespace", "release_name", "status", "operation_token"],
 	)
 
-	for release in deployed_releases:
+	for release in releases:
 		try:
-			result = helm.status(
+			helm_result = helm.status(
 				release_name=release.release_name,
 				namespace=release.namespace or "default",
 				cluster_name=release.cluster,
 			)
 
-			# helm status JSON has info.status = "deployed" | "failed" | "pending-*" | etc.
-			actual_status = ""
-			if isinstance(result, dict):
-				info = result.get("info", {})
+			runtime_status = ""
+			if isinstance(helm_result, dict):
+				info = helm_result.get("info", {})
 				if isinstance(info, dict):
-					actual_status = info.get("status", "")
+					runtime_status = info.get("status", "")
 
-			if actual_status == "deployed":
-				_set_helm_reconciliation_state(release.name, "Deployed", actual_status)
-			else:
-				_set_helm_reconciliation_state(
-					release.name,
-					"Degraded",
-					f"Helm reports: {actual_status or 'unknown'}",
-				)
+			next_status, detail = _classify_release_state(
+				release_name=release.name,
+				runtime_status=runtime_status,
+				walk_fn=walk,
+			)
+
+			updated = _set_helm_reconciliation_state(
+				release_docname=release.name,
+				expected_token=release.operation_token,
+				next_status=next_status,
+				detail=detail,
+			)
+
+			if updated and next_status != "Deployed":
 				frappe.log_error(
 					title=f"Helm Drift Detected: {release.name}",
-					message=f"Expected 'deployed', got '{actual_status or 'unknown'}'.",
+					message=f"Status: {next_status}. Detail: {detail}",
 				)
 
 		except Exception as e:
-			# If helm status fails entirely, mark as degraded
+			# If helm status fails entirely, mark as degraded with the error
+			# (or skip if a concurrent operation has rotated the token).
 			_set_helm_reconciliation_state(
-				release.name,
-				"Degraded",
-				f"Reconciliation error: {_truncate_status_detail(str(e))}",
+				release_docname=release.name,
+				expected_token=release.operation_token,
+				next_status="Degraded",
+				detail=f"Reconciliation error: {_truncate_status_detail(str(e))}",
 			)
 			frappe.log_error(
 				title=f"Helm Reconciliation Error: {release.name}",
 				message=str(e),
 			)
+
+
+def _classify_release_state(
+	release_name: str,
+	runtime_status: str,
+	walk_fn,
+) -> tuple[str, str]:
+	"""Combine helm runtime status + walker readiness into (status, detail).
+
+	Mirrors ``helm_tasks._map_release_status`` but kept here so the
+	reconciliation module has a single import-time path through
+	``release_health.walk`` and can mock it in tests without reaching across
+	module boundaries.
+	"""
+	from kubeport.utils.release_health import summarize
+
+	if runtime_status in _HELM_PENDING_STATUSES:
+		return "Failed", (
+			f"stuck: helm reports '{runtime_status}'. "
+			"Re-run Install / Upgrade or run `helm rollback` manually to recover."
+		)
+
+	if runtime_status != "deployed":
+		return "Failed", f"Helm reports: {runtime_status or 'unknown'}"
+
+	try:
+		walker_results = walk_fn(release_name)
+	except Exception as e:
+		# helm side is fine; only the readiness probe failed.  Stay Degraded
+		# with the walker error so the operator can fix cluster access without
+		# misreading the row as Failed.
+		return "Degraded", f"deployed | readiness probe failed: {e}"
+
+	all_ready, summary = summarize(walker_results)
+	return ("Deployed" if all_ready else "Degraded"), summary
 
 
 def _reconcile_service_bundles():
@@ -881,14 +937,67 @@ def _extract_job_failure_detail(
 	return f"Job '{job_name}' reported failure (could not retrieve pod logs)."
 
 
-def _set_helm_reconciliation_state(release_name: str, status: str, detail: str) -> None:
-	frappe.db.set_value("Helm Release", release_name, "status", status)
-	frappe.db.set_value(
+def _set_helm_reconciliation_state(
+	release_docname: str,
+	expected_token: str | None,
+	next_status: str,
+	detail: str,
+) -> bool:
+	"""Apply a reconciliation-driven status update under the operation-token guard.
+
+	The token guard is what stops a slow ``helm status`` call from clobbering
+	a fresh deploy that started after the reconciliation tick read the row.
+	If a worker has rotated the token, the row is owned by that operation
+	and reconciliation must drop its writes.  Returns True if the write was
+	applied, False if it was skipped or no-op.
+	"""
+	current = frappe.db.get_value(
 		"Helm Release",
-		release_name,
-		"helm_status_detail",
-		_truncate_status_detail(detail),
+		release_docname,
+		["operation_token", "status"],
+		as_dict=True,
 	)
+	if not current:
+		return False
+
+	# Skip rows whose status moved into worker-owned territory between the
+	# reconciliation read and now (rapid Deploy click during reconciliation).
+	if current.get("status") not in _HEALTHY_RELEASE_STATUSES:
+		return False
+
+	# Tolerate ``None == ""`` since rows that have never had a deploy will
+	# have a NULL operation_token; matching ``None`` to ``None`` is the right
+	# behavior for the first reconciliation pass.
+	if (current.get("operation_token") or None) != (expected_token or None):
+		frappe.logger("kubeport").info(
+			"Skipping stale reconciliation for Helm Release '%s' — operation_token rotated.",
+			release_docname,
+		)
+		return False
+
+	truncated_detail = _truncate_status_detail(detail)
+	if current.get("status") == next_status:
+		# Status unchanged: still refresh detail so the panel sees current
+		# readiness, but skip the realtime event to avoid notification spam.
+		frappe.db.set_value(
+			"Helm Release",
+			release_docname,
+			"helm_status_detail",
+			truncated_detail,
+		)
+		return False
+
+	frappe.db.set_value("Helm Release", release_docname, {
+		"status": next_status,
+		"helm_status_detail": truncated_detail,
+	})
+	frappe.publish_realtime(
+		"helm_release_status_update",
+		{"release_docname": release_docname, "status": next_status},
+		doctype="Helm Release",
+		docname=release_docname,
+	)
+	return True
 
 
 def _truncate_status_detail(detail: str) -> str:

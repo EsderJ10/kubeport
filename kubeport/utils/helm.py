@@ -225,6 +225,48 @@ def status(
 	return _parse_json_or_empty(output)
 
 
+def get_manifest(
+	release_name: str,
+	namespace: str,
+	cluster_name: str,
+) -> list[dict]:
+	"""Return the rendered multi-document manifest for a release.
+
+	Equivalent to ``helm get manifest <release> -n <ns>``.  The output is a
+	multi-document YAML stream of every resource the release owns; we parse it
+	into a list of resource dicts so callers can fan out to live readiness
+	queries without having to re-parse it themselves.
+
+	The rendered manifest is the only authoritative inventory of a release's
+	resources — chart authors are not required to apply
+	``app.kubernetes.io/instance=<release>`` labels, so a label-selector
+	approach would miss resources from charts that omit the convention.
+
+	Returns an empty list when the release exists but has no resources (e.g.
+	values disabled every workload).  Raises through ``frappe.throw`` if the
+	release does not exist or helm fails.
+	"""
+	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
+		cmd = [
+			"helm", "get", "manifest", release_name,
+			"--namespace", namespace,
+		]
+		if kubeconfig_path:
+			cmd.extend(["--kubeconfig", kubeconfig_path])
+
+		output = _run_helm(cmd, timeout=_HELM_READ_TIMEOUT_SECONDS)
+
+	if not output or not output.strip():
+		return []
+
+	try:
+		documents = list(yaml.safe_load_all(output))
+	except yaml.YAMLError as e:
+		frappe.throw(f"Helm returned a manifest that could not be parsed: {e}")
+
+	return [doc for doc in documents if isinstance(doc, dict) and doc.get("kind")]
+
+
 def list_releases(
 	namespace: str | None = None,
 	cluster_name: str | None = None,

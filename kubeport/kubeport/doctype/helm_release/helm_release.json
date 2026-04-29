@@ -23,7 +23,8 @@
   "status",
   "column_break_status",
   "helm_revision",
-  "helm_status_detail"
+  "helm_status_detail",
+  "operation_token"
  ],
  "fields": [
   {
@@ -143,6 +144,15 @@
    "label": "Status Detail",
    "read_only": 1,
    "description": "Detailed status information from the Helm CLI."
+  },
+  {
+   "fieldname": "operation_token",
+   "fieldtype": "Data",
+   "label": "Operation Token",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Per-operation token used by background workers and reconciliation to detect supersession; rotated on every deploy / uninstall."
   }
  ],
  "grid_page_length": 50,

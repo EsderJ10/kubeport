@@ -10,9 +10,18 @@ represents a single Helm release on a target cluster, backed by
 in background tasks.
 """
 
+import secrets
+
 import frappe
 import yaml
 from frappe.model.document import Document
+
+# Statuses that own real cluster resources.  ``on_trash`` refuses these so a
+# direct delete cannot orphan a live release; the operator must uninstall
+# first, which lands the row in ``Draft``.
+_ACTIVE_RELEASE_STATUSES = frozenset({
+	"In Progress", "Deployed", "Degraded", "Uninstalling",
+})
 
 
 class HelmRelease(Document):
@@ -30,6 +39,7 @@ class HelmRelease(Document):
 		helm_revision: DF.Int
 		helm_status_detail: DF.SmallText | None
 		namespace: DF.Data
+		operation_token: DF.Data | None
 		release_name: DF.Data
 		status: DF.Literal["Draft", "In Progress", "Deployed", "Degraded", "Uninstalling", "Failed"]
 		values: DF.Code | None
@@ -65,6 +75,22 @@ class HelmRelease(Document):
 			self.release_name,
 		)
 
+	def on_trash(self):
+		"""Refuse to delete a row that still owns cluster resources.
+
+		The desired-vs-observed split means the row IS the only authority that
+		knows a release was created by Kubeport.  Deleting it without first
+		uninstalling would leave the helm release running indefinitely with
+		nothing tracking it on the control plane side.  Operator must call
+		``uninstall_release`` (lands the row in ``Draft``) before trash.
+		"""
+		if self.status in _ACTIVE_RELEASE_STATUSES:
+			frappe.throw(
+				f"Cannot delete '{self.name}' while status is '{self.status}'. "
+				"Uninstall the release first to release its cluster resources, "
+				"then delete the row."
+			)
+
 	@frappe.whitelist()
 	def deploy_release(self):
 		"""Install or upgrade the Helm release via background task.
@@ -81,11 +107,14 @@ class HelmRelease(Document):
 		if self.status == "Uninstalling":
 			frappe.throw("Cannot deploy a release while uninstall is in progress.")
 
+		operation_token = secrets.token_hex(16)
+		self.db_set("operation_token", operation_token)
 		self.db_set("status", "In Progress")
 
 		frappe.enqueue(
 			"kubeport.tasks.helm_tasks.install_or_upgrade_release",
 			release_name=self.name,
+			operation_token=operation_token,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -105,11 +134,14 @@ class HelmRelease(Document):
 				"Only deployed, degraded, or failed releases can be uninstalled."
 			)
 
+		operation_token = secrets.token_hex(16)
+		self.db_set("operation_token", operation_token)
 		self.db_set("status", "Uninstalling")
 
 		frappe.enqueue(
 			"kubeport.tasks.helm_tasks.uninstall_release",
 			release_name=self.name,
+			operation_token=operation_token,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -119,6 +151,18 @@ class HelmRelease(Document):
 			alert=True,
 			indicator="blue",
 		)
+
+	@frappe.whitelist()
+	def get_release_health(self) -> list[dict]:
+		"""Return per-resource readiness for the form drilldown panel.
+
+		Pure observed state — never persisted.  Called from the client form
+		via ``frappe.xcall`` (per the AGENTS.md form-rendering rule), not
+		``onload``, so a slow cluster cannot block document load.
+		"""
+		from kubeport.utils.release_health import walk
+
+		return [r.to_dict() for r in walk(self.name)]
 
 	@frappe.whitelist()
 	def load_defaults(self) -> str:

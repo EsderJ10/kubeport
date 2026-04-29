@@ -1,0 +1,267 @@
+# Copyright (c) 2026, Los Favs and Contributors
+# See license.txt
+
+from types import SimpleNamespace
+
+from frappe.tests import UnitTestCase
+
+from kubeport.utils.release_health import (
+	ResourceHealth,
+	_check_daemon_set,
+	_check_deployment,
+	_check_job,
+	_check_pod,
+	_check_stateful_set,
+	summarize,
+)
+
+
+def _condition(cond_type: str, status: str, reason: str = "", message: str = ""):
+	return SimpleNamespace(type=cond_type, status=status, reason=reason, message=message)
+
+
+class UnitTestReleaseHealth(UnitTestCase):
+	# -----------------------------------------------------------------------
+	# Deployment
+	# -----------------------------------------------------------------------
+
+	def test_check_deployment_ready_when_all_replicas_available(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="frappe-prod"),
+			spec=SimpleNamespace(replicas=2),
+			status=SimpleNamespace(
+				available_replicas=2,
+				updated_replicas=2,
+				conditions=[_condition("Available", "True")],
+			),
+		)
+		health = _check_deployment(obj, "tfg")
+		self.assertTrue(health.ready)
+		self.assertEqual(health.kind, "Deployment")
+		self.assertEqual(health.reason, "")
+
+	def test_check_deployment_unready_during_rollout_surfaces_replica_count(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="frappe-prod"),
+			spec=SimpleNamespace(replicas=2),
+			status=SimpleNamespace(
+				available_replicas=1,
+				updated_replicas=2,
+				conditions=[],
+			),
+		)
+		health = _check_deployment(obj, "tfg")
+		self.assertFalse(health.ready)
+		self.assertIn("1/2", health.reason)
+
+	def test_check_deployment_uses_available_condition_when_unavailable(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="frappe-prod"),
+			spec=SimpleNamespace(replicas=1),
+			status=SimpleNamespace(
+				available_replicas=0,
+				updated_replicas=0,
+				conditions=[
+					_condition(
+						"Available", "False",
+						reason="MinimumReplicasUnavailable",
+						message="Deployment does not have minimum availability.",
+					),
+				],
+			),
+		)
+		health = _check_deployment(obj, "tfg")
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "MinimumReplicasUnavailable")
+
+	def test_check_deployment_treats_zero_replicas_as_ready(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="scaled-down"),
+			spec=SimpleNamespace(replicas=0),
+			status=SimpleNamespace(available_replicas=0, updated_replicas=0, conditions=[]),
+		)
+		health = _check_deployment(obj, "tfg")
+		self.assertTrue(health.ready)
+
+	# -----------------------------------------------------------------------
+	# StatefulSet
+	# -----------------------------------------------------------------------
+
+	def test_check_stateful_set_ready_when_replicas_match_and_revision_settled(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="mariadb"),
+			spec=SimpleNamespace(replicas=1),
+			status=SimpleNamespace(
+				ready_replicas=1,
+				current_revision="rev-1",
+				update_revision="rev-1",
+			),
+		)
+		health = _check_stateful_set(obj, "tfg")
+		self.assertTrue(health.ready)
+
+	def test_check_stateful_set_flags_partition_revision_mismatch(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="mariadb"),
+			spec=SimpleNamespace(replicas=1),
+			status=SimpleNamespace(
+				ready_replicas=1,
+				current_revision="rev-1",
+				update_revision="rev-2",
+			),
+		)
+		health = _check_stateful_set(obj, "tfg")
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "rollout in progress")
+
+	# -----------------------------------------------------------------------
+	# DaemonSet
+	# -----------------------------------------------------------------------
+
+	def test_check_daemon_set_flags_misscheduled_pods(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="node-exporter"),
+			status=SimpleNamespace(
+				desired_number_scheduled=3,
+				number_ready=3,
+				number_misscheduled=1,
+			),
+		)
+		health = _check_daemon_set(obj, "tfg")
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "misscheduled")
+
+	def test_check_daemon_set_ready_when_all_nodes_ready(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="node-exporter"),
+			status=SimpleNamespace(
+				desired_number_scheduled=3,
+				number_ready=3,
+				number_misscheduled=0,
+			),
+		)
+		health = _check_daemon_set(obj, "tfg")
+		self.assertTrue(health.ready)
+
+	# -----------------------------------------------------------------------
+	# Pod
+	# -----------------------------------------------------------------------
+
+	def test_check_pod_ready_when_running_and_ready_condition_true(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="redis-0"),
+			status=SimpleNamespace(
+				phase="Running",
+				conditions=[_condition("Ready", "True")],
+				container_statuses=[],
+				init_container_statuses=[],
+			),
+		)
+		health = _check_pod(obj, "tfg")
+		self.assertTrue(health.ready)
+
+	def test_check_pod_surfaces_image_pull_back_off_reason(self):
+		container_status = SimpleNamespace(
+			state=SimpleNamespace(
+				waiting=SimpleNamespace(
+					reason="ImagePullBackOff",
+					message="Back-off pulling image",
+				),
+				terminated=None,
+			),
+		)
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="redis-0"),
+			status=SimpleNamespace(
+				phase="Pending",
+				conditions=[],
+				container_statuses=[container_status],
+				init_container_statuses=[],
+			),
+		)
+		health = _check_pod(obj, "tfg")
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "ImagePullBackOff")
+		self.assertIn("Back-off pulling image", health.message)
+
+	def test_check_pod_treats_succeeded_phase_as_ready(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="install-job-pod"),
+			status=SimpleNamespace(
+				phase="Succeeded",
+				conditions=[],
+				container_statuses=[],
+				init_container_statuses=[],
+			),
+		)
+		health = _check_pod(obj, "tfg")
+		self.assertTrue(health.ready)
+
+	# -----------------------------------------------------------------------
+	# Job
+	# -----------------------------------------------------------------------
+
+	def test_check_job_ready_when_complete_condition_true(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="install-app"),
+			status=SimpleNamespace(
+				conditions=[_condition("Complete", "True")],
+				active=0, succeeded=1, failed=0,
+			),
+		)
+		health = _check_job(obj, "tfg")
+		self.assertTrue(health.ready)
+
+	def test_check_job_failed_surfaces_failure_reason(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="install-app"),
+			status=SimpleNamespace(
+				conditions=[_condition("Failed", "True", reason="BackoffLimitExceeded", message="too many retries")],
+				active=0, succeeded=0, failed=4,
+			),
+		)
+		health = _check_job(obj, "tfg")
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "BackoffLimitExceeded")
+
+	def test_check_job_in_progress_marks_unready_with_progress_summary(self):
+		obj = SimpleNamespace(
+			metadata=SimpleNamespace(name="install-app"),
+			status=SimpleNamespace(
+				conditions=[],
+				active=1, succeeded=0, failed=0,
+			),
+		)
+		health = _check_job(obj, "tfg")
+		self.assertFalse(health.ready)
+		self.assertEqual(health.reason, "in progress")
+
+	# -----------------------------------------------------------------------
+	# summarize
+	# -----------------------------------------------------------------------
+
+	def test_summarize_returns_friendly_message_when_no_resources(self):
+		all_ready, summary = summarize([])
+		self.assertTrue(all_ready)
+		self.assertIn("no workload resources", summary)
+
+	def test_summarize_reports_count_when_all_ready(self):
+		results = [
+			ResourceHealth("Deployment", "frappe-prod", "tfg", True, "", ""),
+			ResourceHealth("StatefulSet", "mariadb", "tfg", True, "", ""),
+		]
+		all_ready, summary = summarize(results)
+		self.assertTrue(all_ready)
+		self.assertEqual(summary, "deployed | 2/2 ready")
+
+	def test_summarize_includes_first_failing_resource_line(self):
+		results = [
+			ResourceHealth("Deployment", "frappe-prod", "tfg", True, "", "1/1 available"),
+			ResourceHealth("Pod", "redis-0", "tfg", False, "ImagePullBackOff", "Back-off"),
+			ResourceHealth("Job", "install-app", "tfg", False, "BackoffLimitExceeded", ""),
+		]
+		all_ready, summary = summarize(results)
+		self.assertFalse(all_ready)
+		self.assertIn("1/3 ready", summary)
+		self.assertIn("Pod/redis-0", summary)
+		self.assertIn("ImagePullBackOff", summary)
