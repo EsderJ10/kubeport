@@ -6,6 +6,127 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-04-27 — Frappe Site lifecycle: pre-merge hardening
+
+### Context
+
+Pre-merge audit of `feat/site-lifecycle` surfaced five items: cancelling a running migration is unsafe
+because MariaDB DDL is not atomic, the orphan sweep could race the worker's Job apply to `db_set` window,
+`on_trash` ignored `Failed` rows that still held a Job pointer, the new `Deleting`/`Migrating`
+reconciliation branches lacked direct behavioural tests, and the three site-task functions duplicated most
+of their apply scaffolding.
+
+### Decision
+
+- **Confirmation-gated cancel for `Migrating`.** `cancel_site` accepts
+  `confirm_destructive: bool = False`; `Migrating` requires it. Status detail records
+  "destructive cancel acknowledged". The client uses a typed `CANCEL` dialog, and `on_trash` refuses
+  `Migrating` rows so operators must use the gated path.
+- **Orphan-sweep grace period.** `_sweep_orphan_site_jobs` skips Jobs younger than
+  `_ORPHAN_SWEEP_GRACE_SECONDS` (5 minutes, matching the reconciliation tick), closing the worker
+  apply-to-DB race.
+- **`on_trash` cleanup widened.** After the `Active` and `Migrating` refusals, cleanup runs whenever
+  `operation_job_name` is set, regardless of row status.
+- **D1 orchestrator refactor.** `create_site_task`, `delete_site_task`, and `migrate_site_task` are thin
+  wrappers over `_run_site_op(...)`. Per-op behavior lives in `SiteOpConfig` plus plain callables for
+  command, env, and optional creds Secret construction.
+- **H4 behavioural tests.** Direct tests now cover `Deleting` and `Migrating` reconciliation branch
+  transitions, orphan-sweep grace behavior, and the shared `_run_site_op` success/supersession paths.
+
+### Rejected alternatives
+
+- **Block cancel for `Migrating` entirely.** Too harsh for genuinely hung migrations; the operator would
+  have to wait for `activeDeadlineSeconds`.
+- **SIGTERM with a long grace period.** `bench migrate` has no safe DDL-boundary signal handler, so this
+  only delays the same risk.
+- **Shorter orphan-sweep grace.** A shorter grace would work, but five minutes matches the scheduler cadence:
+  a Job younger than one full reconciliation tick is never swept.
+- **Object-oriented operation classes.** Heavier than the codebase's plain-function style; dataclass config
+  plus callables keeps the operation-specific code explicit and local.
+- **Add a `Cancelling` lifecycle state.** Mostly cosmetic and would require new reconciliation branches for
+  a state that usually lasts seconds.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `cancel_site` now accepts
+  `confirm_destructive`, gates `Migrating`, and records destructive acknowledgement in `status_detail`.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.js`: cancelling `Migrating` opens a custom dialog whose
+  primary action is disabled until the operator types `CANCEL`; it submits `confirm_destructive: 1`.
+- `kubeport/tasks/site_tasks.py`: added `SiteOpConfig`, `_run_site_op`, and
+  `_attach_creds_secret_owner_ref`; public create/delete/migrate tasks delegate to the orchestrator.
+- `kubeport/tasks/reconciliation.py`: added `_ORPHAN_SWEEP_GRACE_SECONDS = 300` and skips recent orphan
+  candidates by Kubernetes `creation_timestamp`.
+- Tests: added controller confirmation tests, orchestrator tests, orphan-sweep age tests, and direct
+  behavioural tests for delete/migrate reconciliation.
+
+### Known follow-ups
+
+D2 (terminal `Deleted` state for audit trail), D3 (force-drop for `Failed` without a Job), D4 (`Cancelling`
+state), H5 (migrate pre-flight bench probe), and H6 (maintenance-mode wrapping) remain out of scope for this
+cycle.
+
+---
+
+## 2026-04-26 — Frappe Site: post-creation lifecycle (delete + migrate)
+
+### Context
+
+Once a `Frappe Site` row reached `Active`, the control plane had no way to act on the bench-side site. `on_trash` only cleaned up *in-flight* creation Jobs (it early-returned unless `status == "In Progress"`), so deleting an `Active` row silently orphaned the real site (database + files) on the bench PVC. The only remediation was to `kubectl exec` into a bench pod and run `bench drop-site` by hand — defeating the point of a control plane that creates resources but cannot destroy or maintain them. Schema migrations were similarly out-of-band.
+
+### Decision
+
+- **Two new in-flight states**: `Deleting` and `Migrating`. Lifecycle is now `Draft → In Progress → Active | Failed`, plus `Active → Migrating → Active | Failed` and `Active|Failed → Deleting → [doc deleted] | Failed`.
+- **`delete_site()`** whitelisted method: rotates the operation token, sets `status="Deleting"`, enqueues `delete_site_task`. The task submits a Kubernetes Job running `bench drop-site --no-backup --force` using the same reference-pod-clone pattern as `create_site_task`. Reconciliation polls the Job, runs the existing three-state bench probe, and on a confirmed-missing site calls `frappe.delete_doc` to remove the row itself. On still-present, the row lands `Failed` with the Job logs in `status_detail`.
+- **`migrate_site()`** whitelisted method: same pattern, runs `bench --site $SITE_NAME migrate`. No creds Secret needed (bench reads from `site_config.json`). Reconciliation runs the functional probe; non-zero Job exit with a still-functional site recovers to `Active` (false-negative tolerance).
+- **`on_trash` refuses `Active` rows** with a message directing the operator to "Delete Site" first. For in-flight rows it still rotates the token and enqueues the existing `cancel_site_task` to delete the K8s Job.
+- **`cancel_site()` extends to all three in-flight states** with operation-aware status detail messages.
+- **`_build_job_manifest` becomes `_build_op_job_manifest`** — a generic Job-shape builder taking `operation_label`, `container_command`, and `container_env`. Each operation task assembles its own command and env, keeping per-op concerns local while sharing the pod-spec-clone path.
+- **Reconciliation dispatches by status** via `_reconcile_site_create` / `_reconcile_site_delete` / `_reconcile_site_migrate`. `_finalize_site_status` gains an `expected_status` parameter so it guards `Deleting` and `Migrating` writes the same way it guarded `In Progress`. New `_finalize_site_deletion` deletes the row under the same token guard.
+
+### Rejected alternatives
+
+- **Auto-cascade `on_trash` to `delete_site` for Active rows.** Mixes async lifecycle into row deletion: the row would sit there until the Job confirms, and operators clicking "Delete" expect immediate disappearance. The explicit "Delete Site" button is unambiguous and keeps the cluster effect visible.
+- **Transition the row to `Draft` after a successful drop (Helm Release "Uninstalling → Draft" pattern).** A Helm Release row is a reusable template — the deployment is meant to be redeployable. A `Frappe Site` row identifies a specific site; once dropped, the row is operational debris. Auto-deletion matches user intent.
+- **Default `bench drop-site` (with backup).** Leaves an unindexed SQL dump on the bench PVC with no way to expose it (we have no backup-restore feature yet). `--no-backup` keeps the PVC clean. Backup will come as a first-class operation with proper storage handling.
+- **Backup/restore in this PR.** Substantially larger surface — needs a backup storage strategy (PVC vs object store), a child DocType for backup runs, and file-upload plumbing. Deferred to a dedicated cycle.
+- **Rename `creation_job_name`/`creation_job_token` to drop "creation_".** The fields now hold the *current operation*'s Job, not specifically a creation Job. Renaming requires a schema patch and is orthogonal to the lifecycle work; deferred.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`:
+  - `status` options gain `Deleting` and `Migrating`.
+  - New `migrate_site_btn` and `delete_site_btn` (danger color) buttons. `cancel_site_btn` relabelled to a generic "Cancel".
+  - `creation_job_name` / `creation_job_token` descriptions broadened to "Operation Job…" semantics.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`:
+  - `status` `DF.Literal` extended.
+  - New `delete_site()` and `migrate_site()` whitelisted methods, each rotating the operation token and clearing the prior `creation_job_*` pointers before enqueueing.
+  - `cancel_site()` accepts `In Progress | Deleting | Migrating`; status_detail spells out which operation was cancelled.
+  - `on_trash` throws on `Active`; in-flight cleanup branch widened to all three in-flight statuses.
+- `kubeport/kubeport/tasks/site_tasks.py`:
+  - `_build_job_manifest` → `_build_op_job_manifest(..., operation_label, container_command, container_env, ...)`. Per-op command and env are now built by the caller.
+  - New `delete_site_task` and `migrate_site_task` mirroring `create_site_task` (token-guard pre and post-apply, exception cleanup, realtime events).
+  - New helpers: `_bench_drop_site_command`, `_bench_migrate_command`, `_build_drop_env`, `_build_drop_creds_secret_manifest`. Drop-site and migrate never touch admin credentials; migrate touches no credentials at all.
+- `kubeport/kubeport/tasks/reconciliation.py`:
+  - `_reconcile_frappe_sites` filters on `status IN (In Progress, Deleting, Migrating)` and dispatches to per-op handlers.
+  - New `_reconcile_site_delete` / `_reconcile_site_migrate` / `_apply_delete_probe` helpers; existing creation logic moved into `_reconcile_site_create`.
+  - `_finalize_site_status` gains `expected_status` parameter (callers updated; existing behavioural tests updated).
+  - New `_finalize_site_deletion` calls `frappe.delete_doc(..., ignore_permissions=True, force=True, delete_permanently=True)` after publishing a `frappe_site_status_update` event with `status="Deleted"`.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.js`:
+  - Status indicator map covers all six states.
+  - Per-status button visibility (`Migrate Site` only for `Active`; `Delete Site` for `Active` and `Failed`-with-Job; `Cancel` during any in-flight; relabels per operation).
+  - Realtime listener detects `status="Deleted"` and routes to the list view instead of attempting `reload_doc` on a 404.
+- `kubeport/kubeport/api/site.py`: `get_site_job_logs` docstring broadened to current-operation Job.
+- Tests: `_build_job_manifest` tests rewritten to use the new generic builder via a `_create_manifest` helper; new tests for drop-site command, migrate command, drop env (no admin password), drop creds Secret shape, container `name=operation_label`, and operation-token guard for `Deleting`/`Migrating`.
+- Docs: `docs/control-plane-state.md` capabilities + open gaps + robustness table updated; README capability bullet broadened to "Frappe Site Lifecycle".
+
+### Known follow-ups
+
+- Reconciliation behavioural tests for the new `Deleting` and `Migrating` branches (mock-based, similar to existing creation reconciliation tests). Existing creation tests still cover the dispatch+token-guard path; explicit Deleting/Migrating cases would tighten the guarantee.
+- Field rename (`creation_job_*` → `operation_job_*`) once a quiet window for a schema patch presents itself.
+- Backup/restore as the next dedicated cycle.
+
+---
+
 ## 2026-04-23 — Frappe Site: orphan-Job sweep, hang timeout, label-guarded reconciliation, 3-state bench probe
 
 ### Context

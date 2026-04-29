@@ -107,9 +107,10 @@ Stores desired state for a Frappe site to be created on a running bench.
 
 - Links to a `Helm Release` (the target bench).
 - Stores site name, admin password, database credentials, and apps to install.
-- Background job discovers a running bench pod, dynamically extracts its container image and sites PVC mount, and submits a Kubernetes Job running `bench new-site`.
-- Reconciliation verifies site existence via exec-based discovery (checks for `site_config.json`) rather than trusting Job exit code — avoids false negatives when `--install-app` triggers non-fatal warnings.
-- Uses per-run operation tokens for concurrency safety.
+- Only `mariadb` is a supported `db_type`; the field is locked to that single value.
+- Background jobs discover a running bench pod, dynamically extract its container image and sites PVC mount, and submit a Kubernetes Job running the appropriate `bench` command. A single `_build_op_job_manifest` builder is reused across create, delete, and migrate; only the command and per-operation env differ.
+- Reconciliation verifies site existence via exec-based discovery (checks for `site_config.json`) rather than trusting Job exit codes — avoids false negatives when `--install-app` triggers non-fatal warnings.
+- Uses per-run `operation_token` (concurrency control) and `operation_job_name` / `operation_job_token` (reconciliation identity) fields across all three lifecycle operations.
 
 ---
 
@@ -137,7 +138,7 @@ Live cluster discovery endpoint:
 
 Frappe Site form support:
 
-- `get_site_job_logs(site_docname)` — fetches stdout from the site-creation Job pod for display in the form
+- `get_site_job_logs(site_docname)` — fetches stdout from the current operation Job pod for display in the form; uses the `operation_job_name` field to locate the pod
 - Returns empty logs gracefully when the Job pod is not yet available or has been cleaned up by TTL
 
 ---
@@ -204,12 +205,15 @@ Raw manifest lifecycle:
 
 ### `site_tasks.py`
 
-Frappe site creation via Kubernetes Jobs:
+Frappe site lifecycle operations via Kubernetes Jobs:
 
-- `create_site_task` — discovers a live bench pod, extracts its image and sites PVC mount dynamically, builds a Job manifest running `bench new-site`, and submits it via `apply_resource`.
-- Job names are derived from the site name and operation token for uniqueness.
-- Supports both direct `db_root_password` and Kubernetes `Secret` references for database credentials.
-- Reuses `_select_site_discovery_pod` from the discovery module for consistent pod selection.
+- `create_site_task` — discovers a live bench pod, extracts its image and sites PVC mount dynamically, builds a Job manifest running `bench new-site`, and submits it.
+- `delete_site_task` — builds a Job running `bench drop-site --no-backup --force` with DB root credentials injected.
+- `migrate_site_task` — builds a Job running `bench migrate`; no credentials Secret needed (bench reads from `site_config.json`).
+- All three share a single `_build_op_job_manifest` builder; only the command list and per-operation env differ.
+- Job names are derived from the site name and operation token for uniqueness and traceability.
+- Credentials flow through per-Job Kubernetes Secrets (never plaintext env values), owner-referenced to the Job for automatic garbage collection.
+- Per-operation two-token concurrency guard: `operation_token` (rotated on each new action) and `operation_job_token` (snapshot captured when the Job is submitted, checked by reconciliation before any status write).
 
 ### `reconciliation.py`
 
@@ -217,7 +221,7 @@ Scheduled drift detection running every 5 minutes:
 
 - **Helm Releases**: queries `helm status` for all `Deployed`/`Degraded` releases. Marks `Degraded` when Helm reports non-`deployed` status. Can recover back to `Deployed`.
 - **Service Bundles**: checks resource existence via `check_resources_exist`. Marks `Degraded` on missing resources.
-- **Frappe Sites**: polls `BatchV1Api.read_namespaced_job()` for `In Progress` sites. Checks ground truth (site file existence on bench) before marking Failed on non-zero Job exit codes. Handles Job TTL cleanup gracefully.
+- **Frappe Sites**: polls `BatchV1Api.read_namespaced_job()` for all in-flight rows (`In Progress`, `Deleting`, `Migrating`). Verifies ground truth via exec-based bench probe before marking status transitions. Failure detail messages are operation-specific ("bench new-site failed", "bench drop-site failed", "bench migrate failed"). Falls back to bench probe on Job TTL expiry. Orphan-Job sweep runs on every tick.
 
 ---
 
@@ -239,12 +243,12 @@ JavaScript form scripts in DocType folders follow an async-first pattern:
 |---|---|---|
 | Discovery behavior | Strong | Pod selection, fallback matching, error categories |
 | API timeout usage | Strong | Request timeout assertions |
-| Reconciliation state transitions | Strong | Including Frappe Site ground-truth verification |
+| Reconciliation state transitions | Strong | Including Frappe Site ground-truth verification for all three operations |
 | Manifest validation | Strong | Resource kind allowlist, field validation |
 | Helm worker concurrency guards | Strong | Token checks, status re-checks |
 | Cleanup/migration patches | Strong | Legacy DocType removal, data migration |
+| Frappe Site lifecycle simulation | Strong | End-to-end mocked scenarios: create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession |
 | Helm hooks and scheduling | Good | Scheduler event declarations |
-| Frappe Site job submission | Weak | Future coverage priority |
 | Helm Repository end-to-end sync | Weak | Needs integration test |
 | Helm Chart metadata flows | Weak | Needs integration test |
 | Cross-DocType integration | Weak | Needs broader workflow tests |
@@ -256,4 +260,4 @@ JavaScript form scripts in DocType folders follow an async-first pattern:
 The patch layer documents an architectural transition:
 
 - **Pre-model-sync**: `migrate_kubernetes_manifests_to_service_bundles.py` — migrates data from legacy `Kubernetes Manifest` DocType into `Service Bundle`.
-- **Post-model-sync**: `cleanup_legacy_kubeport_doctypes.py` — removes deprecated DocType tables. `rename_helm_release_docnames.py` — migrates Helm Release document names to the `cluster/namespace/release_name` identity scheme.
+- **Post-model-sync**: `cleanup_legacy_kubeport_doctypes.py` — removes deprecated DocType tables. `rename_helm_release_docnames.py` — migrates Helm Release document names to the `cluster/namespace/release_name` identity scheme. `rename_frappe_site_job_fields.py` — renames `creation_job_name` → `operation_job_name` and `creation_job_token` → `operation_job_token` to reflect that these fields track the current operation regardless of type (create, delete, migrate).

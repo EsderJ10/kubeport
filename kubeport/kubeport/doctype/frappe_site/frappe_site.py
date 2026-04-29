@@ -50,18 +50,18 @@ class FrappeSite(Document):
 		admin_password: DF.Password
 		bench_release: DF.Link
 		cluster: DF.Data | None
-		creation_job_name: DF.Data | None
-		creation_job_token: DF.Data | None
+		operation_job_name: DF.Data | None
+		operation_job_token: DF.Data | None
 		db_root_password: DF.Password | None
 		db_root_secret: DF.Data | None
 		db_root_secret_key: DF.Data | None
-		db_type: DF.Literal["mariadb", "postgres"]
+		db_type: DF.Literal["mariadb"]
 		force_create: DF.Check
 		install_apps: DF.SmallText | None
 		namespace: DF.Data | None
 		operation_token: DF.Data | None
 		site_name: DF.Data
-		status: DF.Literal["Draft", "In Progress", "Active", "Failed"]
+		status: DF.Literal["Draft", "In Progress", "Active", "Failed", "Deleting", "Migrating"]
 		status_detail: DF.SmallText | None
 	# end: auto-generated types
 
@@ -144,8 +144,8 @@ class FrappeSite(Document):
 		# Reset the job-launching token; the worker sets it again once the Job
 		# is actually submitted.  Clearing here prevents a stale reconciliation
 		# from matching on a fresh operation_token.
-		self.db_set("creation_job_token", "")
-		self.db_set("creation_job_name", "")
+		self.db_set("operation_job_token", "")
+		self.db_set("operation_job_name", "")
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.create_site_task",
 			site_docname=self.name,
@@ -161,24 +161,133 @@ class FrappeSite(Document):
 		)
 
 	@frappe.whitelist()
-	def cancel_site(self):
-		"""Cancel an in-progress site creation: delete the Job and mark Failed.
+	def delete_site(self):
+		"""Submit a Kubernetes Job to drop this site from the bench.
 
-		Only valid while status is ``In Progress``.  Rotates the operation
-		token so any concurrent worker or reconciler holding the old token
-		is a no-op.
+		Runs ``bench drop-site --no-backup --force`` inside the bench's
+		workload container.  Reconciliation verifies the site is gone and
+		auto-deletes this row.  Only valid from ``Active`` (the normal path)
+		or ``Failed`` rows that previously launched a Job (so a real site
+		may exist on the bench).
+
+		Status transitions: Active|Failed → Deleting → [doc deleted] | Failed.
 		"""
-		if self.status != "In Progress":
-			frappe.throw("Cancel is only available while a site creation is in progress.")
+		if self.status not in ("Active", "Failed"):
+			frappe.throw(
+				f"Delete Site is not available while status is '{self.status}'. "
+				"Wait for the current operation to finish or cancel it first."
+			)
+		if self.status == "Failed" and not self.operation_job_name:
+			# No Job ever ran for this row — there is no site on the bench to drop.
+			# Operator can just delete the row directly.
+			frappe.throw(
+				"This site never reached Active and has no recorded operation Job. "
+				"Delete the row directly — there is nothing to drop on the bench."
+			)
 
-		job_name = self.creation_job_name
+		operation_token = secrets.token_hex(16)
+		self.db_set("status", "Deleting")
+		self.db_set("status_detail", "")
+		self.db_set("operation_token", operation_token)
+		# Clear the previous operation's Job pointer; the worker sets these
+		# again once the drop-site Job is actually submitted.
+		self.db_set("operation_job_token", "")
+		self.db_set("operation_job_name", "")
+		frappe.enqueue(
+			"kubeport.tasks.site_tasks.delete_site_task",
+			site_docname=self.name,
+			operation_token=operation_token,
+			queue="long",
+			enqueue_after_commit=True,
+		)
+		frappe.msgprint(
+			f"Drop-site requested for '{self.site_name}'. "
+			"The row will be removed automatically once the bench confirms the site is gone.",
+			alert=True,
+			indicator="red",
+		)
+
+	@frappe.whitelist()
+	def migrate_site(self):
+		"""Submit a Kubernetes Job that runs ``bench migrate`` against this site.
+
+		Only valid while the site is ``Active``.  The site is briefly
+		unavailable while migrations apply.  Reconciliation probes the site
+		for functionality after the Job and transitions back to ``Active`` on
+		success or ``Failed`` on error.
+		"""
+		if self.status != "Active":
+			frappe.throw(
+				f"Migrate Site is only available for Active sites (current status: '{self.status}')."
+			)
+
+		operation_token = secrets.token_hex(16)
+		self.db_set("status", "Migrating")
+		self.db_set("status_detail", "")
+		self.db_set("operation_token", operation_token)
+		self.db_set("operation_job_token", "")
+		self.db_set("operation_job_name", "")
+		frappe.enqueue(
+			"kubeport.tasks.site_tasks.migrate_site_task",
+			site_docname=self.name,
+			operation_token=operation_token,
+			queue="long",
+			enqueue_after_commit=True,
+		)
+		frappe.msgprint(
+			f"Migration requested for '{self.site_name}'. "
+			"Status will update automatically when the job completes.",
+			alert=True,
+			indicator="blue",
+		)
+
+	@frappe.whitelist()
+	def cancel_site(self, confirm_destructive: bool = False):
+		"""Cancel an in-flight operation (create / delete / migrate).
+
+		Rotates the operation token so any concurrent worker or reconciler
+		holding the old token is a no-op, marks the row ``Failed``, and
+		enqueues Job cleanup.  Operator can re-issue the appropriate action
+		from the ``Failed`` state.
+
+		``confirm_destructive`` is required for ``Migrating`` because
+		cancelling a running migration can leave MariaDB schema changes
+		half-applied.
+		"""
+		if self.status not in ("In Progress", "Deleting", "Migrating"):
+			frappe.throw("Cancel is only available while an operation is in progress.")
+
+		if isinstance(confirm_destructive, str):
+			confirm_destructive = confirm_destructive.lower() in ("1", "true", "yes")
+
+		if self.status == "Migrating" and not confirm_destructive:
+			frappe.throw(
+				"Cancelling a running migration can leave the site's database "
+				"schema in a half-applied state with no automatic rollback. "
+				"Confirm explicitly to proceed.",
+				title="Destructive cancel required",
+			)
+
+		job_name = self.operation_job_name
+		prior_status = self.status
 		# Rotate the token before enqueueing so any in-flight worker sees a
 		# mismatch and exits cleanly.
 		self.db_set("operation_token", secrets.token_hex(16))
 		user = frappe.session.user or "unknown"
+		op_label = {
+			"In Progress": "creation",
+			"Deleting": "deletion",
+			"Migrating": "migration",
+		}[prior_status]
 		self.db_set("status", "Failed")
-		self.db_set("status_detail", f"Cancelled by {user}.")
-		self.db_set("creation_job_token", "")
+		if prior_status == "Migrating":
+			self.db_set(
+				"status_detail",
+				f"Cancelled {op_label} by {user} (destructive cancel acknowledged).",
+			)
+		else:
+			self.db_set("status_detail", f"Cancelled {op_label} by {user}.")
+		self.db_set("operation_job_token", "")
 
 		if job_name:
 			frappe.enqueue(
@@ -203,18 +312,37 @@ class FrappeSite(Document):
 		)
 
 	def on_trash(self):
-		"""Best-effort cleanup of an in-flight Job when the document is deleted.
+		"""Guard direct row deletion against orphaning real sites on the bench.
 
-		Without this, deleting the doc would leave the K8s Job running and
-		invisible to reconciliation (which filters on status="In Progress"
-		against existing rows).  Rotating ``operation_token`` also invalidates
-		any worker already partway through ``create_site_task``.
+		``Active`` rows must go through ``delete_site`` so the bench-side site
+		(database + files) is dropped first; otherwise deleting the row would
+		leak the site into permanent obscurity.
+
+		``Migrating`` rows are refused: cancelling a running migration can
+		corrupt the schema, and we want the operator to go through the gated
+		``cancel_site`` path explicitly rather than backdoor a kill via row
+		trash.
+
+		For any other status, if the row carries an ``operation_job_name`` we
+		rotate the operation token (so an in-flight reconciliation is rejected
+		by its token check) and enqueue ``cancel_site_task`` to clean up the
+		Job and its creds Secret.  This covers the in-flight cases
+		(``In Progress`` / ``Deleting``) and a ``Failed`` row whose Job survived
+		(cancelled mid-flight, drop-site that left the site present).
 		"""
-		if self.status != "In Progress":
-			return
+		if self.status == "Active":
+			frappe.throw(
+				"This site exists on the bench. Click 'Delete Site' to drop it first, "
+				"then this row will be removed automatically."
+			)
 
-		job_name = self.creation_job_name
-		if not job_name:
+		if self.status == "Migrating":
+			frappe.throw(
+				"This site has a migration in progress. Cancel the migration first "
+				"(it requires explicit confirmation), then delete the row."
+			)
+
+		if not self.operation_job_name:
 			return
 
 		self.db_set("operation_token", secrets.token_hex(16))
@@ -222,7 +350,7 @@ class FrappeSite(Document):
 			"kubeport.tasks.site_tasks.cancel_site_task",
 			cluster=self.cluster,
 			namespace=self.namespace or "default",
-			job_name=job_name,
+			job_name=self.operation_job_name,
 			queue="short",
 			enqueue_after_commit=True,
 		)

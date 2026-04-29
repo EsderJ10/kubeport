@@ -14,8 +14,8 @@
   "column_break_status",
   "status",
   "status_detail",
-  "creation_job_name",
-  "creation_job_token",
+  "operation_job_name",
+  "operation_job_token",
   "operation_token",
   "section_break_credentials",
   "admin_password",
@@ -28,8 +28,10 @@
   "db_root_secret_key",
   "section_break_actions",
   "create_site_btn",
+  "migrate_site_btn",
   "view_job_logs_btn",
-  "cancel_site_btn"
+  "cancel_site_btn",
+  "delete_site_btn"
  ],
  "fields": [
   {
@@ -78,7 +80,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "Draft\nIn Progress\nActive\nFailed",
+   "options": "Draft\nIn Progress\nActive\nFailed\nDeleting\nMigrating",
    "read_only": 1
   },
   {
@@ -88,17 +90,19 @@
    "read_only": 1
   },
   {
-   "fieldname": "creation_job_name",
+   "description": "Name of the K8s Job for the current operation (create / delete / migrate). Cleared between operations.",
+   "fieldname": "operation_job_name",
    "fieldtype": "Data",
    "hidden": 1,
-   "label": "Creation Job Name",
+   "label": "Operation Job Name",
    "read_only": 1
   },
   {
-   "fieldname": "creation_job_token",
+   "description": "Snapshot of operation_token captured when the current Job was launched. Reconciliation uses this to skip writes from superseded operations.",
+   "fieldname": "operation_job_token",
    "fieldtype": "Data",
    "hidden": 1,
-   "label": "Creation Job Token",
+   "label": "Operation Job Token",
    "read_only": 1
   },
   {
@@ -175,6 +179,11 @@
    "label": "Create Site"
   },
   {
+   "fieldname": "migrate_site_btn",
+   "fieldtype": "Button",
+   "label": "Migrate Site"
+  },
+  {
    "fieldname": "view_job_logs_btn",
    "fieldtype": "Button",
    "label": "View Job Logs"
@@ -182,7 +191,13 @@
   {
    "fieldname": "cancel_site_btn",
    "fieldtype": "Button",
-   "label": "Cancel Creation"
+   "label": "Cancel"
+  },
+  {
+   "button_color": "Danger",
+   "fieldname": "delete_site_btn",
+   "fieldtype": "Button",
+   "label": "Delete Site"
   }
  ],
  "grid_page_length": 50,

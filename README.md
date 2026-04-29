@@ -12,7 +12,7 @@ Kubeport bridges the Frappe framework with Kubernetes by following a clear archi
 - **Helm Chart Catalog** — register Helm repositories and sync chart metadata (versions, default values) into the Frappe database with daily background refresh.
 - **Helm Release Management** — declare desired Helm releases (chart, version, namespace, values) and deploy or uninstall them through background jobs with idempotent `helm upgrade --install`.
 - **Raw Manifest Deployment** — define raw Kubernetes manifests in Service Bundles and apply or delete them via server-side apply, with a fixed allowlist of supported resource kinds.
-- **Frappe Site Provisioning** — create Frappe sites on running ERPNext benches by submitting Kubernetes Jobs that run `bench new-site`, with status verified through ground-truth site existence checks.
+- **Frappe Site Lifecycle** — create, drop, and migrate Frappe sites on running ERPNext benches by submitting Kubernetes Jobs that run `bench new-site`, `bench drop-site`, or `bench migrate`. Status is verified through ground-truth bench probes (not Job exit codes), and the `Frappe Site` row is auto-removed once the bench confirms a successful drop.
 - **Live Discovery** — cluster-scoped, read-only discovery of Helm releases and Frappe sites. Discovery results are rendered client-side and never persisted to the database.
 - **Reconciliation** — scheduled sweeps (every 5 minutes) compare desired state with live cluster state and flag drift as `Degraded`, with automatic recovery when live state returns to normal.
 

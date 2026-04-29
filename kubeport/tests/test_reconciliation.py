@@ -132,8 +132,9 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			"name": "rel-a/demo.example.com",
 			"cluster": "cluster-a",
 			"namespace": "ns",
-			"creation_job_name": "ks-demo-abcdef123456",
-			"creation_job_token": "token-1",
+			"status": "In Progress",
+			"operation_job_name": "ks-demo-abcdef123456",
+			"operation_job_token": "token-1",
 			"bench_release": "rel-a",
 			"site_name": "demo.example.com",
 		}
@@ -190,7 +191,7 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 		mock_db_set_value,
 		mock_publish,
 	):
-		mock_get_all.return_value = [self._site(creation_job_token="token-old")]
+		mock_get_all.return_value = [self._site(operation_job_token="token-old")]
 		# Current document now has a fresh operation_token (user re-triggered)
 		mock_db_get_value.return_value = {
 			"operation_token": "token-new",
@@ -292,9 +293,9 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 	):
 		mock_get_value.return_value = {"operation_token": "t", "status": "Failed"}
 		site = SimpleNamespace(
-			name="rel/s", creation_job_token="t", creation_job_name="j",
+			name="rel/s", operation_job_token="t", operation_job_name="j",
 		)
-		applied = _finalize_site_status(site, "Active", "")
+		applied = _finalize_site_status(site, "In Progress", "Active", "")
 		self.assertFalse(applied)
 		mock_set_value.assert_not_called()
 		mock_publish.assert_not_called()
@@ -310,9 +311,9 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 	):
 		mock_get_value.return_value = {"operation_token": "t", "status": "In Progress"}
 		site = SimpleNamespace(
-			name="rel/s", creation_job_token="t", creation_job_name="j",
+			name="rel/s", operation_job_token="t", operation_job_name="j",
 		)
-		applied = _finalize_site_status(site, "Active", "")
+		applied = _finalize_site_status(site, "In Progress", "Active", "")
 		self.assertTrue(applied)
 		mock_set_value.assert_called_once_with("Frappe Site", "rel/s", {
 			"status": "Active",
@@ -329,8 +330,9 @@ class UnitTestReconcileFrappeSitesExtra(UnitTestCase):
 			"name": "rel-a/demo.example.com",
 			"cluster": "cluster-a",
 			"namespace": "ns",
-			"creation_job_name": "ks-demo-abcdef123456",
-			"creation_job_token": "token-1",
+			"status": "In Progress",
+			"operation_job_name": "ks-demo-abcdef123456",
+			"operation_job_token": "token-1",
 			"bench_release": "rel-a",
 			"site_name": "demo.example.com",
 		}
@@ -457,6 +459,14 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 	def _job(self, name: str) -> SimpleNamespace:
 		return SimpleNamespace(metadata=SimpleNamespace(name=name))
 
+	def _job_with_age(self, name: str, age_seconds: int) -> SimpleNamespace:
+		from datetime import datetime, timedelta, timezone
+
+		created = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+		return SimpleNamespace(
+			metadata=SimpleNamespace(name=name, creation_timestamp=created),
+		)
+
 	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
 	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
 	@patch("kubeport.tasks.reconciliation.frappe.get_all")
@@ -472,7 +482,7 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 				name="rel-a/demo",
 				cluster="cluster-a",
 				namespace="ns",
-				creation_job_name="ks-demo-known123456ab",
+				operation_job_name="ks-demo-known123456ab",
 			),
 		]
 		mock_get_api_client.return_value = MagicMock()
@@ -494,6 +504,62 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
 	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
 	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_does_not_sweep_recently_created_orphan_within_grace(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_delete_job,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="rel-a/demo",
+				cluster="cluster-a",
+				namespace="ns",
+				operation_job_name=None,
+			),
+		]
+		mock_get_api_client.return_value = MagicMock()
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
+			batch = mock_batch_api.return_value
+			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
+				self._job_with_age("ks-demo-fresh1234abcd", age_seconds=30),
+			])
+			_sweep_orphan_site_jobs()
+
+		mock_delete_job.assert_not_called()
+
+	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_sweeps_orphan_older_than_grace(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_delete_job,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="rel-a/demo",
+				cluster="cluster-a",
+				namespace="ns",
+				operation_job_name=None,
+			),
+		]
+		mock_get_api_client.return_value = MagicMock()
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
+			batch = mock_batch_api.return_value
+			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
+				self._job_with_age("ks-demo-orphanold123", age_seconds=600),
+			])
+			_sweep_orphan_site_jobs()
+
+		mock_delete_job.assert_called_once()
+
+	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
 	def test_does_not_touch_jobs_referenced_by_a_doc(
 		self,
 		mock_get_all,
@@ -506,13 +572,13 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 				name="rel-a/demo",
 				cluster="cluster-a",
 				namespace="ns",
-				creation_job_name="ks-demo-abc123abc123",
+				operation_job_name="ks-demo-abc123abc123",
 			),
 			SimpleNamespace(
 				name="rel-a/other",
 				cluster="cluster-a",
 				namespace="ns",
-				creation_job_name="ks-other-xyz456xyz4",
+				operation_job_name="ks-other-xyz456xyz4",
 			),
 		]
 		mock_get_api_client.return_value = MagicMock()
@@ -530,20 +596,20 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
 	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
 	@patch("kubeport.tasks.reconciliation.frappe.get_all")
-	def test_sweeps_namespace_even_when_all_rows_have_empty_creation_job_name(
+	def test_sweeps_namespace_even_when_all_rows_have_empty_operation_job_name(
 		self,
 		mock_get_all,
 		mock_get_api_client,
 		mock_delete_job,
 	):
-		"""The worker-crash scenario: every row has empty creation_job_name but
+		"""The worker-crash scenario: every row has empty operation_job_name but
 		a labeled Job still exists in the cluster.  The sweep must still run."""
 		mock_get_all.return_value = [
 			SimpleNamespace(
 				name="rel-a/demo",
 				cluster="cluster-a",
 				namespace="ns",
-				creation_job_name=None,
+				operation_job_name=None,
 			),
 		]
 		mock_get_api_client.return_value = MagicMock()
@@ -556,3 +622,482 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 			_sweep_orphan_site_jobs()
 
 		mock_delete_job.assert_called_once()
+
+
+class UnitTestReconcileSiteDelete(UnitTestCase):
+	"""H4: per-branch coverage for _reconcile_site_delete."""
+
+	def _site(self, **overrides) -> SimpleNamespace:
+		defaults = {
+			"name": "rel-a/demo",
+			"cluster": "cluster-a",
+			"namespace": "ns",
+			"status": "Deleting",
+			"operation_job_name": "ks-demo-abcdef123456",
+			"operation_job_token": "token-1",
+			"bench_release": "rel-a",
+			"site_name": "demo",
+		}
+		defaults.update(overrides)
+		return SimpleNamespace(**defaults)
+
+	def _job(self, succeeded: int = 0, failed: int = 0) -> SimpleNamespace:
+		return SimpleNamespace(
+			metadata=SimpleNamespace(name="ks-demo-abcdef123456"),
+			status=SimpleNamespace(succeeded=succeeded, failed=failed),
+		)
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.delete_doc")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_succeeded_and_missing_deletes_row(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_publish,
+		mock_delete_doc,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
+		mock_probe_state.return_value = "missing"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_sites()
+
+		mock_delete_doc.assert_called_once_with(
+			"Frappe Site",
+			"rel-a/demo",
+			ignore_permissions=True,
+			force=True,
+			delete_permanently=True,
+		)
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_succeeded_but_still_exists_marks_failed_with_detail(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_log_error,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
+		mock_probe_state.return_value = "exists"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_sites()
+
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo",
+			{
+				"status": "Failed",
+				"status_detail": "Drop-site Job ran but the site is still present on the bench.",
+			},
+		)
+		mock_log_error.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.delete_doc")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_succeeded_and_unknown_defers_no_state_write(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_delete_doc,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
+		mock_probe_state.return_value = "unknown"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_sites()
+
+		mock_delete_doc.assert_not_called()
+		mock_db_set_value.assert_not_called()
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.delete_doc")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_job_failed_but_site_missing_still_deletes_row(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_publish,
+		mock_delete_doc,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
+		mock_probe_state.return_value = "missing"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True), \
+			patch("kubeport.tasks.reconciliation._extract_job_failure_detail", return_value="ignored"):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
+			_reconcile_frappe_sites()
+
+		mock_delete_doc.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation._extract_job_failure_detail")
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_job_failed_and_site_exists_marks_failed_with_log_detail(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_log_error,
+		mock_probe_state,
+		mock_extract_detail,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
+		mock_probe_state.return_value = "exists"
+		mock_extract_detail.return_value = "drop failed: permission denied"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
+			_reconcile_frappe_sites()
+
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo",
+			{"status": "Failed", "status_detail": "drop failed: permission denied"},
+		)
+		mock_log_error.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.delete_doc")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_job_404_falls_back_to_probe_and_deletes_on_missing(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_publish,
+		mock_delete_doc,
+		mock_probe_state,
+	):
+		from kubernetes.client.rest import ApiException
+
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
+		mock_probe_state.return_value = "missing"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"):
+			mock_batch_api.return_value.read_namespaced_job.side_effect = ApiException(status=404)
+			_reconcile_frappe_sites()
+
+		mock_delete_doc.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.delete_doc")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_token_mismatch_skips_even_on_missing_probe(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_delete_doc,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site(operation_job_token="token-old")]
+		mock_db_get_value.return_value = {"operation_token": "token-new", "status": "Deleting"}
+		mock_probe_state.return_value = "missing"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_sites()
+
+		mock_delete_doc.assert_not_called()
+		mock_db_set_value.assert_not_called()
+
+
+class UnitTestReconcileSiteMigrate(UnitTestCase):
+	"""H4: per-branch coverage for _reconcile_site_migrate."""
+
+	def _site(self, **overrides) -> SimpleNamespace:
+		defaults = {
+			"name": "rel-a/demo",
+			"cluster": "cluster-a",
+			"namespace": "ns",
+			"status": "Migrating",
+			"operation_job_name": "ks-demo-abcdef123456",
+			"operation_job_token": "token-1",
+			"bench_release": "rel-a",
+			"site_name": "demo",
+		}
+		defaults.update(overrides)
+		return SimpleNamespace(**defaults)
+
+	def _job(self, succeeded: int = 0, failed: int = 0) -> SimpleNamespace:
+		return SimpleNamespace(
+			metadata=SimpleNamespace(name="ks-demo-abcdef123456"),
+			status=SimpleNamespace(succeeded=succeeded, failed=failed),
+		)
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_succeeded_and_exists_transitions_to_active(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
+		mock_probe_state.return_value = "exists"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_sites()
+
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo",
+			{"status": "Active", "status_detail": ""},
+		)
+
+	@patch("kubeport.tasks.reconciliation._extract_job_failure_detail")
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_succeeded_but_site_missing_marks_failed(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_log_error,
+		mock_probe_state,
+		mock_extract_detail,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
+		mock_probe_state.return_value = "missing"
+		mock_extract_detail.return_value = "Migration log: bad column"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_sites()
+
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo",
+			{"status": "Failed", "status_detail": "Migration log: bad column"},
+		)
+		mock_log_error.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_failed_but_site_functional_recovers_to_active(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
+		mock_probe_state.return_value = "exists"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
+			_reconcile_frappe_sites()
+
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo",
+			{"status": "Active", "status_detail": ""},
+		)
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_unknown_probe_defers_no_write(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
+		mock_probe_state.return_value = "unknown"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_sites()
+
+		mock_db_set_value.assert_not_called()
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_job_404_with_exists_recovers_to_active(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_probe_state,
+	):
+		from kubernetes.client.rest import ApiException
+
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
+		mock_probe_state.return_value = "exists"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"):
+			mock_batch_api.return_value.read_namespaced_job.side_effect = ApiException(status=404)
+			_reconcile_frappe_sites()
+
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo",
+			{"status": "Active", "status_detail": ""},
+		)
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_job_404_with_missing_marks_failed(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_probe_state,
+	):
+		from kubernetes.client.rest import ApiException
+
+		mock_get_all.return_value = [self._site()]
+		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
+		mock_probe_state.return_value = "missing"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"):
+			mock_batch_api.return_value.read_namespaced_job.side_effect = ApiException(status=404)
+			_reconcile_frappe_sites()
+
+		args = mock_db_set_value.call_args.args
+		self.assertEqual(args[0:2], ("Frappe Site", "rel-a/demo"))
+		self.assertEqual(args[2]["status"], "Failed")
+		self.assertIn("Migrate Job disappeared", args[2]["status_detail"])
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_token_mismatch_skips_state_write(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._site(operation_job_token="token-old")]
+		mock_db_get_value.return_value = {"operation_token": "token-new", "status": "Migrating"}
+		mock_probe_state.return_value = "exists"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_sites()
+
+		mock_db_set_value.assert_not_called()
