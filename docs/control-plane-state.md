@@ -147,8 +147,8 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Testing Depth
 
-- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, shared Frappe Site operation orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, direct delete/migrate reconciliation branch behavior, and full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession).
-- Weak coverage: Helm Repository sync integration, Helm Chart metadata flows, broader cross-DocType integration tests.
+- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, shared Frappe Site operation orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, direct delete/migrate reconciliation branch behavior, full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession), Helm release lifecycle (install/upgrade/rollback/uninstall token staleness, blocking-site detection, force-uninstall, stale-operation recovery), Helm Repository sync supersession and chart inventory rebuild, and per-kind workload readiness for all eight supported kinds with warning-event attachment.
+- Weak coverage: broader cross-DocType integration tests.
 
 ### Operator Documentation
 
