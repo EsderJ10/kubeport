@@ -1,0 +1,228 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:{site_name}::{backup_name}",
+ "creation": "2026-04-30 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_site",
+  "frappe_site",
+  "site_name",
+  "source_bench_release",
+  "column_break_site",
+  "cluster",
+  "namespace",
+  "source_release_name",
+  "section_break_backup",
+  "backup_name",
+  "status",
+  "status_detail",
+  "started_at",
+  "completed_at",
+  "column_break_backup",
+  "size_bytes",
+  "storage_backend",
+  "storage_path",
+  "bench_archive_name",
+  "section_break_operation",
+  "operation_token",
+  "operation_job_name",
+  "operation_job_token",
+  "operation_started_at",
+  "triggered_by"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_site",
+   "fieldtype": "Section Break",
+   "label": "Source Site"
+  },
+  {
+   "fieldname": "frappe_site",
+   "fieldtype": "Data",
+   "label": "Frappe Site",
+   "read_only": 1
+  },
+  {
+   "fieldname": "site_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Site Name",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "source_bench_release",
+   "fieldtype": "Data",
+   "label": "Source Bench Release",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_site",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "cluster",
+   "fieldtype": "Data",
+   "label": "Cluster",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "default",
+   "fieldname": "namespace",
+   "fieldtype": "Data",
+   "label": "Namespace",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "source_release_name",
+   "fieldtype": "Data",
+   "label": "Source Release Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_backup",
+   "fieldtype": "Section Break",
+   "label": "Backup"
+  },
+  {
+   "fieldname": "backup_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Backup Name",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "Pending",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Pending\nIn Progress\nAvailable\nRestoring\nFailed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "status_detail",
+   "fieldtype": "Small Text",
+   "label": "Status Detail",
+   "read_only": 1
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "completed_at",
+   "fieldtype": "Datetime",
+   "label": "Completed At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_backup",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "size_bytes",
+   "fieldtype": "Long Int",
+   "label": "Size Bytes",
+   "read_only": 1
+  },
+  {
+   "default": "pvc",
+   "fieldname": "storage_backend",
+   "fieldtype": "Select",
+   "label": "Storage Backend",
+   "options": "pvc",
+   "read_only": 1
+  },
+  {
+   "fieldname": "storage_path",
+   "fieldtype": "Data",
+   "label": "Storage Path",
+   "read_only": 1
+  },
+  {
+   "fieldname": "bench_archive_name",
+   "fieldtype": "Data",
+   "label": "Bench Archive Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_operation",
+   "fieldtype": "Section Break",
+   "label": "Operation"
+  },
+  {
+   "fieldname": "operation_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Operation Token",
+   "read_only": 1
+  },
+  {
+   "fieldname": "operation_job_name",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Operation Job Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "operation_job_token",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Operation Job Token",
+   "read_only": 1
+  },
+  {
+   "fieldname": "operation_started_at",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Operation Started At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "triggered_by",
+   "fieldtype": "Link",
+   "label": "Triggered By",
+   "options": "User",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-04-30 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Kubeport",
+ "name": "Frappe Site Backup",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "backup_name"
+}

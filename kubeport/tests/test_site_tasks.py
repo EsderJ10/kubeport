@@ -9,15 +9,21 @@ from unittest.mock import MagicMock, patch
 from frappe.tests import UnitTestCase
 
 from kubeport.tasks.site_tasks import (
+	BACKUP_MOUNT_PATH,
+	BACKUP_PVC_NAME,
 	_bench_drop_site_command,
+	_bench_backup_command,
 	_bench_migrate_command,
 	_bench_new_site_command,
+	_bench_restore_command,
 	_build_creds_secret_manifest,
 	_build_drop_creds_secret_manifest,
 	_build_drop_env,
 	_build_env,
 	_build_op_job_manifest,
+	_backup_storage_path,
 	_clone_reference_pod_spec,
+	_prepare_backup_ref_spec,
 	_job_name,
 	_merge_env,
 	_parse_install_apps,
@@ -405,6 +411,24 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertEqual(cmd, 'bench --site "$SITE_NAME" migrate')
 		self.assertNotIn("demo", cmd)
 
+	def test_backup_command_creates_archive_and_metadata_markers(self):
+		cmd = _bench_backup_command()
+		self.assertIn('bench --site "$SITE_NAME" backup --with-files', cmd)
+		self.assertIn('tar -C "$backup_dir" -czf "$BACKUP_ARCHIVE_PATH"', cmd)
+		self.assertIn("KUBEPORT_BACKUP_SIZE", cmd)
+
+	def test_restore_command_uses_archive_and_force_restore(self):
+		cmd = _bench_restore_command()
+		self.assertIn('tar -xzf "$BACKUP_ARCHIVE_PATH"', cmd)
+		self.assertIn('bench --site "$SITE_NAME" restore "$db_file" --force', cmd)
+		self.assertIn("--with-private-files", cmd)
+
+	def test_backup_storage_path_is_inside_backup_mount(self):
+		path = _backup_storage_path("cluster/a", "bench ns", "demo.example.com", "demo.20260430")
+		self.assertTrue(path.startswith(BACKUP_MOUNT_PATH + "/"))
+		self.assertNotIn(" ", path)
+		self.assertNotIn("//", path)
+
 	def test_build_drop_env_omits_admin_password(self):
 		"""Drop-site env must not carry ADMIN_PASSWORD — it is a no-op for
 		drop-site and would expose a credential the Job does not need.
@@ -447,6 +471,32 @@ class UnitTestJobManifest(UnitTestCase):
 		labels = manifest["metadata"]["labels"]
 		self.assertIn("kubeport.io/frappe-site", labels)
 		self.assertIn("app.kubernetes.io/managed-by", labels)
+
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_applies_rwx_pvc_and_mounts_it(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+	):
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(backup_storage_class="fast-rwx")
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		_prepare_backup_ref_spec(
+			doc=SimpleNamespace(),
+			release=SimpleNamespace(cluster="cluster-a"),
+			namespace="ns",
+			api_client=api_client,
+			ref_spec=ref_spec,
+		)
+
+		manifest = mock_apply_resource.call_args.args[1]
+		self.assertEqual(manifest["metadata"]["name"], BACKUP_PVC_NAME)
+		self.assertEqual(manifest["spec"]["accessModes"], ["ReadWriteMany"])
+		self.assertEqual(manifest["spec"]["storageClassName"], "fast-rwx")
+		self.assertEqual(ref_spec["volumes"][0]["persistentVolumeClaim"]["claimName"], BACKUP_PVC_NAME)
+		self.assertEqual(ref_spec["volume_mounts"][0]["mountPath"], BACKUP_MOUNT_PATH)
 
 
 class UnitTestOperationTokenGuard(UnitTestCase):
@@ -1104,6 +1154,84 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		doc = self._doc(status="Deleting")
 		doc.cancel_site()
 		mock_enqueue.assert_called_once()
+
+
+class UnitTestBackupRestoreController(UnitTestCase):
+	def _doc(self, **overrides):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+		doc = MagicMock(spec=FrappeSite)
+		doc.name = overrides.get("name", "rel-a/demo.example.com")
+		doc.status = overrides.get("status", "Active")
+		doc.site_name = overrides.get("site_name", "demo.example.com")
+		doc.bench_release = overrides.get("bench_release", "rel-a")
+		doc.cluster = overrides.get("cluster", "cluster-a")
+		doc.namespace = overrides.get("namespace", "ns")
+		doc._has_in_flight_backup = FrappeSite._has_in_flight_backup.__get__(doc, FrappeSite)
+		doc.backup_site = FrappeSite.backup_site.__get__(doc, FrappeSite)
+		doc.restore_site = FrappeSite.restore_site.__get__(doc, FrappeSite)
+		return doc
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.secrets.token_hex", return_value="tok-1")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe")
+	def test_backup_site_creates_backup_row_and_enqueues_task(self, mock_frappe, _mock_token):
+		doc = self._doc()
+		release = SimpleNamespace(cluster="cluster-a", namespace="ns", release_name="bench-a")
+		backup_doc = MagicMock()
+		backup_doc.name = "demo.example.com::demo-20260430120000"
+
+		def _get_doc(arg, name=None):
+			if isinstance(arg, dict):
+				self.assertEqual(arg["doctype"], "Frappe Site Backup")
+				self.assertEqual(arg["operation_token"], "tok-1")
+				return backup_doc
+			return release
+
+		mock_frappe.get_doc.side_effect = _get_doc
+		mock_frappe.db.exists.return_value = None
+		mock_frappe.session.user = "alice@example.com"
+
+		result = doc.backup_site()
+
+		self.assertEqual(result["backup_docname"], backup_doc.name)
+		backup_doc.insert.assert_called_once_with(ignore_permissions=True)
+		doc.db_set.assert_any_call("status", "In Progress")
+		doc.db_set.assert_any_call("operation_token", "tok-1")
+		mock_frappe.enqueue.assert_called_once()
+		self.assertEqual(mock_frappe.enqueue.call_args.kwargs["backup_docname"], backup_doc.name)
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe")
+	def test_restore_site_requires_destructive_confirmation(self, mock_frappe):
+		doc = self._doc()
+		mock_frappe.throw.side_effect = frappe.ValidationError
+
+		with self.assertRaises(frappe.ValidationError):
+			doc.restore_site("backup-a")
+
+		mock_frappe.enqueue.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.secrets.token_hex", return_value="tok-restore")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe")
+	def test_restore_site_marks_backup_restoring_and_enqueues_task(self, mock_frappe, _mock_token):
+		doc = self._doc()
+		backup = MagicMock()
+		backup.name = "backup-a"
+		backup.status = "Available"
+		backup.storage_backend = "pvc"
+		backup.storage_path = "/mnt/kubeport-backups/c/ns/site/backup.tar.gz"
+		backup.cluster = "cluster-a"
+		backup.namespace = "ns"
+		backup.site_name = "demo.example.com"
+		mock_frappe.get_doc.return_value = backup
+		mock_frappe.db.exists.return_value = None
+
+		result = doc.restore_site("backup-a", confirm_destructive=True)
+
+		self.assertEqual(result["backup_docname"], "backup-a")
+		doc.db_set.assert_any_call("status", "Migrating")
+		backup.db_set.assert_any_call("status", "Restoring")
+		backup.db_set.assert_any_call("operation_token", "tok-restore")
+		mock_frappe.enqueue.assert_called_once()
 
 
 class UnitTestRunSiteOp(UnitTestCase):

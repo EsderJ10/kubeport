@@ -23,6 +23,7 @@
   "section_break_ca",
   "ca_certificate",
   "section_break_actions",
+  "backup_storage_class",
   "test_connection",
   "section_break_discovery",
   "refresh_discovery",
@@ -151,6 +152,12 @@
    "fieldname": "section_break_actions",
    "fieldtype": "Section Break",
    "label": "Actions"
+  },
+  {
+   "description": "Optional Kubernetes StorageClass for namespace-local kubeport-backups PVCs. Leave blank to use the namespace default.",
+   "fieldname": "backup_storage_class",
+   "fieldtype": "Data",
+   "label": "Backup Storage Class"
   },
   {
    "button_color": "Primary",

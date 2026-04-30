@@ -29,9 +29,12 @@
   "section_break_actions",
   "create_site_btn",
   "migrate_site_btn",
+  "backup_site_btn",
   "view_job_logs_btn",
   "cancel_site_btn",
-  "delete_site_btn"
+  "delete_site_btn",
+  "section_break_backups",
+  "backups_html"
  ],
  "fields": [
   {
@@ -184,6 +187,11 @@
    "label": "Migrate Site"
   },
   {
+   "fieldname": "backup_site_btn",
+   "fieldtype": "Button",
+   "label": "Backup Now"
+  },
+  {
    "fieldname": "view_job_logs_btn",
    "fieldtype": "Button",
    "label": "View Job Logs"
@@ -198,6 +206,16 @@
    "fieldname": "delete_site_btn",
    "fieldtype": "Button",
    "label": "Delete Site"
+  },
+  {
+   "fieldname": "section_break_backups",
+   "fieldtype": "Section Break",
+   "label": "Backups"
+  },
+  {
+   "fieldname": "backups_html",
+   "fieldtype": "HTML",
+   "label": "Backups"
   }
  ],
  "grid_page_length": 50,

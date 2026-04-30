@@ -7,8 +7,10 @@ from unittest.mock import MagicMock, call, patch
 from frappe.tests import UnitTestCase
 
 from kubeport.tasks.reconciliation import (
+	_job_belongs_to_backup,
 	_finalize_site_status,
 	_job_belongs_to_site,
+	_reconcile_frappe_site_backups,
 	_reconcile_frappe_sites,
 	_reconcile_helm_releases,
 	_reconcile_service_bundles,
@@ -22,6 +24,7 @@ from kubeport.utils.release_health import ResourceHealth
 class UnitTestReconciliation(UnitTestCase):
 	@patch("kubeport.tasks.reconciliation._sweep_orphan_site_jobs")
 	@patch("kubeport.tasks.reconciliation._reconcile_frappe_sites")
+	@patch("kubeport.tasks.reconciliation._reconcile_frappe_site_backups")
 	@patch("kubeport.tasks.reconciliation._reconcile_service_bundles")
 	@patch("kubeport.tasks.reconciliation._reconcile_stale_helm_operations")
 	@patch("kubeport.tasks.reconciliation._reconcile_helm_releases")
@@ -30,6 +33,7 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_reconcile_helm_releases,
 		mock_reconcile_stale_helm_operations,
 		mock_reconcile_service_bundles,
+		mock_reconcile_frappe_site_backups,
 		mock_reconcile_frappe_sites,
 		mock_sweep_orphan_site_jobs,
 	):
@@ -38,6 +42,7 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_reconcile_helm_releases.assert_called_once_with()
 		mock_reconcile_stale_helm_operations.assert_called_once_with()
 		mock_reconcile_service_bundles.assert_called_once_with()
+		mock_reconcile_frappe_site_backups.assert_called_once_with()
 		mock_reconcile_frappe_sites.assert_called_once_with()
 		mock_sweep_orphan_site_jobs.assert_called_once_with()
 
@@ -696,17 +701,158 @@ class UnitTestJobBelongsToSite(UnitTestCase):
 		self.assertFalse(_job_belongs_to_site(job, site))
 
 
+class UnitTestJobBelongsToBackup(UnitTestCase):
+	def test_returns_true_when_backup_labels_match(self):
+		backup = SimpleNamespace(name="demo.example.com::demo-20260430120000")
+		job = SimpleNamespace(
+			metadata=SimpleNamespace(labels={
+				"app.kubernetes.io/managed-by": "kubeport",
+				"kubeport.io/frappe-site-backup": "demo.example.com-demo-20260430120000",
+			}),
+		)
+		self.assertTrue(_job_belongs_to_backup(job, backup))
+
+	def test_returns_false_when_backup_label_missing(self):
+		backup = SimpleNamespace(name="demo.example.com::demo-20260430120000")
+		job = SimpleNamespace(
+			metadata=SimpleNamespace(labels={
+				"app.kubernetes.io/managed-by": "kubeport",
+				"kubeport.io/frappe-site": "rel-a-demo.example.com",
+			}),
+		)
+		self.assertFalse(_job_belongs_to_backup(job, backup))
+
+
+class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
+	def _backup(self, **overrides) -> SimpleNamespace:
+		defaults = {
+			"name": "demo.example.com::demo-20260430120000",
+			"frappe_site": "rel-a/demo.example.com",
+			"cluster": "cluster-a",
+			"namespace": "ns",
+			"status": "In Progress",
+			"site_name": "demo.example.com",
+			"source_bench_release": "rel-a",
+			"operation_job_name": "ks-demo-abcdef123456",
+			"operation_job_token": "token-1",
+			"operation_token": "token-1",
+			"storage_path": "/mnt/kubeport-backups/cluster-a/ns/demo/demo.tar.gz",
+			"size_bytes": 0,
+		}
+		defaults.update(overrides)
+		return SimpleNamespace(**defaults)
+
+	def _job(self, succeeded: int = 0, failed: int = 0) -> SimpleNamespace:
+		return SimpleNamespace(
+			metadata=SimpleNamespace(name="ks-demo-abcdef123456", labels={}),
+			status=SimpleNamespace(succeeded=succeeded, failed=failed),
+		)
+
+	@patch("kubeport.tasks.reconciliation._extract_backup_success_metadata")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_backup_success_marks_backup_available_and_parent_active(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_metadata,
+	):
+		mock_get_all.return_value = [self._backup()]
+		mock_metadata.return_value = {"size_bytes": 42, "bench_archive_name": "db.sql.gz"}
+		mock_db_get_value.side_effect = [
+			{"operation_token": "token-1", "status": "In Progress"},
+			{"operation_token": "token-1", "status": "In Progress"},
+		]
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
+			_reconcile_frappe_site_backups()
+
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo.example.com",
+			{"status": "Active", "status_detail": ""},
+		)
+		backup_write = mock_db_set_value.call_args_list[0].args
+		self.assertEqual(backup_write[0:2], ("Frappe Site Backup", "demo.example.com::demo-20260430120000"))
+		self.assertEqual(backup_write[2]["status"], "Available")
+		self.assertEqual(backup_write[2]["size_bytes"], 42)
+		mock_publish.assert_called()
+
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_restore_false_negative_uses_functional_probe(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_probe_state,
+	):
+		mock_get_all.return_value = [self._backup(status="Restoring")]
+		mock_db_get_value.side_effect = [
+			{"operation_token": "token-1", "status": "Restoring"},
+			{"operation_token": "token-1", "status": "Migrating"},
+		]
+		mock_probe_state.return_value = "exists"
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
+			_reconcile_frappe_site_backups()
+
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo.example.com",
+			{"status": "Active", "status_detail": ""},
+		)
+
+
 class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 	def _job(self, name: str) -> SimpleNamespace:
-		return SimpleNamespace(metadata=SimpleNamespace(name=name))
+		return SimpleNamespace(metadata=SimpleNamespace(
+			name=name,
+			labels={
+				"app.kubernetes.io/managed-by": "kubeport",
+				"kubeport.io/frappe-site": "rel-a-demo",
+			},
+		))
 
 	def _job_with_age(self, name: str, age_seconds: int) -> SimpleNamespace:
 		from datetime import datetime, timedelta, timezone
 
 		created = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
 		return SimpleNamespace(
-			metadata=SimpleNamespace(name=name, creation_timestamp=created),
+			metadata=SimpleNamespace(
+				name=name,
+				creation_timestamp=created,
+				labels={
+					"app.kubernetes.io/managed-by": "kubeport",
+					"kubeport.io/frappe-site": "rel-a-demo",
+				},
+			),
 		)
+
+	def _backup_job(self, name: str) -> SimpleNamespace:
+		return SimpleNamespace(metadata=SimpleNamespace(
+			name=name,
+			labels={
+				"app.kubernetes.io/managed-by": "kubeport",
+				"kubeport.io/frappe-site-backup": "demo.example.com-demo-20260430120000",
+			},
+		))
 
 	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
 	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
@@ -740,6 +886,41 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 		mock_delete_job.assert_called_once()
 		_api, name, namespace = mock_delete_job.call_args.args
 		self.assertEqual(name, "ks-demo-orphanabcd1234")
+		self.assertEqual(namespace, "ns")
+
+	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_sweeps_backup_labeled_orphan_jobs(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_delete_job,
+	):
+		mock_get_all.side_effect = [
+			[],
+			[
+				SimpleNamespace(
+					name="demo.example.com::demo-20260430120000",
+					cluster="cluster-a",
+					namespace="ns",
+					operation_job_name="ks-backup-known1234",
+				),
+			],
+		]
+		mock_get_api_client.return_value = MagicMock()
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
+			batch = mock_batch_api.return_value
+			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
+				self._backup_job("ks-backup-known1234"),
+				self._backup_job("ks-backup-orphan1234"),
+			])
+			_sweep_orphan_site_jobs()
+
+		mock_delete_job.assert_called_once()
+		_api, name, namespace = mock_delete_job.call_args.args
+		self.assertEqual(name, "ks-backup-orphan1234")
 		self.assertEqual(namespace, "ns")
 
 	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")

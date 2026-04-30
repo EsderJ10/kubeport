@@ -19,6 +19,8 @@ import secrets
 import frappe
 from frappe.model.document import Document
 
+from kubeport.kubeport.doctype.frappe_site_backup.frappe_site_backup import make_backup_name
+
 # Frappe app names are python module names: lowercase, start with a letter,
 # only letters/digits/underscore. We also allow ``-`` because a few published
 # apps on PyPI use it. No other characters are permitted — ``install_apps`` is
@@ -240,6 +242,130 @@ class FrappeSite(Document):
 			alert=True,
 			indicator="blue",
 		)
+
+	@frappe.whitelist()
+	def backup_site(self) -> dict:
+		"""Queue a backup Job for this Active site."""
+		if self.status != "Active":
+			frappe.throw(
+				f"Backup is only available for Active sites (current status: '{self.status}')."
+			)
+		if self._has_in_flight_backup():
+			frappe.throw("A backup or restore operation is already in progress for this site.")
+
+		release = frappe.get_doc("Helm Release", self.bench_release)
+		operation_token = secrets.token_hex(16)
+		backup_doc = frappe.get_doc({
+			"doctype": "Frappe Site Backup",
+			"frappe_site": self.name,
+			"site_name": self.site_name,
+			"backup_name": make_backup_name(self.site_name),
+			"source_bench_release": self.bench_release,
+			"source_release_name": release.release_name,
+			"cluster": self.cluster or release.cluster,
+			"namespace": self.namespace or release.namespace or "default",
+			"status": "Pending",
+			"storage_backend": "pvc",
+			"operation_token": operation_token,
+			"triggered_by": frappe.session.user,
+		})
+		backup_doc.insert(ignore_permissions=True)
+
+		self.db_set("status", "In Progress")
+		self.db_set("status_detail", "")
+		self.db_set("operation_token", operation_token)
+		self.db_set("operation_job_token", "")
+		self.db_set("operation_job_name", "")
+		frappe.enqueue(
+			"kubeport.tasks.site_tasks.backup_site_task",
+			site_docname=self.name,
+			backup_docname=backup_doc.name,
+			operation_token=operation_token,
+			queue="long",
+			enqueue_after_commit=True,
+		)
+		frappe.msgprint(
+			f"Backup for '{self.site_name}' has been queued.",
+			alert=True,
+			indicator="blue",
+		)
+		return {"backup_docname": backup_doc.name}
+
+	@frappe.whitelist()
+	def restore_site(self, backup_docname: str, confirm_destructive: bool = False) -> dict:
+		"""Queue a restore Job from an Available backup."""
+		if isinstance(confirm_destructive, str):
+			confirm_destructive = confirm_destructive.lower() in ("1", "true", "yes")
+		if not confirm_destructive:
+			frappe.throw(
+				"Restore overwrites the current site database and files. Confirm explicitly to proceed.",
+				title="Destructive restore required",
+			)
+		if self.status != "Active":
+			frappe.throw(
+				f"Restore is only available for Active sites (current status: '{self.status}')."
+			)
+		if self._has_in_flight_backup():
+			frappe.throw("A backup or restore operation is already in progress for this site.")
+
+		backup = frappe.get_doc("Frappe Site Backup", backup_docname)
+		if backup.status != "Available":
+			frappe.throw(f"Backup '{backup_docname}' is not Available.")
+		if backup.storage_backend != "pvc" or not backup.storage_path:
+			frappe.throw("Backup has no restorable PVC archive path.")
+		if backup.cluster != self.cluster:
+			frappe.throw("Backup cluster does not match this site.")
+		if (backup.namespace or "default") != (self.namespace or "default"):
+			frappe.throw("Backup namespace does not match this site.")
+		if backup.site_name != self.site_name:
+			frappe.throw("Backup site name does not match this site.")
+
+		operation_token = secrets.token_hex(16)
+		self.db_set("status", "Migrating")
+		self.db_set("status_detail", "")
+		self.db_set("operation_token", operation_token)
+		self.db_set("operation_job_token", "")
+		self.db_set("operation_job_name", "")
+		backup.db_set("status", "Restoring")
+		backup.db_set("status_detail", "")
+		backup.db_set("operation_token", operation_token)
+		backup.db_set("operation_job_token", "")
+		backup.db_set("operation_job_name", "")
+		backup.db_set("operation_started_at", frappe.utils.now_datetime())
+		frappe.enqueue(
+			"kubeport.tasks.site_tasks.restore_site_task",
+			site_docname=self.name,
+			backup_docname=backup.name,
+			operation_token=operation_token,
+			queue="long",
+			enqueue_after_commit=True,
+		)
+		frappe.msgprint(
+			f"Restore for '{self.site_name}' has been queued.",
+			alert=True,
+			indicator="blue",
+		)
+		return {"backup_docname": backup.name}
+
+	def _has_in_flight_backup(self) -> bool:
+		status_filter = ["in", ["Pending", "In Progress", "Restoring"]]
+		if frappe.db.exists(
+			"Frappe Site Backup",
+			{
+				"frappe_site": self.name,
+				"status": status_filter,
+			},
+		):
+			return True
+		return bool(frappe.db.exists(
+			"Frappe Site Backup",
+			{
+				"cluster": self.cluster,
+				"namespace": self.namespace or "default",
+				"site_name": self.site_name,
+				"status": status_filter,
+			},
+		))
 
 	@frappe.whitelist()
 	def cancel_site(self, confirm_destructive: bool = False):
