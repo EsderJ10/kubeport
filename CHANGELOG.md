@@ -6,6 +6,56 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-04-30 — Frappe Site backup and restore lifecycle
+
+### Context
+
+`Frappe Site` supported create, drop, and migrate, but `drop-site --no-backup --force` made a mistaken
+delete irreversible from inside Kubeport. Operators needed a first-class backup/restore path that preserved
+the desired-vs-observed split and kept cluster mutations out of the web thread.
+
+### Decision
+
+- **Standalone backup metadata.** Added `Frappe Site Backup` as a normal DocType, not a child table, so
+  `Available` backup metadata can outlive the source `Frappe Site` row.
+- **PVC-backed storage for this cycle.** Backup Jobs create archives on a namespace-local RWX
+  `kubeport-backups` PVC. `Kubernetes Cluster.backup_storage_class` can override the storage class; blank
+  uses the namespace default.
+- **Async backup/restore operations.** `backup_site` and `restore_site` rotate the parent site's
+  `operation_token`, write backup-row operation metadata, and enqueue long-queue Jobs through the shared
+  site operation scaffolding. Restore requires destructive confirmation and reuses the `Migrating` parent
+  state.
+- **Reconciliation owns final state.** Backup rows become `Available` or `Failed` from Job status and
+  archive metadata. Restore completion uses the same functional bench probe as migrate so a false-negative
+  Job exit can still recover to `Active`.
+- **Orphan sweep recognizes backup Jobs.** The sweep now accounts for both `Frappe Site` and
+  `Frappe Site Backup` operation Job names and labels.
+
+### Rejected alternatives
+
+- **Store archives in MariaDB.** Large binary blobs in the desired-state database would blur metadata and
+  storage responsibilities.
+- **Object storage first.** S3/GCS/Azure support needs credentials, retention, and cross-cluster transfer
+  policy; PVC storage is enough to close the immediate no-data-loss gap.
+- **Attach backups as a child table.** Child rows would disappear with the parent site row, undermining
+  recovery from mistaken deletion.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/frappe_site_backup/`: new DocType, controller guards, form script, and tests.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: added `backup_site()` and `restore_site(...)`.
+- `kubeport/tasks/site_tasks.py`: added backup/restore commands, backup PVC ensure/mount logic, archive
+  delete best effort task, and backup-specific Job labels.
+- `kubeport/tasks/reconciliation.py`: added backup/restore reconciliation and extended orphan sweep.
+- `kubeport/api/site.py` and `frappe_site.js`: added backup listing, restore action, and backup/restore logs.
+
+### Known follow-ups
+
+Scheduled backups, retention policy, object-store backends, encryption, cross-cluster restore, and
+restore-to-different-site-name remain deferred.
+
+---
+
 ## 2026-04-30 — Helm Release lifecycle: rollback, uninstall, and manifest-based health
 
 ### Context

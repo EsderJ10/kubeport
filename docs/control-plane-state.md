@@ -54,12 +54,14 @@ The current milestone is **robustness** — making discovery, background executi
 ### Frappe Site Provisioning
 
 - `Frappe Site` DocType links to a Helm Release (the target bench).
-- Background jobs run all three lifecycle operations (`bench new-site`, `bench drop-site`, `bench migrate`) by submitting a Kubernetes Job whose pod template is cloned from a live bench workload pod (image, sites PVC mount, env, pod-level fields). A single `_build_op_job_manifest` builder is reused across operations; only the bench command and per-op env differ.
-- All three lifecycle operations run through a single `_run_site_op` orchestrator: per-op behavior is supplied by a small `SiteOpConfig` dataclass plus plain callables (`build_command`, `build_env`, `build_creds_secret`). This is the single source of truth for the apply pipeline, post-apply token re-check, and exception cleanup.
+- Background jobs run site lifecycle operations (`bench new-site`, `bench drop-site`, `bench migrate`, `bench backup`, `bench restore`) by submitting a Kubernetes Job whose pod template is cloned from a live bench workload pod (image, sites PVC mount, env, pod-level fields). A single `_build_op_job_manifest` builder is reused across operations; only the bench command and per-op env differ.
+- Site lifecycle operations run through a single `_run_site_op` orchestrator: per-op behavior is supplied by a small `SiteOpConfig` dataclass plus plain callables (`build_command`, `build_env`, `build_creds_secret`). This is the single source of truth for the apply pipeline, post-apply token re-check, and exception cleanup.
 - Reconciliation verifies actual site existence on the bench (via exec-based discovery checking for `site_config.json` and `bench list-apps`) rather than trusting Job exit codes — avoids false negatives. The probe is three-state (`exists` / `missing` / `unknown`); transient bench-exec failures return `unknown` and defer the status transition to the next tick instead of marking the site `Failed`.
 - **Lifecycle states**: `Draft → In Progress → Active | Failed`, plus `Active → Migrating → Active | Failed` and `Active|Failed → Deleting → [doc deleted] | Failed`. Cancellation rotates the operation token, marks the row `Failed`, and best-effort deletes the Job. Cancelling `Migrating` is confirmation-gated because killing `bench migrate` can leave MariaDB schema changes half-applied.
 - **Deletion (`bench drop-site`)** runs with `--no-backup --force`. On a confirmed-missing probe, reconciliation removes the `Frappe Site` row itself via `frappe.delete_doc`. On a still-present probe (drop-site Job ran but the bench still has the site), the row lands in `Failed` with the Job logs in `status_detail` so the operator can retry.
 - **Migration (`bench migrate`)** does not need credentials — bench reads them from `site_config.json`. Reconciliation runs the same functional probe used for creation; if the Job exit code is non-zero but the site is still functional (false negative), the row recovers to `Active`.
+- **Backup/restore** uses standalone `Frappe Site Backup` rows. Backup Jobs run `bench backup --with-files`, package the generated files into a tar archive, and store it on a namespace-local `kubeport-backups` RWX PVC. Restore Jobs extract the archive and run `bench restore --force`; reconciliation treats a functional bench probe as success even if the restore Job exits non-zero.
+- Backup archive lifecycle is independent of the source site's PVC and row lifecycle. Available backup rows can outlive the original `Frappe Site` row and keep the metadata needed for recovery.
 - **Credentials flow through Kubernetes Secrets, never as plaintext env vars.** Create-site builds a `{job_name}-creds` Secret with `ADMIN_PASSWORD` (and `DB_ROOT_PASSWORD` when the user chose the plaintext field). Drop-site builds the same Secret shape but only with `DB_ROOT_PASSWORD` (no admin involved). Migrate needs no Secret at all. All Secrets are owner-referenced to their Job so they are garbage-collected alongside the Job's TTL cleanup. The Job reads values via `secretKeyRef`.
 - Only MariaDB is supported as a database backend. The `db_type` field is fixed to `mariadb`; postgres plumbing has been intentionally removed — there is no forward-compatibility shim and no UI path to select it.
 - Supports both direct database root password and Kubernetes Secret references.
@@ -68,7 +70,7 @@ The current milestone is **robustness** — making discovery, background executi
 - On Job TTL expiration before reconciliation reads the final status, reconciliation falls back to the same bench ground-truth probe used for the Job-failed branch, transitioning the row appropriately or deferring on `unknown`.
 - Every operation Job carries `activeDeadlineSeconds` (30 min default) so a pod stuck in `ImagePullBackOff` or unable to reach the DB eventually flips to `failed` instead of leaving the row in an in-flight state forever.
 - Reconciliation validates each Job's `kubeport.io/frappe-site` label before trusting its status, defending against hash collisions and stale `operation_job_name` values.
-- **Orphan-Job sweep**: each reconciliation tick lists Jobs labeled `app.kubernetes.io/managed-by=kubeport,kubeport.io/frappe-site` in every cluster/namespace pair that has any `Frappe Site` row and deletes those not referenced by any row's `operation_job_name`. Jobs younger than one reconciliation tick are skipped so the sweep cannot race a worker that has applied a Job but has not recorded it yet. The sweep is operation-agnostic — it picks up orphaned create, delete, and migrate Jobs equally.
+- **Orphan-Job sweep**: each reconciliation tick lists Kubeport-managed Jobs in every cluster/namespace pair that has any `Frappe Site` or `Frappe Site Backup` row and deletes site/backup Jobs not referenced by any row's `operation_job_name`. Jobs younger than one reconciliation tick are skipped so the sweep cannot race a worker that has applied a Job but has not recorded it yet. The sweep is operation-agnostic — it picks up orphaned create, delete, migrate, backup, and restore Jobs equally.
 - Site names are validated to hostname-style labels (lowercase alphanumerics plus `.`, `-`, `_`, starting/ending alphanumeric) so they are safe for the `{bench_release}/{site_name}` docname, the K8s Job slug, and the bench environment.
 
 ### Live Discovery
@@ -84,7 +86,7 @@ The current milestone is **robustness** — making discovery, background executi
 - Scheduled every 5 minutes via `hooks.py`.
 - Helm releases: combines `helm status` with workload readiness from `helm get manifest`; recovers `Degraded` rows to `Deployed` when workloads become ready and marks pending/non-deployed Helm states as `Failed`.
 - Service Bundles: resource existence check via K8s API.
-- Frappe Sites: Job status polling with ground-truth site verification.
+- Frappe Sites and Backups: Job status polling with ground-truth site verification for create/delete/migrate/restore and archive metadata verification for backup.
 
 ---
 
@@ -114,6 +116,8 @@ The codebase actively defends against imperfect cluster conditions:
 | Orphan sweep does not race workers | Jobs younger than the reconciliation tick are excluded from the sweep |
 | Job identity is validated | `kubeport.io/frappe-site` label checked before any status write |
 | Active rows cannot be silently orphaned | `on_trash` refuses direct deletion of `Active` Frappe Site rows |
+| Backup metadata survives source deletion | `Frappe Site Backup` is a standalone DocType and stores source cluster/namespace/site metadata |
+| Backup archives are decoupled from site PVCs | Archives land on namespace-local `kubeport-backups` PVCs, not the bench sites PVC |
 | Destructive cancellation is gated | `cancel_site` requires `confirm_destructive=True` for `Migrating`; UI requires typed `CANCEL` |
 | Drop-site exit code is not trusted blindly | Bench probe is the source of truth for "site really gone" |
 | Job failure messages are operation-specific | `_extract_job_failure_detail` receives an `operation_label` so logs clearly name which `bench` command failed (`bench new-site`, `bench drop-site`, `bench migrate`) |
@@ -141,13 +145,13 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Site Lifecycle
 
-- `Frappe Site` covers create, delete, and migrate. Backup/restore is the remaining gap and is intentionally deferred — it requires a separate storage strategy (PVC vs object store), a child DocType for backup runs, and file-upload plumbing for restore.
+- `Frappe Site` covers create, delete, migrate, backup, and restore. Scheduled backups, object-store storage, cross-cluster restore, retention policy, and restore-to-different-site-name remain out of scope.
 - Discovered sites are not automatically linked to `Frappe Site` documents.
 - Postgres-backed benches are not supported. The `db_type` field is locked to `mariadb` and the postgres code paths have been removed.
 
 ### Testing Depth
 
-- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, shared Frappe Site operation orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, direct delete/migrate reconciliation branch behavior, full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession), Helm release lifecycle (install/upgrade/rollback/uninstall token staleness, blocking-site detection, force-uninstall, stale-operation recovery), Helm Repository sync supersession and chart inventory rebuild, and per-kind workload readiness for all eight supported kinds with warning-event attachment.
+- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, shared Frappe Site operation orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, direct delete/migrate reconciliation branch behavior, full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession), site backup/restore guards and Job finalization, Helm release lifecycle (install/upgrade/rollback/uninstall token staleness, blocking-site detection, force-uninstall, stale-operation recovery), Helm Repository sync supersession and chart inventory rebuild, and per-kind workload readiness for all eight supported kinds with warning-event attachment.
 - Weak coverage: broader cross-DocType integration tests.
 
 ### Operator Documentation
@@ -162,7 +166,7 @@ The codebase actively defends against imperfect cluster conditions:
 The remaining work is depth work — the core plumbing is in place:
 
 1. **Broader health modeling**: add application-level health probes and CRD-specific health where those signals have clear semantics.
-2. **Site backup/restore**: design backup storage (PVC vs object store), introduce a `Frappe Site Backup` child DocType for run history, expose download/upload flows.
+2. **Backup depth**: add scheduled backups, retention policy, object-store backends, encryption, cross-cluster restore, and restore-to-different-site-name when the storage model is expanded.
 3. **Testing coverage**: integration tests for repo sync, chart metadata, and cross-DocType workflows.
 4. **Operator documentation**: RBAC requirements, Helm binary packaging, deployment guide, production hardening.
 5. **Wider chart support**: controlled expansion of bench discovery beyond `erpnext`-only chart identification.

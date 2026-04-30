@@ -78,7 +78,8 @@ cd apps/kubeport && pre-commit install
 | `Helm Chart Version` | Individual chart version record | Child table of `Helm Chart`. |
 | `Helm Release` | Desired Helm release state | Identity scoped to `cluster/namespace/release_name`. YAML values validation. Background deploy/uninstall. |
 | `Service Bundle` | Desired raw-manifest state | Validates against supported resource kind allowlist. Per-run operation tokens. Background apply/delete. |
-| `Frappe Site` | Desired Frappe site on a bench | Links to a Helm Release (the bench). Submits K8s Jobs for `bench new-site`. Ground-truth reconciliation. |
+| `Frappe Site` | Desired Frappe site on a bench | Links to a Helm Release (the bench). Submits K8s Jobs for create/delete/migrate/backup/restore. Ground-truth reconciliation. |
+| `Frappe Site Backup` | Site backup archive metadata | Standalone metadata rows for PVC-backed backups. Archives live on namespace-local `kubeport-backups` PVCs and can outlive the source site row. |
 
 ### Scheduled Jobs
 
@@ -96,6 +97,7 @@ These are non-negotiable rules. Every code change must respect them.
 ### 1. Desired State vs. Observed State
 
 - **DO**: Store intent in DocType fields. Query live state from Kubernetes/Helm at read time.
+- **DO**: Store backup metadata in MariaDB, but keep backup archives outside MariaDB on the configured storage backend.
 - **DO NOT**: Persist discovered cluster state into MariaDB. Discovery is read-only.
 
 ### 2. Async-First Execution
@@ -122,6 +124,11 @@ These are non-negotiable rules. Every code change must respect them.
 
 - **DO**: Keep all Kubernetes access scoped to the target cluster document. Build scoped API clients via `get_k8s_api_client(cluster_name)`.
 - **DO NOT**: Use global Kubernetes client configuration or share client state between requests.
+
+### 7. Backup Archive Independence
+
+- **DO**: Treat backup archive lifecycle as independent from the source site's bench PVC and `Frappe Site` row lifecycle.
+- **DO NOT**: Delete or require the source `Frappe Site` row to restore from an `Available` `Frappe Site Backup` whose cluster/namespace/site metadata matches the target site.
 
 ---
 
