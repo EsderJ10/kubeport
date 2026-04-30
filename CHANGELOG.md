@@ -6,6 +6,122 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-04-30 — Helm Release lifecycle: rollback, uninstall, and manifest-based health
+
+### Context
+
+`Helm Release` rows could be deployed and re-deployed, but the post-deploy lifecycle was thin:
+runtime classification was based on `helm status` alone (so a `deployed` release with crash-looping
+pods looked healthy), there was no first-class uninstall path (rows could be deleted in any state,
+silently orphaning cluster resources), no rollback (operators had to `helm rollback` out-of-band and
+then live with the row's desired spec drifting from reality), and no recovery for releases stuck
+mid-operation. The deploy worker also had no concurrency guard against a newer operation
+superseding it mid-call, so a slow `helm upgrade` could write back stale status over a fresh one.
+
+### Decision
+
+- **Manifest-based readiness walk.** `kubeport/utils/release_health.py:walk` parses the rendered
+  output of `helm get manifest`, filters to eight built-in workload kinds (`Deployment`,
+  `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, `Ingress`), and
+  queries each resource's live status. `classify_release_state` combines Helm runtime state with
+  the walker's per-resource readiness: `deployed` + all-ready ⇒ `Deployed`; `deployed` + any
+  unready ⇒ `Degraded`; pending/failed Helm states ⇒ `Failed`. Deploy workers and reconciliation
+  both call the same classifier so health policy lives in one place.
+- **Per-operation tokens for Helm.** `tasks/helm_tasks.py:_release_operation_matches` mirrors the
+  site-task pattern: every whitelisted method rotates `operation_token` before enqueue, and the
+  worker re-checks both token and status before each writeback (entry, post-Helm-call, finalize).
+  If a newer operation has taken over, the worker drops its writeback silently. Same guard in
+  `_set_helm_reconciliation_state` so reconciliation cannot overwrite an in-flight operator action.
+- **Stale-operation recovery at 30 minutes.** `tasks/reconciliation.py:_reconcile_stale_helm_operations`
+  picks up `In Progress` / `Uninstalling` rows older than `_HELM_OPERATION_STALE_SECONDS = 1800`,
+  re-checks live Helm state, and either recovers them (re-classifying via the shared classifier) or
+  routes uninstall through `_reconcile_stale_uninstall` (which treats "release not found" as success
+  and resets the row to `Draft`). Fixed window rather than a worker heartbeat: simpler, no extra
+  state, and matches the 5-minute scheduler cadence well.
+- **Rollback as a background operation.** `helm_release.py:rollback_release` accepts a target
+  revision, validates it, rotates the operation token, and enqueues `helm_tasks.rollback_release`.
+  On success the worker writes back the rolled-back chart version and live values into the row's
+  desired spec — so the row's desired state matches what's actually running, and the next
+  reconciliation tick does not flag drift.
+- **Dependency-aware uninstall with a force path.** Normal `uninstall_release` blocks while any
+  linked `Frappe Site` is in `Active` / `In Progress` / `Deleting` / `Migrating`, or in `Failed`
+  with a Job pointer (the bench may still own state inside the release). The force path requires a
+  typed `UNINSTALL <release_name>` confirmation in the UI and records the override in
+  `helm_status_detail`. Helm `release: not found` errors are treated as success (idempotency).
+- **Direct delete blocked outside `Draft`.** `on_trash` refuses any non-`Draft` row; uninstall is
+  the only cleanup path. Same rationale as the site-lifecycle `on_trash` widening: a `Failed` row
+  may still own cluster resources and silently dropping it from MariaDB orphans them.
+- **Spec-hash drift signal.** `calculate_release_spec_hash` produces a stable hash over chart,
+  chart version, namespace, and values; `validate()` recomputes `desired_spec_hash` on every save
+  and flags `pending_changes` when it diverges from `last_applied_spec_hash`. The applied hash is
+  updated only on successful deploy or rollback, so operators see unsaved intent before the next
+  operation.
+
+### Rejected alternatives
+
+- **Trust `helm status` alone for health.** Cheap, but a `deployed` release with crash-looping pods
+  or unbound PVCs would report green. The whole point of a control plane is to observe ground
+  truth, so the manifest walk is non-negotiable.
+- **Maintain a worker heartbeat instead of a fixed staleness window.** More moving parts (heartbeat
+  table, expiry sweep) for a problem that a 30-minute timestamp comparison already solves. The
+  existing token re-check already handles the "newer op wins" race; staleness is only for genuinely
+  stuck workers.
+- **Walk arbitrary resource kinds via CRD discovery.** Out of scope; per-CRD health has no general
+  semantics. Restricting to the eight built-in kinds keeps the walker predictable and matches what
+  the docs already promise.
+- **Allow uninstall regardless of linked sites.** Risks orphaning a bench's database/files inside
+  the release's PVC. Blocking-by-default + typed force gate gives the operator a deliberate path
+  without making the unsafe path easy.
+- **Persist per-resource readiness rows.** Violates the "observed state is never persisted" rule
+  in `AGENTS.md`. The form drilldown re-queries on demand via `frappe.xcall`.
+- **Auto-uninstall when the row is deleted.** Implicit destructive cluster mutation triggered by a
+  MariaDB delete is exactly what the desired-state-vs-observed-state separation is meant to avoid;
+  uninstall remains an explicit operator action.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/helm_release/helm_release.py`: added `deploy_release`,
+  `uninstall_release` (with `force: bool = False` and blocking-site detection),
+  `rollback_release`, `get_release_health`, `load_defaults`, `get_release_history`;
+  `validate()` computes `desired_spec_hash` and `pending_changes`; `on_trash` blocks non-`Draft`
+  rows; `build_release_docname` scopes identity to cluster/namespace/release; storage validation
+  rejects `local-path` + `ReadWriteMany` combinations.
+- `kubeport/kubeport/doctype/helm_release/helm_release.js`: status indicators, realtime
+  `helm_release_status_update` listener, button-state machine (Install / Upgrade / Retry /
+  Redeploy), force-uninstall typed-confirmation dialog, history/rollback dialog with revision
+  picker, post-deploy health drilldown, namespace + chart-version autocomplete.
+- `kubeport/tasks/helm_tasks.py`: `install_or_upgrade_release`, `rollback_release`,
+  `uninstall_release` all routed through `_release_operation_matches` with token+status re-checks
+  before each writeback; `_safe_walk` isolates walker errors; `_finalize_uninstall_success` resets
+  the row to `Draft`; `_is_release_not_found_error` classifies idempotent uninstall.
+- `kubeport/tasks/reconciliation.py`: `_reconcile_helm_releases` (Deployed/Degraded healing),
+  `_reconcile_stale_helm_operations` + `_reconcile_stale_uninstall` (30-min staleness window),
+  `_set_helm_reconciliation_state` (token-guarded writeback), `_helm_operation_is_stale` window
+  check.
+- `kubeport/utils/release_health.py`: `walk`, `summarize`, `classify_release_state`,
+  `classify_release_from_cluster`, plus per-kind readiness for the eight built-in kinds and
+  `_attach_warning_events` for last-N event annotation.
+- `kubeport/utils/helm.py`: `install_or_upgrade`, `rollback`, `uninstall`, `status`,
+  `get_manifest`, `get_values`, `history`, `show_chart`, `show_values` — all subprocess wrappers
+  over a per-call temporary kubeconfig.
+- `kubeport/api/discovery.py`: `get_cluster_discovery` annotates each live release with whether a
+  tracking row exists; `adopt_helm_release` creates a desired-state row from a discovered release
+  with chart version + values baselined.
+- Tests added: `test_helm_release.py` (validation, immutability, deploy gate),
+  `test_helm_tasks.py` (token staleness for install/rollback/uninstall, repo sync supersession,
+  chart inventory), `test_release_health.py` (all eight kinds + warning-event attachment),
+  `test_reconciliation.py` (Helm healing + stale-op recovery + uninstall-not-found path),
+  `test_discovery.py` (release annotation + adoption).
+- Documentation: `README.md`, `docs/codebase-summary.md`, and `docs/control-plane-state.md`
+  updated in the same cycle to describe rollback/uninstall/health/reconciliation as shipped.
+
+### Known follow-ups
+
+Helm diff/preview, pod-log and event-history drilldown in the form, application-level HTTP health,
+and CRD-aware health remain out of scope (recorded in `docs/control-plane-state.md` Open Gaps).
+
+---
+
 ## 2026-04-27 — Frappe Site lifecycle: pre-merge hardening
 
 ### Context

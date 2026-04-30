@@ -33,7 +33,14 @@ The current milestone is **robustness** — making discovery, background executi
 - Desired release state scoped to `cluster/namespace/release_name`.
 - Idempotent deploy via `helm upgrade --install` in background jobs.
 - Uninstall via `helm uninstall` in background jobs.
-- Workers re-check document status before acting (stale-job guard).
+- Release rows track desired spec hash vs. last-applied spec hash so operators can see saved pending changes before the next install/upgrade.
+- Per-run operation tokens and status re-checks prevent stale deploy/uninstall workers from writing after a newer operation takes over.
+- In-flight Helm operations record operation type and start time. Reconciliation recovers stale `In Progress` / `Uninstalling` rows after 30 minutes by checking live Helm status and readiness.
+- Direct row deletion is allowed only from `Draft`; `Failed` rows are treated as potentially resource-owning and must be uninstalled first. If Helm reports the release is already gone during uninstall, Kubeport treats cleanup as successful and returns the row to `Draft`.
+- Uninstall is dependency-aware: linked `Frappe Site` rows in active/in-flight states block normal uninstall, with a typed force-uninstall path for explicit operator override.
+- Post-deploy and reconciliation health combine Helm runtime state with a rendered-manifest readiness walk (`Deployment`, `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, `Ingress`). `deployed` plus all checked resources ready becomes `Deployed`; `deployed` plus unready resources or readiness probe failure becomes `Degraded`; pending/non-deployed Helm states become `Failed`.
+- The Helm Release form exposes workload-readiness drilldown as read-only observed state. Per-resource rows are not persisted.
+- The Helm Release form exposes live release history and queues rollback as a background operation. A successful rollback updates the desired values/chart version to the selected live revision.
 - Status lifecycle: `Draft` → `In Progress` → `Deployed` / `Degraded` / `Failed` → `Uninstalling` → `Draft`.
 - Realtime events trigger form refresh on status changes.
 
@@ -67,6 +74,7 @@ The current milestone is **robustness** — making discovery, background executi
 ### Live Discovery
 
 - Cluster-scoped, read-only Helm release discovery via `kubeport.api.discovery.get_cluster_discovery`.
+- Explicit adoption of a discovered Helm release via `adopt_helm_release`; discovery annotates whether a release is already tracked but never creates rows without the user's Track action.
 - Release-scoped, read-only Frappe site discovery via pod exec.
 - Stable payload: `{ benches, sites, errors }`.
 - Discovery never persists results to MariaDB.
@@ -74,7 +82,7 @@ The current milestone is **robustness** — making discovery, background executi
 ### Reconciliation
 
 - Scheduled every 5 minutes via `hooks.py`.
-- Helm releases: `helm status` check, marks `Degraded` on non-`deployed` status, recovers to `Deployed` when live state normalizes.
+- Helm releases: combines `helm status` with workload readiness from `helm get manifest`; recovers `Degraded` rows to `Deployed` when workloads become ready and marks pending/non-deployed Helm states as `Failed`.
 - Service Bundles: resource existence check via K8s API.
 - Frappe Sites: Job status polling with ground-truth site verification.
 
@@ -92,6 +100,11 @@ The codebase actively defends against imperfect cluster conditions:
 | Infra pods are not mistaken for workloads | MariaDB, Valkey pods excluded from site discovery |
 | Pending workloads are not misinterpreted | Treated as cluster/runtime issue, not a reason to infer state |
 | Stale workers are stopped | Per-run tokens + status re-checks before acting |
+| Stuck Helm rows can recover | Stale operation reconciliation checks live Helm state after 30 minutes |
+| Failed Helm rows cannot silently orphan resources | Direct delete is blocked outside `Draft`; uninstall is the cleanup path |
+| Bench sites protect their parent release | Normal Helm uninstall is blocked while linked `Frappe Site` rows may still own bench-side state |
+| Helm release health has one policy | Deploy workers and reconciliation share the same runtime/readiness classifier |
+| Storage/network readiness is visible | PVC, Service/endpoints, Ingress, and warning events participate in Helm release health |
 | Pod selection is resilient | Label-first with namespace-scan fallback, ranked by stability |
 | Job exit codes are not trusted blindly | Ground-truth verification via exec-based site existence check |
 | Reconciliation can recover | Documents move from `Degraded` back to `Deployed` when live state normalizes |
@@ -111,20 +124,20 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Discovery and Observability
 
-- Discovery is a UI payload, not a richer observed-state model. No in-app drilldown for pod events, PVC failures, rollout conditions, or per-site health.
+- Discovery is a UI payload, not a richer observed-state model. Helm Release health shows resource readiness, but there is still no full in-app drilldown for pod logs, Kubernetes event history, rollout timelines, or per-site health.
 - Supported bench discovery is intentionally narrow: only official `erpnext` chart releases. Widening to other chart variants requires deliberate design.
 - Discovery data is not linked back to persisted `Helm Release` documents beyond matching names and namespaces.
 
 ### Health Depth
 
-- Helm release health relies mostly on `helm status` output (`deployed` vs. other).
+- Helm release health covers built-in readiness for `Deployment`, `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, and `Ingress`, and surfaces partial per-resource rows in the form.
+- Helm health still does not inspect storage pressure beyond PVC binding, application-level HTTP health, or CRD-specific health.
 - Service Bundle health only checks resource existence.
-- Neither path surfaces richer readiness semantics: pod readiness probes, rollout completion, failed jobs, or resource condition messages.
 
 ### Platform Coverage
 
 - Service Bundle only supports a fixed allowlist of built-in resource kinds (17 kinds). CRDs and arbitrary custom resources are out of scope.
-- No first-class support for higher-level Helm workflows: rollback, diff, preview, release-history inspection.
+- Helm rollback and history are available. Helm diff/preview remains out of scope.
 
 ### Site Lifecycle
 
@@ -134,8 +147,8 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Testing Depth
 
-- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, shared Frappe Site operation orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, direct delete/migrate reconciliation branch behavior, and full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession).
-- Weak coverage: Helm Repository sync integration, Helm Chart metadata flows, broader cross-DocType integration tests.
+- Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, shared Frappe Site operation orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, direct delete/migrate reconciliation branch behavior, full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession), Helm release lifecycle (install/upgrade/rollback/uninstall token staleness, blocking-site detection, force-uninstall, stale-operation recovery), Helm Repository sync supersession and chart inventory rebuild, and per-kind workload readiness for all eight supported kinds with warning-event attachment.
+- Weak coverage: broader cross-DocType integration tests.
 
 ### Operator Documentation
 
@@ -148,7 +161,7 @@ The codebase actively defends against imperfect cluster conditions:
 
 The remaining work is depth work — the core plumbing is in place:
 
-1. **Broader health modeling**: surface pod readiness, rollout conditions, and event data in reconciliation and discovery.
+1. **Broader health modeling**: add application-level health probes and CRD-specific health where those signals have clear semantics.
 2. **Site backup/restore**: design backup storage (PVC vs object store), introduce a `Frappe Site Backup` child DocType for run history, expose download/upload flows.
 3. **Testing coverage**: integration tests for repo sync, chart metadata, and cross-DocType workflows.
 4. **Operator documentation**: RBAC requirements, Helm binary packaging, deployment guide, production hardening.

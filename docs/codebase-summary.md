@@ -88,9 +88,14 @@ Stores desired state for a Helm-managed workload deployment.
 - Identity is scoped to `cluster/namespace/release_name`, matching real Helm release scope.
 - Validates YAML values content.
 - Rejects unsafe `local-path` StorageClass plus `ReadWriteMany` access mode combinations.
-- Queues deploy (`helm upgrade --install`) and uninstall through background jobs.
+- Queues deploy (`helm upgrade --install`), rollback, and uninstall through background jobs.
 - Tracks release lifecycle state (`Draft`, `In Progress`, `Deployed`, `Degraded`, `Failed`, `Uninstalling`).
-- Workers re-check document status before acting, reducing stale duplicate execution.
+- Tracks desired spec hash, last-applied spec hash, last-applied chart version, operation type, and operation start time. `pending_changes` is set when saved desired state differs from the last successful apply.
+- Uses per-run operation tokens plus status re-checks so stale deploy/uninstall workers cannot overwrite a newer operation.
+- Blocks normal uninstall while linked `Frappe Site` rows may still own bench-side state; force uninstall requires typed confirmation.
+- Exposes live Helm history and queues rollback as a long-queue operation. Successful rollback updates the saved desired values/chart version to match the selected live revision.
+- Allows direct row deletion only from `Draft`; `Failed` rows may still own cluster resources and must be cleaned up through uninstall.
+- Classifies release state with the shared workload-readiness policy in `utils/release_health.py`.
 
 ### Service Bundle
 
@@ -162,11 +167,21 @@ Stateless wrapper around the Helm 3 binary.
 - In-Cluster auth yields `None` for the kubeconfig path, allowing Helm to auto-detect pod credentials.
 - Concurrent workers never share kubeconfig state due to per-call temp file isolation.
 
+### `release_health.py`
+
+Read-only observed health for Helm Releases.
+
+- Reads `helm get manifest` to enumerate Helm-owned resources and checks readiness for built-in resource kinds (`Deployment`, `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, `Ingress`).
+- Converts missing/API-error resources into unready rows so the form can show partial results instead of failing the whole health read.
+- Provides the shared classifier used by deploy workers and reconciliation: `deployed` plus all workloads ready is `Deployed`; `deployed` plus unready/probe error is `Degraded`; pending or non-deployed Helm states are `Failed`.
+- Keeps observed per-resource rows ephemeral; only lifecycle/status metadata (`status`, `helm_revision`, short `helm_status_detail`, spec hashes, and operation markers) is persisted on the Helm Release row.
+
 ### `discovery.py`
 
 Read-only cluster and site discovery logic. Contains most of the robustness milestone implementation.
 
 - Release normalization: splits chart name and version, identifies Frappe bench charts.
+- Discovery annotates whether a Helm release is already tracked and exposes explicit adoption; it does not create rows during read-only discovery.
 - Pod selection: label-first lookup with fallback to namespace scan. Workload-only filtering excludes infra pods (mariadb, valkey). Candidate pods are ranked by phase, readiness, and component label.
 - Site listing: exec into a selected pod and enumerate directories containing `site_config.json`.
 
@@ -190,8 +205,9 @@ Helm repository and release operations:
 - `add_and_sync_repo` — register repo with Helm, sync chart inventory
 - `sync_repo_charts` — re-register repo, refresh index, sync charts with per-run token check
 - `sync_all_repos` — daily scheduler entry point, enqueues `sync_repo_charts` for each repo
-- `install_or_upgrade_release` — idempotent `helm upgrade --install` with status re-check before acting
-- `uninstall_release` — `helm uninstall` with stale-job guard
+- `install_or_upgrade_release` — idempotent `helm upgrade --install` with operation-token stale-job guards, shared health classification, and last-applied spec writeback
+- `rollback_release` — `helm rollback` with stale-job guard; successful rollback updates saved desired values/chart version to the selected live revision
+- `uninstall_release` — `helm uninstall` with stale-job guard; Helm "release not found" is treated as successful cleanup and returns the row to `Draft`, clearing last-applied metadata
 
 Chart sync rebuilds full version inventory from `helm search repo --versions`, groups by chart name, deduplicates versions, prunes charts that disappeared upstream, and clears cached default values when the latest version changes.
 
@@ -219,7 +235,7 @@ Frappe site lifecycle operations via Kubernetes Jobs:
 
 Scheduled drift detection running every 5 minutes:
 
-- **Helm Releases**: queries `helm status` for all `Deployed`/`Degraded` releases. Marks `Degraded` when Helm reports non-`deployed` status. Can recover back to `Deployed`.
+- **Helm Releases**: queries `helm status` for all `Deployed`/`Degraded` releases, then applies the shared manifest/readiness classifier. It can recover `Degraded` rows to `Deployed`, flag unready workloads as `Degraded`, and mark pending/non-deployed Helm states as `Failed`. It also recovers stale `In Progress` / `Uninstalling` operations after 30 minutes.
 - **Service Bundles**: checks resource existence via `check_resources_exist`. Marks `Degraded` on missing resources.
 - **Frappe Sites**: polls `BatchV1Api.read_namespaced_job()` for all in-flight rows (`In Progress`, `Deleting`, `Migrating`). Verifies ground truth via exec-based bench probe before marking status transitions. Failure detail messages are operation-specific ("bench new-site failed", "bench drop-site failed", "bench migrate failed"). Falls back to bench probe on Job TTL expiry. Orphan-Job sweep runs on every tick.
 
@@ -230,7 +246,7 @@ Scheduled drift detection running every 5 minutes:
 JavaScript form scripts in DocType folders follow an async-first pattern:
 
 - `Kubernetes Cluster` renders live discovery tables in the form via `frappe.xcall`.
-- `Helm Release` and `Service Bundle` listen for realtime status update events and refresh indicators.
+- `Helm Release` and `Service Bundle` listen for realtime status update events and refresh indicators. Helm Release health loads asynchronously as `{rows, error}` so backend read failures show in the panel without blocking document load.
 - `Frappe Site` displays status indicators, creation triggers, and fetches Job logs asynchronously.
 - Namespace suggestions are fetched live from the selected cluster.
 - Forms never attempt to persist externally discovered state during document fetch.

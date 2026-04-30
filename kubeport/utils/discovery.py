@@ -317,8 +317,8 @@ def _pod_identity(pod: client.V1Pod) -> str:
 	if metadata and getattr(metadata, "uid", None):
 		return str(metadata.uid)
 
-	namespace = str(metadata.namespace if metadata and metadata.namespace else "")
-	name = str(metadata.name if metadata and metadata.name else "")
+	namespace = str(getattr(metadata, "namespace", None) or "")
+	name = str(getattr(metadata, "name", None) or "")
 	return f"{namespace}/{name}"
 
 
