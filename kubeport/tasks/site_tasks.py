@@ -349,8 +349,44 @@ def _prepare_backup_ref_spec(
 
 
 def _ensure_backup_pvc(api_client: client.ApiClient, cluster_name: str, namespace: str) -> None:
+	"""Ensure the namespace-local kubeport-backups PVC exists with the configured spec.
+
+	PVC ``spec.accessModes`` and ``spec.storageClassName`` are immutable after
+	creation — server-side apply with a different value returns 422.  Read the
+	PVC first; if it already exists with a mismatched access mode (the common
+	case after switching ``backup_access_mode`` on the cluster doc), surface a
+	clear error instead of letting the cryptic 422 propagate.
+	"""
+	from kubernetes.client.rest import ApiException
+
 	cluster = frappe.get_doc("Kubernetes Cluster", cluster_name)
-	access_mode = getattr(cluster, "backup_access_mode", None) or "ReadWriteMany"
+	desired_access_mode = getattr(cluster, "backup_access_mode", None) or "ReadWriteMany"
+	desired_storage_class = getattr(cluster, "backup_storage_class", None) or None
+
+	core_v1 = client.CoreV1Api(api_client=api_client)
+	try:
+		existing = core_v1.read_namespaced_persistent_volume_claim(
+			name=BACKUP_PVC_NAME,
+			namespace=namespace,
+			_request_timeout=15,
+		)
+	except ApiException as e:
+		if e.status != 404:
+			raise
+		existing = None
+
+	if existing is not None:
+		existing_modes = list((existing.spec.access_modes if existing.spec else None) or [])
+		if desired_access_mode not in existing_modes:
+			raise RuntimeError(
+				f"PersistentVolumeClaim '{BACKUP_PVC_NAME}' in namespace '{namespace}' "
+				f"already exists with accessModes={existing_modes}, but the cluster's "
+				f"Backup PVC Access Mode is '{desired_access_mode}'.  PVC accessModes "
+				f"are immutable; delete the PVC to recreate it (this discards any "
+				f"backup archives stored on it)."
+			)
+		return
+
 	manifest: dict[str, Any] = {
 		"apiVersion": "v1",
 		"kind": "PersistentVolumeClaim",
@@ -362,12 +398,12 @@ def _ensure_backup_pvc(api_client: client.ApiClient, cluster_name: str, namespac
 			},
 		},
 		"spec": {
-			"accessModes": [access_mode],
+			"accessModes": [desired_access_mode],
 			"resources": {"requests": {"storage": "10Gi"}},
 		},
 	}
-	if getattr(cluster, "backup_storage_class", None):
-		manifest["spec"]["storageClassName"] = cluster.backup_storage_class
+	if desired_storage_class:
+		manifest["spec"]["storageClassName"] = desired_storage_class
 	apply_resource(api_client, manifest, namespace)
 
 

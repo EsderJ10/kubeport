@@ -472,17 +472,24 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertIn("kubeport.io/frappe-site", labels)
 		self.assertIn("app.kubernetes.io/managed-by", labels)
 
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
 	@patch("kubeport.tasks.site_tasks.apply_resource")
 	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
 	def test_prepare_backup_ref_spec_applies_rwx_pvc_and_mounts_it(
 		self,
 		mock_get_doc,
 		mock_apply_resource,
+		mock_core_v1,
 	):
+		from kubernetes.client.rest import ApiException
+
 		api_client = MagicMock()
 		mock_get_doc.return_value = SimpleNamespace(
 			backup_storage_class="fast-rwx",
 			backup_access_mode="ReadWriteMany",
+		)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.side_effect = ApiException(
+			status=404,
 		)
 		ref_spec = {"volumes": [], "volume_mounts": []}
 
@@ -501,17 +508,24 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertEqual(ref_spec["volumes"][0]["persistentVolumeClaim"]["claimName"], BACKUP_PVC_NAME)
 		self.assertEqual(ref_spec["volume_mounts"][0]["mountPath"], BACKUP_MOUNT_PATH)
 
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
 	@patch("kubeport.tasks.site_tasks.apply_resource")
 	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
 	def test_prepare_backup_ref_spec_honours_rwo_access_mode(
 		self,
 		mock_get_doc,
 		mock_apply_resource,
+		mock_core_v1,
 	):
+		from kubernetes.client.rest import ApiException
+
 		api_client = MagicMock()
 		mock_get_doc.return_value = SimpleNamespace(
 			backup_storage_class=None,
 			backup_access_mode="ReadWriteOnce",
+		)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.side_effect = ApiException(
+			status=404,
 		)
 		ref_spec = {"volumes": [], "volume_mounts": []}
 
@@ -527,17 +541,24 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertEqual(manifest["spec"]["accessModes"], ["ReadWriteOnce"])
 		self.assertNotIn("storageClassName", manifest["spec"])
 
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
 	@patch("kubeport.tasks.site_tasks.apply_resource")
 	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
 	def test_prepare_backup_ref_spec_defaults_to_rwx_when_unset(
 		self,
 		mock_get_doc,
 		mock_apply_resource,
+		mock_core_v1,
 	):
+		from kubernetes.client.rest import ApiException
+
 		api_client = MagicMock()
 		mock_get_doc.return_value = SimpleNamespace(
 			backup_storage_class=None,
 			backup_access_mode=None,
+		)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.side_effect = ApiException(
+			status=404,
 		)
 		ref_spec = {"volumes": [], "volume_mounts": []}
 
@@ -551,6 +572,69 @@ class UnitTestJobManifest(UnitTestCase):
 
 		manifest = mock_apply_resource.call_args.args[1]
 		self.assertEqual(manifest["spec"]["accessModes"], ["ReadWriteMany"])
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_skips_apply_when_existing_pvc_matches(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode="ReadWriteOnce",
+		)
+		existing = SimpleNamespace(spec=SimpleNamespace(access_modes=["ReadWriteOnce"]))
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.return_value = existing
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		_prepare_backup_ref_spec(
+			doc=SimpleNamespace(),
+			release=SimpleNamespace(cluster="cluster-a"),
+			namespace="ns",
+			api_client=api_client,
+			ref_spec=ref_spec,
+		)
+
+		mock_apply_resource.assert_not_called()
+		self.assertEqual(ref_spec["volumes"][0]["persistentVolumeClaim"]["claimName"], BACKUP_PVC_NAME)
+		self.assertEqual(ref_spec["volume_mounts"][0]["mountPath"], BACKUP_MOUNT_PATH)
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_raises_on_access_mode_mismatch(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode="ReadWriteOnce",
+		)
+		existing = SimpleNamespace(spec=SimpleNamespace(access_modes=["ReadWriteMany"]))
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.return_value = existing
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		with self.assertRaises(RuntimeError) as cm:
+			_prepare_backup_ref_spec(
+				doc=SimpleNamespace(),
+				release=SimpleNamespace(cluster="cluster-a"),
+				namespace="ns",
+				api_client=api_client,
+				ref_spec=ref_spec,
+			)
+
+		message = str(cm.exception)
+		self.assertIn("immutable", message)
+		self.assertIn("ReadWriteMany", message)
+		self.assertIn("ReadWriteOnce", message)
+		mock_apply_resource.assert_not_called()
 
 
 class UnitTestOperationTokenGuard(UnitTestCase):
