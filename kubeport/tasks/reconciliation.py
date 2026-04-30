@@ -44,9 +44,18 @@ def reconcile_all_releases():
 	_reconcile_helm_releases()
 	_reconcile_stale_helm_operations()
 	_reconcile_service_bundles()
-	_reconcile_frappe_site_backups()
 	_reconcile_frappe_sites()
 	_sweep_orphan_site_jobs()
+
+
+def reconcile_site_backups():
+	"""Periodic task: finalize in-flight Frappe Site Backup and Restore operations.
+
+	Runs every 5 minutes as a separate scheduled job so that blocking K8s probe
+	calls (pod exec, log reads) cannot consume the reconcile_all_releases budget
+	and trigger the RQ 300-second task timeout.
+	"""
+	_reconcile_frappe_site_backups()
 
 
 def _reconcile_helm_releases():

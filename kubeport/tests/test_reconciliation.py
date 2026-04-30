@@ -17,6 +17,7 @@ from kubeport.tasks.reconciliation import (
 	_reconcile_stale_helm_operations,
 	_sweep_orphan_site_jobs,
 	reconcile_all_releases,
+	reconcile_site_backups,
 )
 from kubeport.utils.release_health import ResourceHealth
 
@@ -24,7 +25,6 @@ from kubeport.utils.release_health import ResourceHealth
 class UnitTestReconciliation(UnitTestCase):
 	@patch("kubeport.tasks.reconciliation._sweep_orphan_site_jobs")
 	@patch("kubeport.tasks.reconciliation._reconcile_frappe_sites")
-	@patch("kubeport.tasks.reconciliation._reconcile_frappe_site_backups")
 	@patch("kubeport.tasks.reconciliation._reconcile_service_bundles")
 	@patch("kubeport.tasks.reconciliation._reconcile_stale_helm_operations")
 	@patch("kubeport.tasks.reconciliation._reconcile_helm_releases")
@@ -33,7 +33,6 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_reconcile_helm_releases,
 		mock_reconcile_stale_helm_operations,
 		mock_reconcile_service_bundles,
-		mock_reconcile_frappe_site_backups,
 		mock_reconcile_frappe_sites,
 		mock_sweep_orphan_site_jobs,
 	):
@@ -42,9 +41,17 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_reconcile_helm_releases.assert_called_once_with()
 		mock_reconcile_stale_helm_operations.assert_called_once_with()
 		mock_reconcile_service_bundles.assert_called_once_with()
-		mock_reconcile_frappe_site_backups.assert_called_once_with()
 		mock_reconcile_frappe_sites.assert_called_once_with()
 		mock_sweep_orphan_site_jobs.assert_called_once_with()
+
+	@patch("kubeport.tasks.reconciliation._reconcile_frappe_site_backups")
+	def test_reconcile_site_backups_delegates_to_frappe_site_backups(
+		self,
+		mock_reconcile_frappe_site_backups,
+	):
+		reconcile_site_backups()
+
+		mock_reconcile_frappe_site_backups.assert_called_once_with()
 
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
