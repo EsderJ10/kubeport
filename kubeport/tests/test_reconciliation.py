@@ -15,6 +15,7 @@ from kubeport.tasks.reconciliation import (
 	_reconcile_helm_releases,
 	_reconcile_service_bundles,
 	_reconcile_stale_helm_operations,
+	_summarize_unrunnable_pod,
 	_sweep_orphan_site_jobs,
 	reconcile_all_releases,
 	reconcile_site_backups,
@@ -52,6 +53,89 @@ class UnitTestReconciliation(UnitTestCase):
 		reconcile_site_backups()
 
 		mock_reconcile_frappe_site_backups.assert_called_once_with()
+
+	def test_summarize_unrunnable_pod_returns_terminated_exit_code_with_reason(self):
+		pod = SimpleNamespace(status=SimpleNamespace(
+			container_statuses=[SimpleNamespace(state=SimpleNamespace(
+				terminated=SimpleNamespace(exit_code=137, reason="OOMKilled", message="killed"),
+				waiting=None,
+			))],
+			init_container_statuses=None,
+			conditions=None,
+			phase="Failed",
+			reason="",
+			message="",
+		))
+
+		detail = _summarize_unrunnable_pod(pod)
+
+		self.assertEqual(detail, "Job pod exited with code 137 (OOMKilled): killed")
+
+	def test_summarize_unrunnable_pod_surfaces_waiting_container_reason(self):
+		pod = SimpleNamespace(status=SimpleNamespace(
+			container_statuses=[SimpleNamespace(state=SimpleNamespace(
+				terminated=None,
+				waiting=SimpleNamespace(
+					reason="ContainerCreating",
+					message="unbound PersistentVolumeClaim 'kubeport-backups'",
+				),
+			))],
+			init_container_statuses=None,
+			conditions=None,
+			phase="Pending",
+			reason="",
+			message="",
+		))
+
+		detail = _summarize_unrunnable_pod(pod)
+
+		self.assertEqual(
+			detail,
+			"Job pod stuck in ContainerCreating: unbound PersistentVolumeClaim 'kubeport-backups'",
+		)
+
+	def test_summarize_unrunnable_pod_surfaces_unschedulable_condition(self):
+		pod = SimpleNamespace(status=SimpleNamespace(
+			container_statuses=None,
+			init_container_statuses=None,
+			conditions=[SimpleNamespace(
+				status="False",
+				reason="Unschedulable",
+				message="0/1 nodes are available: 1 pod has unbound immediate PersistentVolumeClaims",
+			)],
+			phase="Pending",
+			reason="",
+			message="",
+		))
+
+		detail = _summarize_unrunnable_pod(pod)
+
+		self.assertEqual(
+			detail,
+			"Job pod could not run (Unschedulable): "
+			"0/1 nodes are available: 1 pod has unbound immediate PersistentVolumeClaims",
+		)
+
+	def test_summarize_unrunnable_pod_falls_back_to_phase_when_no_signals(self):
+		pod = SimpleNamespace(status=SimpleNamespace(
+			container_statuses=None,
+			init_container_statuses=None,
+			conditions=None,
+			phase="Failed",
+			reason="DeadlineExceeded",
+			message="Job was active longer than specified deadline",
+		))
+
+		detail = _summarize_unrunnable_pod(pod)
+
+		self.assertEqual(
+			detail,
+			"Job pod phase=Failed, reason=DeadlineExceeded: "
+			"Job was active longer than specified deadline",
+		)
+
+	def test_summarize_unrunnable_pod_returns_none_when_status_missing(self):
+		self.assertIsNone(_summarize_unrunnable_pod(SimpleNamespace(status=None)))
 
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")

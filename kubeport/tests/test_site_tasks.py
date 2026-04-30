@@ -480,7 +480,10 @@ class UnitTestJobManifest(UnitTestCase):
 		mock_apply_resource,
 	):
 		api_client = MagicMock()
-		mock_get_doc.return_value = SimpleNamespace(backup_storage_class="fast-rwx")
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class="fast-rwx",
+			backup_access_mode="ReadWriteMany",
+		)
 		ref_spec = {"volumes": [], "volume_mounts": []}
 
 		_prepare_backup_ref_spec(
@@ -497,6 +500,57 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertEqual(manifest["spec"]["storageClassName"], "fast-rwx")
 		self.assertEqual(ref_spec["volumes"][0]["persistentVolumeClaim"]["claimName"], BACKUP_PVC_NAME)
 		self.assertEqual(ref_spec["volume_mounts"][0]["mountPath"], BACKUP_MOUNT_PATH)
+
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_honours_rwo_access_mode(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+	):
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode="ReadWriteOnce",
+		)
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		_prepare_backup_ref_spec(
+			doc=SimpleNamespace(),
+			release=SimpleNamespace(cluster="cluster-a"),
+			namespace="ns",
+			api_client=api_client,
+			ref_spec=ref_spec,
+		)
+
+		manifest = mock_apply_resource.call_args.args[1]
+		self.assertEqual(manifest["spec"]["accessModes"], ["ReadWriteOnce"])
+		self.assertNotIn("storageClassName", manifest["spec"])
+
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_defaults_to_rwx_when_unset(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+	):
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode=None,
+		)
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		_prepare_backup_ref_spec(
+			doc=SimpleNamespace(),
+			release=SimpleNamespace(cluster="cluster-a"),
+			namespace="ns",
+			api_client=api_client,
+			ref_spec=ref_spec,
+		)
+
+		manifest = mock_apply_resource.call_args.args[1]
+		self.assertEqual(manifest["spec"]["accessModes"], ["ReadWriteMany"])
 
 
 class UnitTestOperationTokenGuard(UnitTestCase):

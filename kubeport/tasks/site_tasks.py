@@ -350,6 +350,7 @@ def _prepare_backup_ref_spec(
 
 def _ensure_backup_pvc(api_client: client.ApiClient, cluster_name: str, namespace: str) -> None:
 	cluster = frappe.get_doc("Kubernetes Cluster", cluster_name)
+	access_mode = getattr(cluster, "backup_access_mode", None) or "ReadWriteMany"
 	manifest: dict[str, Any] = {
 		"apiVersion": "v1",
 		"kind": "PersistentVolumeClaim",
@@ -361,7 +362,7 @@ def _ensure_backup_pvc(api_client: client.ApiClient, cluster_name: str, namespac
 			},
 		},
 		"spec": {
-			"accessModes": ["ReadWriteMany"],
+			"accessModes": [access_mode],
 			"resources": {"requests": {"storage": "10Gi"}},
 		},
 	}

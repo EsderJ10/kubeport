@@ -1399,18 +1399,78 @@ def _extract_job_failure_detail(
 			except Exception:
 				pass
 
-			# Log unavailable — fall back to exit code from container status
-			status = getattr(pod, "status", None)
-			if status:
-				for cs in (status.container_statuses or []):
-					terminated = getattr(getattr(cs, "state", None), "terminated", None)
-					if terminated:
-						exit_code = getattr(terminated, "exit_code", "unknown")
-						return f"Job pod exited with code {exit_code} and no readable logs."
+			detail = _summarize_unrunnable_pod(pod)
+			if detail:
+				return detail
 	except Exception:
 		pass
 
 	return f"Job '{job_name}' reported failure (could not retrieve pod logs)."
+
+
+def _summarize_unrunnable_pod(pod: Any) -> str | None:
+	"""Build a human-readable failure detail from a pod that produced no logs.
+
+	Pods that fail before bench runs (PVC unbound, image pull error,
+	scheduling failure) leave the container without a Running phase, so
+	``read_namespaced_pod_log`` returns nothing.  Inspect the pod status to
+	surface the actual reason (waiting reason + message, scheduling
+	condition, or pod-level phase/message) instead of the unhelpful
+	"could not retrieve pod logs" fallback.
+	"""
+	status = getattr(pod, "status", None)
+	if not status:
+		return None
+
+	for cs in (status.container_statuses or []):
+		terminated = getattr(getattr(cs, "state", None), "terminated", None)
+		if terminated:
+			exit_code = getattr(terminated, "exit_code", "unknown")
+			reason = getattr(terminated, "reason", "") or ""
+			message = (getattr(terminated, "message", "") or "").strip()
+			base = f"Job pod exited with code {exit_code}"
+			if reason:
+				base = f"{base} ({reason})"
+			if message:
+				return f"{base}: {message}"
+			return f"{base} and no readable logs."
+
+	waiting_statuses = list(status.container_statuses or []) + list(
+		getattr(status, "init_container_statuses", None) or []
+	)
+	for cs in waiting_statuses:
+		waiting = getattr(getattr(cs, "state", None), "waiting", None)
+		if waiting:
+			reason = getattr(waiting, "reason", "") or "Unknown"
+			message = (getattr(waiting, "message", "") or "").strip()
+			base = f"Job pod stuck in {reason}"
+			if message:
+				return f"{base}: {message}"
+			return base
+
+	for cond in (status.conditions or []):
+		if getattr(cond, "status", "") != "False":
+			continue
+		cond_reason = getattr(cond, "reason", "") or ""
+		cond_message = (getattr(cond, "message", "") or "").strip()
+		if cond_reason or cond_message:
+			base = f"Job pod could not run ({cond_reason or 'unknown reason'})"
+			if cond_message:
+				return f"{base}: {cond_message}"
+			return base
+
+	phase = getattr(status, "phase", "") or ""
+	pod_reason = getattr(status, "reason", "") or ""
+	pod_message = (getattr(status, "message", "") or "").strip()
+	if phase or pod_reason or pod_message:
+		base = f"Job pod phase={phase or 'Unknown'}"
+		if pod_reason:
+			base = f"{base}, reason={pod_reason}"
+		if pod_message:
+			return f"{base}: {pod_message}"
+		return base
+
+	return None
 
 
 def _set_helm_reconciliation_state(
