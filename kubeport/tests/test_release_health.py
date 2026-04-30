@@ -441,10 +441,12 @@ class UnitTestReleaseHealth(UnitTestCase):
 
 		results = walk("cluster-a/tfg/bench-a")
 
-		self.assertEqual(len(results), 2)
+		self.assertEqual(len(results), 3)
 		self.assertTrue(results[0].ready)
 		self.assertFalse(results[1].ready)
 		self.assertEqual(results[1].reason, "missing")
+		self.assertFalse(results[2].ready)
+		self.assertEqual(results[2].kind, "Service")
 
 	@patch("kubeport.utils.release_health.client.BatchV1Api")
 	@patch("kubeport.utils.release_health.client.CoreV1Api")
