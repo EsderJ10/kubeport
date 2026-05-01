@@ -35,6 +35,8 @@ from kubeport.utils.discovery import (
 from kubeport.utils.k8s_client import get_k8s_api_client
 from kubeport.utils.k8s_resources import apply_resource
 
+FRAPPE_BENCH_ROOT = "/home/frappe/frappe-bench"
+
 _STATUS_DETAIL_LIMIT = 500
 _JOB_TTL_SECONDS = 7200  # 2 h — enough for reconciliation (5-min cadence) to read result
 # Upper bound on how long a single site-creation Job can run.  Without this the
@@ -404,7 +406,29 @@ def _ensure_backup_pvc(api_client: client.ApiClient, cluster_name: str, namespac
 	}
 	if desired_storage_class:
 		manifest["spec"]["storageClassName"] = desired_storage_class
-	apply_resource(api_client, manifest, namespace)
+
+	try:
+		apply_resource(api_client, manifest, namespace)
+	except ApiException as e:
+		if e.status != 422:
+			raise
+		# 422 can arrive in two cases: (a) the PVC was created between our read and
+		# this apply (rare race), or (b) the cluster's desired accessMode differs from
+		# what was already committed.  Re-read to produce a clear, actionable error.
+		try:
+			race_pvc = core_v1.read_namespaced_persistent_volume_claim(
+				name=BACKUP_PVC_NAME, namespace=namespace, _request_timeout=15
+			)
+			existing_modes = list((race_pvc.spec.access_modes if race_pvc.spec else None) or [])
+		except Exception:
+			existing_modes = ["<unreadable>"]
+		raise RuntimeError(
+			f"PersistentVolumeClaim '{BACKUP_PVC_NAME}' in namespace '{namespace}' "
+			f"already exists with accessModes={existing_modes} and cannot be changed to "
+			f"'{desired_access_mode}' (PVC spec is immutable). To fix: either set the "
+			f"cluster's Backup PVC Access Mode to '{existing_modes[0] if existing_modes else '?'}' "
+			f"or delete the PVC to recreate it (this discards backup archives on it)."
+		) from e
 
 
 def _backup_storage_path(cluster: str, namespace: str, site_name: str, backup_name: str) -> str:
@@ -764,6 +788,7 @@ def _build_op_job_manifest(
 		"args": [container_command],
 		"env": env,
 		"volumeMounts": ref_spec.get("volume_mounts") or [],
+		"workingDir": FRAPPE_BENCH_ROOT,
 	}
 	if ref_spec.get("container_env_from"):
 		container["envFrom"] = ref_spec["container_env_from"]
@@ -819,7 +844,7 @@ def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool
 		"bench",
 		"new-site",
 		'"$SITE_NAME"',
-		"--no-mariadb-socket",
+		"--mariadb-user-host-login-scope='%'",
 		'--db-type="$DB_TYPE"',
 		'--mariadb-root-username="$DB_ROOT_USER"',
 		'--mariadb-root-password="$DB_ROOT_PASSWORD"',

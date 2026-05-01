@@ -103,6 +103,11 @@ class UnitTestSiteHelpers(UnitTestCase):
 		self.assertIn('--install-app="erpnext"', cmd)
 		self.assertIn('--install-app="payments"', cmd)
 
+	def test_bench_new_site_command_uses_mariadb_user_host_login_scope(self):
+		cmd = _bench_new_site_command("s1", [], force=False)
+		self.assertIn("--mariadb-user-host-login-scope='%'", cmd)
+		self.assertNotIn("--no-mariadb-socket", cmd)
+
 
 	def test_build_env_admin_password_always_references_creds_secret(self):
 		env = _build_env(
@@ -635,6 +640,47 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertIn("ReadWriteMany", message)
 		self.assertIn("ReadWriteOnce", message)
 		mock_apply_resource.assert_not_called()
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_ensure_backup_pvc_converts_422_to_runtime_error(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		"""422 from apply_resource (race or pre-existing PVC) becomes a clear RuntimeError."""
+		from kubernetes.client.rest import ApiException
+
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode="ReadWriteMany",
+		)
+		# Simulate: read returns 404 (PVC not found initially)
+		not_found = ApiException(status=404)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.side_effect = [
+			not_found,  # first call in _ensure_backup_pvc
+			SimpleNamespace(spec=SimpleNamespace(access_modes=["ReadWriteOnce"])),  # re-read after 422
+		]
+		# apply_resource raises 422 (PVC was created concurrently with wrong mode)
+		mock_apply_resource.side_effect = ApiException(status=422)
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		with self.assertRaises(RuntimeError) as cm:
+			_prepare_backup_ref_spec(
+				doc=SimpleNamespace(),
+				release=SimpleNamespace(cluster="cluster-a"),
+				namespace="ns",
+				api_client=api_client,
+				ref_spec=ref_spec,
+			)
+
+		message = str(cm.exception)
+		self.assertIn("immutable", message)
+		self.assertIn("ReadWriteOnce", message)
+		self.assertIn("ReadWriteMany", message)
 
 
 class UnitTestOperationTokenGuard(UnitTestCase):
