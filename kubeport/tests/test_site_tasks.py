@@ -1211,8 +1211,9 @@ class UnitTestOnTrashCleanup(UnitTestCase):
 		doc.on_trash = FrappeSite.on_trash.__get__(doc, FrappeSite)
 		return doc
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_enqueues_cancel_for_failed_row_with_job(self, mock_enqueue):
+	def test_on_trash_enqueues_cancel_for_failed_row_with_job(self, mock_enqueue, _mock_cascade):
 		doc = self._doc(status="Failed", operation_job_name="ks-demo-abc123abc123")
 		doc.on_trash()
 		mock_enqueue.assert_called_once()
@@ -1220,32 +1221,54 @@ class UnitTestOnTrashCleanup(UnitTestCase):
 		self.assertEqual(kwargs["job_name"], "ks-demo-abc123abc123")
 		self.assertEqual(kwargs["cluster"], "cluster-a")
 		self.assertEqual(kwargs["namespace"], "ns")
+		# Cancel must run on the long queue — it issues a cluster mutation
+		# (delete_namespaced_job), per the project design rule.
+		self.assertEqual(kwargs["queue"], "long")
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_no_enqueue_for_failed_row_without_job(self, mock_enqueue):
+	def test_on_trash_no_enqueue_for_failed_row_without_job(self, mock_enqueue, _mock_cascade):
 		doc = self._doc(status="Failed", operation_job_name=None)
 		doc.on_trash()
 		mock_enqueue.assert_not_called()
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_still_enqueues_for_in_flight_with_job(self, mock_enqueue):
+	def test_on_trash_still_enqueues_for_in_flight_with_job(self, mock_enqueue, _mock_cascade):
 		# Regression guard: existing in-flight cleanup branch still works.
 		doc = self._doc(status="In Progress", operation_job_name="ks-demo-deadbeef0000")
 		doc.on_trash()
 		mock_enqueue.assert_called_once()
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_no_enqueue_for_draft_row(self, mock_enqueue):
+	def test_on_trash_no_enqueue_for_draft_row(self, mock_enqueue, _mock_cascade):
 		doc = self._doc(status="Draft", operation_job_name=None)
 		doc.on_trash()
 		mock_enqueue.assert_not_called()
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_refuses_migrating_row(self, mock_enqueue):
+	def test_on_trash_refuses_migrating_row(self, mock_enqueue, _mock_cascade):
 		doc = self._doc(status="Migrating", operation_job_name="ks-demo-abc123abc123")
 		with self.assertRaises(frappe.ValidationError):
 			doc.on_trash()
 		mock_enqueue.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_cascades_backup_cancellation(self, _mock_enqueue, mock_cascade):
+		"""Trashing a Frappe Site row must cascade to in-flight backups so
+		they don't sit in Pending forever after the parent disappears."""
+		doc = self._doc(status="Failed", operation_job_name="ks-demo-deadbeef0000")
+		doc.name = "rel-a/demo"
+		doc.on_trash()
+		mock_cascade.assert_called_once()
+		# The reason must reference site deletion so the operator viewing
+		# the orphaned backup understands what happened.
+		_args, kwargs = mock_cascade.call_args
+		self.assertEqual(mock_cascade.call_args.args[0], "rel-a/demo")
+		self.assertIn("deleted", kwargs["reason"].lower())
 
 
 class UnitTestCancelSiteConfirmation(UnitTestCase):
@@ -1264,6 +1287,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		doc.cancel_site = FrappeSite.cancel_site.__get__(doc, FrappeSite)
 		return doc
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
@@ -1274,6 +1298,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_msgprint,
 		mock_publish,
 		mock_session,
+		_mock_cascade,
 	):
 		mock_session.user = "alice@example.com"
 		doc = self._doc(status="Migrating")
@@ -1283,6 +1308,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_msgprint.assert_not_called()
 		mock_publish.assert_not_called()
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
@@ -1293,6 +1319,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_msgprint,
 		mock_publish,
 		mock_session,
+		_mock_cascade,
 	):
 		mock_session.user = "alice@example.com"
 		doc = self._doc(status="Migrating")
@@ -1307,6 +1334,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		self.assertIn("destructive cancel acknowledged", detail_value)
 		self.assertIn("alice@example.com", detail_value)
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
@@ -1317,6 +1345,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_msgprint,
 		mock_publish,
 		mock_session,
+		_mock_cascade,
 	):
 		mock_session.user = "alice@example.com"
 		doc = self._doc(status="In Progress")
@@ -1335,9 +1364,100 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_session,
 	):
 		mock_session.user = "alice@example.com"
-		doc = self._doc(status="Deleting")
-		doc.cancel_site()
+		# We need to also patch the cascade here; this test predates it.
+		with patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site"):
+			doc = self._doc(status="Deleting")
+			doc.cancel_site()
 		mock_enqueue.assert_called_once()
+		# Cancel must run on the long queue per the cluster-mutation rule.
+		_args, kwargs = mock_enqueue.call_args
+		self.assertEqual(kwargs["queue"], "long")
+
+
+class UnitTestCancelInflightBackupsCascade(UnitTestCase):
+	"""When a site is cancelled or trashed, every in-flight backup row
+	linked to it must be force-failed and its operation_token rotated.
+
+	Without this cascade, the backup row stays in Pending / In Progress /
+	Restoring forever (its token is independent of the site's), and
+	``_has_in_flight_backup`` blocks all future backups for that site."""
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.utils.now_datetime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.db.set_value")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.get_all")
+	def test_cascade_fails_each_inflight_backup_row(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_enqueue,
+		mock_publish,
+		mock_now,
+	):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import (
+			_cancel_inflight_backups_for_site,
+		)
+
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="demo::demo-2026",
+				cluster="cluster-a",
+				namespace="ns",
+				operation_job_name="ks-bk-deadbeef",
+			),
+			SimpleNamespace(
+				name="demo::demo-2025",
+				cluster="cluster-a",
+				namespace="ns",
+				operation_job_name="",
+			),
+		]
+
+		_cancel_inflight_backups_for_site("rel-a/demo", reason="Site cancelled.")
+
+		# Both rows get failed.
+		self.assertEqual(mock_set_value.call_count, 2)
+		# Each set_value writes a token + Failed status + detail.
+		for call_args in mock_set_value.call_args_list:
+			fields = call_args.args[2]
+			self.assertEqual(fields["status"], "Failed")
+			self.assertEqual(fields["operation_job_token"], "")
+			self.assertEqual(fields["status_detail"], "Site cancelled.")
+			# operation_token is rotated to a fresh hex value.
+			self.assertTrue(fields["operation_token"])
+			self.assertNotEqual(fields["operation_token"], "")
+		# Only the row with a recorded Job name enqueues a cluster cleanup.
+		mock_enqueue.assert_called_once()
+		_args, kwargs = mock_enqueue.call_args
+		self.assertEqual(kwargs["job_name"], "ks-bk-deadbeef")
+		self.assertEqual(kwargs["queue"], "long")
+		# Realtime events fired for both rows so any open form refreshes.
+		self.assertEqual(mock_publish.call_count, 2)
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.db.set_value")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.get_all")
+	def test_cascade_no_op_when_no_inflight_rows(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_enqueue,
+		mock_publish,
+	):
+		"""No backups in-flight ⇒ no DB writes, no enqueue, no event."""
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import (
+			_cancel_inflight_backups_for_site,
+		)
+
+		mock_get_all.return_value = []
+
+		_cancel_inflight_backups_for_site("rel-a/demo", reason="Site cancelled.")
+
+		mock_set_value.assert_not_called()
+		mock_enqueue.assert_not_called()
+		mock_publish.assert_not_called()
 
 
 class UnitTestBackupRestoreController(UnitTestCase):

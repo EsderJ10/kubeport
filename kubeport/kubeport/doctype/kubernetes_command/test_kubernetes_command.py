@@ -22,6 +22,19 @@ class UnitTestKubernetesCommand(UnitTestCase):
 		defaults.update(overrides)
 		return frappe.get_doc(defaults)
 
+	def _delete_pod_doc(self, **overrides):
+		defaults = {
+			"doctype": "Kubernetes Command",
+			"cluster": "test-cluster",
+			"namespace": "demo",
+			"action": "Delete",
+			"resource_kind": "Pod",
+			"resource_name": "stuck-pod",
+			"confirm_destructive": 1,
+		}
+		defaults.update(overrides)
+		return frappe.get_doc(defaults)
+
 	def test_validate_requires_namespace_for_namespaced_kind(self):
 		doc = self._doc(namespace=None)
 		with self.assertRaises(frappe.ValidationError):
@@ -69,6 +82,35 @@ class UnitTestKubernetesCommand(UnitTestCase):
 		doc.status = "Completed"
 		with self.assertRaises(frappe.ValidationError):
 			doc.execute()
+
+	def test_validate_rejects_delete_for_disallowed_kind(self):
+		"""Delete is restricted to Pod / Job / ConfigMap.  Secret, PVC,
+		Deployment, StatefulSet, Service must be rejected at save time so
+		the dangerous quartet (data loss / outage) cannot be queued via
+		this surface — operators go through the proper controllers."""
+		for kind in ("Secret", "PersistentVolumeClaim", "Deployment", "StatefulSet", "Service"):
+			with self.subTest(kind=kind):
+				doc = self._delete_pod_doc(resource_kind=kind, resource_name="anything")
+				with self.assertRaises(frappe.ValidationError) as ctx:
+					doc.validate()
+				self.assertIn("cannot be deleted via Kubernetes Command", str(ctx.exception))
+
+	def test_validate_allows_delete_for_pod_job_configmap(self):
+		"""Sanity: the allowlisted kinds pass validation when the rest of
+		the form is filled in correctly."""
+		for kind in ("Pod", "Job", "ConfigMap"):
+			with self.subTest(kind=kind):
+				doc = self._delete_pod_doc(resource_kind=kind)
+				doc.validate()  # must not raise
+
+	def test_validate_rejects_delete_without_confirm_destructive(self):
+		"""validate() — not just execute() — must enforce the destructive
+		confirmation so the audit row reflects whether the operator agreed
+		to the risk at save time."""
+		doc = self._delete_pod_doc(confirm_destructive=0)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			doc.validate()
+		self.assertIn("Confirm Destructive", str(ctx.exception))
 
 
 class UnitTestKubernetesCommandTasks(UnitTestCase):
@@ -193,3 +235,102 @@ class UnitTestKubernetesCommandTasks(UnitTestCase):
 			_request_timeout=15,
 			label_selector="app=foo",
 		)
+
+
+class UnitTestKubernetesCommandFinalize(UnitTestCase):
+	"""Covers `_finalize` behaviors that touch the operator-visible audit
+	trail: the truncation marker and the append-only audit log row."""
+
+	def _make_cmd(self, **overrides):
+		defaults = {
+			"name": "KCMD-00050",
+			"cluster": "test-cluster",
+			"namespace": "demo",
+			"action": "List",
+			"resource_kind": "Pod",
+			"resource_name": "",
+			"label_selector": "app=foo",
+			"triggered_by": "Administrator",
+		}
+		defaults.update(overrides)
+		mock = MagicMock()
+		for key, value in defaults.items():
+			setattr(mock, key, value)
+		return mock
+
+	@patch("kubeport.tasks.kubernetes_command_tasks._append_audit_log")
+	def test_finalize_marks_truncated_output_with_marker(self, _mock_audit):
+		"""Output longer than _OUTPUT_LIMIT must be truncated AND carry an
+		explicit marker so the operator knows the body is incomplete."""
+		from kubeport.tasks.kubernetes_command_tasks import _OUTPUT_LIMIT, _finalize
+
+		cmd = self._make_cmd()
+		long_output = "x" * (_OUTPUT_LIMIT + 2000)
+
+		_finalize(cmd, status="Completed", output=long_output)
+
+		written = next(
+			call.args[1] for call in cmd.db_set.call_args_list if call.args[0] == "output"
+		)
+		self.assertLessEqual(len(written), _OUTPUT_LIMIT)
+		self.assertIn("truncated", written)
+		# The marker must report the original length so the operator can
+		# tell how much was dropped.
+		self.assertIn(str(len(long_output)), written)
+
+	@patch("kubeport.tasks.kubernetes_command_tasks._append_audit_log")
+	def test_finalize_does_not_truncate_short_output(self, _mock_audit):
+		"""Outputs under the limit must round-trip unchanged."""
+		from kubeport.tasks.kubernetes_command_tasks import _finalize
+
+		cmd = self._make_cmd()
+		_finalize(cmd, status="Completed", output="hello world")
+
+		written = next(
+			call.args[1] for call in cmd.db_set.call_args_list if call.args[0] == "output"
+		)
+		self.assertEqual(written, "hello world")
+
+	@patch("kubeport.tasks.kubernetes_command_tasks.frappe.get_doc")
+	def test_finalize_writes_audit_log_entry(self, mock_get_doc):
+		"""Every execute (success OR failure) appends an audit log row.
+		Decoupled from the Kubernetes Command itself so the trail survives
+		row deletion."""
+		from kubeport.tasks.kubernetes_command_tasks import _finalize
+
+		audit_doc = MagicMock()
+		mock_get_doc.return_value = audit_doc
+
+		cmd = self._make_cmd(action="Delete", resource_kind="Pod", resource_name="stuck")
+		_finalize(cmd, status="Completed", output="Deleted Pod 'stuck' in namespace 'demo'.")
+
+		mock_get_doc.assert_called_once()
+		audit_payload = mock_get_doc.call_args.args[0]
+		self.assertEqual(audit_payload["doctype"], "Kubernetes Command Audit Log")
+		self.assertEqual(audit_payload["command"], "KCMD-00050")
+		self.assertEqual(audit_payload["action"], "Delete")
+		self.assertEqual(audit_payload["resource_kind"], "Pod")
+		self.assertEqual(audit_payload["outcome"], "Completed")
+		self.assertEqual(audit_payload["cluster"], "test-cluster")
+		audit_doc.insert.assert_called_once_with(ignore_permissions=True)
+
+	@patch("kubeport.tasks.kubernetes_command_tasks.frappe.logger")
+	@patch("kubeport.tasks.kubernetes_command_tasks.frappe.get_doc")
+	def test_finalize_swallows_audit_log_failure(self, mock_get_doc, mock_logger):
+		"""An audit log write failure must NOT propagate — the command
+		itself already finalized; spurious task retries would be worse
+		than a missing audit entry."""
+		from kubeport.tasks.kubernetes_command_tasks import _finalize
+
+		mock_get_doc.side_effect = RuntimeError("audit DB unreachable")
+
+		cmd = self._make_cmd(action="Get", resource_kind="Pod", resource_name="alive")
+		# Should not raise.
+		_finalize(cmd, status="Completed", output="ok")
+
+		# The original doc still got finalized.
+		set_calls = {call.args[0]: call.args[1] for call in cmd.db_set.call_args_list}
+		self.assertEqual(set_calls.get("status"), "Completed")
+		self.assertEqual(set_calls.get("output"), "ok")
+		# And we logged a warning about the audit failure.
+		mock_logger.assert_called_with("kubeport")

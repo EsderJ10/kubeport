@@ -421,9 +421,16 @@ class FrappeSite(Document):
 				cluster=self.cluster,
 				namespace=self.namespace or "default",
 				job_name=job_name,
-				queue="short",
+				queue="long",
 				enqueue_after_commit=True,
 			)
+
+		# Cascade the cancellation to any in-flight backup/restore that was
+		# launched against this site.  Without this, those rows stay stuck in
+		# Pending / In Progress / Restoring with a token that can never match
+		# the rotated site token, so reconciliation skips them and
+		# ``_has_in_flight_backup`` blocks new backups indefinitely.
+		_cancel_inflight_backups_for_site(self.name, reason=f"Site operation cancelled by {user}.")
 
 		frappe.publish_realtime(
 			"frappe_site_status_update",
@@ -469,6 +476,10 @@ class FrappeSite(Document):
 			)
 
 		if not self.operation_job_name:
+			# Even with no site Job to cancel, an in-flight backup or restore
+			# row referencing this site could exist; trash should not leave it
+			# orphaned.
+			_cancel_inflight_backups_for_site(self.name, reason="Source site row was deleted.")
 			return
 
 		self.db_set("operation_token", secrets.token_hex(16))
@@ -477,6 +488,65 @@ class FrappeSite(Document):
 			cluster=self.cluster,
 			namespace=self.namespace or "default",
 			job_name=self.operation_job_name,
-			queue="short",
+			queue="long",
 			enqueue_after_commit=True,
 		)
+		_cancel_inflight_backups_for_site(self.name, reason="Source site row was deleted.")
+
+
+def _cancel_inflight_backups_for_site(site_docname: str, *, reason: str) -> None:
+	"""Fail any in-flight backup or restore rows linked to ``site_docname``.
+
+	Called from ``FrappeSite.cancel_site`` and ``FrappeSite.on_trash`` to
+	keep backup-row state consistent with the parent site's cancellation.
+	The site's ``operation_token`` is already rotated, but each backup row
+	carries an independent ``operation_token`` (set at insert and never
+	rotated by site-level paths), so without this cascade the backup row
+	stays in ``Pending`` / ``In Progress`` / ``Restoring`` forever and
+	``_has_in_flight_backup`` blocks new backups.
+
+	For each affected row we:
+	  1. Rotate ``operation_token`` so any in-flight worker is a no-op.
+	  2. Set ``status = 'Failed'`` with a clear ``status_detail``.
+	  3. Best-effort enqueue ``cancel_site_task`` if a Job is recorded so
+	     the cluster Job and its creds Secret are cleaned up.
+	"""
+	rows = frappe.get_all(
+		"Frappe Site Backup",
+		filters={
+			"frappe_site": site_docname,
+			"status": ("in", ("Pending", "In Progress", "Restoring")),
+		},
+		fields=["name", "cluster", "namespace", "operation_job_name"],
+	)
+	if not rows:
+		return
+
+	for row in rows:
+		new_token = secrets.token_hex(16)
+		frappe.db.set_value(
+			"Frappe Site Backup",
+			row.name,
+			{
+				"operation_token": new_token,
+				"operation_job_token": "",
+				"status": "Failed",
+				"status_detail": reason[:500],
+				"completed_at": frappe.utils.now_datetime(),
+			},
+		)
+		frappe.publish_realtime(
+			"frappe_site_backup_status_update",
+			{"site_docname": site_docname, "backup_docname": row.name, "status": "Failed"},
+			doctype="Frappe Site Backup",
+			docname=row.name,
+		)
+		if row.operation_job_name and row.cluster:
+			frappe.enqueue(
+				"kubeport.tasks.site_tasks.cancel_site_task",
+				cluster=row.cluster,
+				namespace=row.namespace or "default",
+				job_name=row.operation_job_name,
+				queue="long",
+				enqueue_after_commit=True,
+			)

@@ -6,6 +6,93 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-04 — Backup ground truth, cancel cascade, and Kubernetes Command hardening
+
+### Context
+
+The `feat/frappe-site-backup` branch shipped backup/restore but a primary-source audit surfaced four
+themes worth fixing before merge: (1) backup rows whose Job aged out of the cluster were silently
+marked `Failed` even when the archive existed on the PVC, (2) cancelling a site mid-backup left the
+backup row stuck in `Pending` forever because only the site's `operation_token` was rotated, (3) the
+cluster-mutation `cancel_site_task` was queued on `short` instead of `long`, violating the design
+rule, and (4) the new `Kubernetes Command` doctype exposed Delete on Secret / PVC / Deployment /
+StatefulSet — a privilege surface broader than the diagnostic use cases warrant, with no audit log
+distinct from the row itself.
+
+### Decision
+
+- **PVC-side ground-truth probe for backup completion.** Added
+  `_probe_backup_archive_on_pvc(backup, api_client, core_v1)` in `kubeport/tasks/reconciliation.py`.
+  It submits a short-lived `busybox` Pod with the `kubeport-backups` PVC mounted, reads the
+  `<archive>.size` sidecar that the bench backup script already writes only on success, and returns
+  `(exists, size_bytes)` / `(missing, None)` / `(unknown, None)` mirroring `_probe_site_state`.
+  `_reconcile_site_backup` consults the probe in both branches: gone-Job (replaces the broken
+  `size_bytes` heuristic) and post-success (defends against the narrow window where `tar` exits zero
+  but the inode is lost before reconciliation reads it).
+- **Cancel-cascade to in-flight backups.** `FrappeSite.cancel_site` and `FrappeSite.on_trash` now
+  call `_cancel_inflight_backups_for_site(self.name, ...)`, which rotates `operation_token`, sets
+  `status = "Failed"` on every backup row linked to the site whose status is `Pending` /
+  `In Progress` / `Restoring`, publishes a realtime event, and enqueues `cancel_site_task` for any
+  recorded Job. This is what keeps the backup row from being orphaned by site-level cancellation.
+- **Long queue for cluster mutations.** `cancel_site_task` is enqueued on `queue="long"` from both
+  call sites. Short queue had aggressive timeouts and minimal retries; long queue matches every
+  other cluster-mutating background task.
+- **Failed-backup archive cleanup.** `FrappeSiteBackup.on_trash` now enqueues archive cleanup
+  whenever `storage_path` is set, regardless of status. A backup that partial-wrote an archive then
+  failed (e.g., `tar` corruption mid-flush) used to leak the file on the PVC; now it is deleted on
+  trash like an `Available` row would be.
+- **Explicit operation label for self-managed Jobs.** Added
+  `OPERATION_LABEL = "kubeport.io/operation"` and `SELF_MANAGED_OPERATION_VALUES = {"archive-delete"}`
+  in `site_tasks`. The orphan sweep skips Jobs carrying these labels so the cleanup path is no
+  longer accidentally handled by the grace-window race in the sweep.
+- **Tightened `Kubernetes Command` Delete allowlist.** Delete is now restricted to `Pod`, `Job`,
+  `ConfigMap` — restartable / recoverable kinds. Secret, PVC, Deployment, StatefulSet, Service are
+  excluded from the destructive path; operators go through the proper controllers (Helm Release,
+  Service Bundle, Frappe Site) for those. `validate()` now throws on Delete without
+  `confirm_destructive` (was a `pass` masquerading as a check).
+- **`Kubernetes Command Audit Log` doctype.** Append-only, System Manager read-only. Every execute
+  appends a row capturing user, cluster, namespace, action, kind, name, outcome, and an output
+  excerpt — decoupled from the source row so the audit trail survives row deletion.
+- **Visible output truncation.** `_finalize` now appends a `[... truncated, original N chars ...]`
+  marker so an operator debugging a long error message knows the body is incomplete.
+- **Backup form realtime listener.** `frappe_site_backup.js` now subscribes to
+  `frappe_site_backup_status_update` and reloads on docname match, mirroring the existing listener
+  on the `Frappe Site` form.
+
+### Rejected alternatives
+
+- **No probe — defer everything via `unknown`.** Without a probe, the gone-Job branch has no signal
+  to recover from; deferring forever is the same as silent loss.
+- **Asynchronous probe Job tracked across reconciliation ticks.** Adds a state field on the backup
+  row plus two-tick latency. The synchronous probe Pod is bounded (15-second `activeDeadlineSeconds`)
+  and gone-Job recovery is rare in practice.
+- **Reverting `Kubernetes Command` entirely.** The diagnostic use cases (delete a stuck PVC, list
+  pods) are real. Tightening the allowlist plus an audit log is sufficient.
+
+### Implementation details
+
+- `kubeport/tasks/reconciliation.py`: new `_probe_backup_archive_on_pvc`, updated
+  `_reconcile_site_backup` signature (now takes `api_client`), orphan sweep recognizes
+  `OPERATION_LABEL` + `SELF_MANAGED_OPERATION_VALUES`.
+- `kubeport/tasks/site_tasks.py`: added `OPERATION_LABEL`, `SELF_MANAGED_OPERATION_VALUES`;
+  `delete_backup_archive_task` tags its Job with `kubeport.io/operation=archive-delete`.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `cancel_site` / `on_trash` use
+  `queue="long"` and call `_cancel_inflight_backups_for_site`.
+- `kubeport/kubeport/doctype/frappe_site_backup/frappe_site_backup.py`: `on_trash` covers Failed
+  rows with a stamped `storage_path`.
+- `kubeport/kubeport/doctype/frappe_site_backup/frappe_site_backup.js`: realtime listener.
+- `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py`: `_DELETABLE_KINDS`
+  allowlist, validate() throws on missing `confirm_destructive`.
+- `kubeport/kubeport/doctype/kubernetes_command_audit_log/`: new audit log doctype.
+- `kubeport/tasks/kubernetes_command_tasks.py`: `_finalize` appends truncation marker, calls
+  `_append_audit_log`.
+- Tests added in `kubeport/tests/test_reconciliation.py`,
+  `kubeport/tests/test_site_tasks.py`,
+  `kubeport/kubeport/doctype/frappe_site_backup/test_frappe_site_backup.py`,
+  `kubeport/kubeport/doctype/kubernetes_command/test_kubernetes_command.py`.
+
+---
+
 ## 2026-04-30 — Frappe Site backup and restore lifecycle
 
 ### Context

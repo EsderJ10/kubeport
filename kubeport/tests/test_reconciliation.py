@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, call, patch
 from frappe.tests import UnitTestCase
 
 from kubeport.tasks.reconciliation import (
+	SITE_PROBE_EXISTS,
+	SITE_PROBE_MISSING,
+	SITE_PROBE_UNKNOWN,
 	_job_belongs_to_backup,
 	_finalize_site_status,
 	_job_belongs_to_site,
@@ -14,6 +17,7 @@ from kubeport.tasks.reconciliation import (
 	_reconcile_frappe_sites,
 	_reconcile_helm_releases,
 	_reconcile_service_bundles,
+	_reconcile_site_backup,
 	_reconcile_stale_helm_operations,
 	_summarize_unrunnable_pod,
 	_sweep_orphan_site_jobs,
@@ -1614,3 +1618,199 @@ class UnitTestReconcileSiteMigrate(UnitTestCase):
 			_reconcile_frappe_sites()
 
 		mock_db_set_value.assert_not_called()
+
+
+class UnitTestReconcileSiteBackupProbe(UnitTestCase):
+	"""Backup ground-truth via the PVC probe.  Covers the gone-Job recovery
+	path (where the Job aged out before reconciliation read its status) and
+	the post-success verification path (where we re-check the archive after
+	the Job's stdout claimed it wrote one)."""
+
+	def _backup(self, **overrides):
+		defaults = {
+			"name": "demo::demo-20260504",
+			"frappe_site": "rel-a/demo",
+			"cluster": "cluster-a",
+			"namespace": "ns",
+			"site_name": "demo",
+			"source_bench_release": "rel-a",
+			"status": "In Progress",
+			"operation_job_name": "ks-demo-deadbeef",
+			"operation_job_token": "token-1",
+			"operation_token": "token-1",
+			"storage_path": "/mnt/kubeport-backups/cluster-a/ns/demo/demo-20260504.tar.gz",
+			"size_bytes": 0,
+		}
+		defaults.update(overrides)
+		return SimpleNamespace(**defaults)
+
+	def _gone_job(self):
+		from kubernetes.client.rest import ApiException
+
+		batch = MagicMock()
+		batch.read_namespaced_job.side_effect = ApiException(status=404)
+		return batch
+
+	@patch("kubeport.tasks.reconciliation._finalize_backup_status")
+	@patch("kubeport.tasks.reconciliation._probe_backup_archive_on_pvc")
+	def test_gone_job_with_archive_present_marks_available(
+		self,
+		mock_probe,
+		mock_finalize,
+	):
+		"""Job aged out before we read it, but the probe finds the archive
+		on the PVC — backup recovers to Available with the probed size."""
+		mock_probe.return_value = (SITE_PROBE_EXISTS, 4096)
+
+		_reconcile_site_backup(
+			self._backup(),
+			self._gone_job(),
+			MagicMock(),
+			MagicMock(),
+		)
+
+		mock_finalize.assert_called_once()
+		args = mock_finalize.call_args
+		self.assertEqual(args.args[1:4], ("In Progress", "Available", ""))
+		self.assertEqual(args.kwargs.get("size_bytes"), 4096)
+
+	@patch("kubeport.tasks.reconciliation._finalize_backup_status")
+	@patch("kubeport.tasks.reconciliation._probe_backup_archive_on_pvc")
+	def test_gone_job_with_archive_missing_marks_failed(
+		self,
+		mock_probe,
+		mock_finalize,
+	):
+		"""Job aged out and the probe confirms no archive on the PVC —
+		backup must be Failed, not silently lost as the previous size_bytes
+		heuristic did."""
+		mock_probe.return_value = (SITE_PROBE_MISSING, None)
+
+		_reconcile_site_backup(
+			self._backup(),
+			self._gone_job(),
+			MagicMock(),
+			MagicMock(),
+		)
+
+		mock_finalize.assert_called_once()
+		args = mock_finalize.call_args
+		self.assertEqual(args.args[1:3], ("In Progress", "Failed"))
+		self.assertIn("not present on the PVC", args.args[3])
+
+	@patch("kubeport.tasks.reconciliation._finalize_backup_status")
+	@patch("kubeport.tasks.reconciliation._probe_backup_archive_on_pvc")
+	def test_gone_job_with_unknown_probe_defers(
+		self,
+		mock_probe,
+		mock_finalize,
+	):
+		"""Probe failure (transient cluster issue, image pull stall) must
+		defer the transition to the next reconcile tick — never finalize
+		on UNKNOWN."""
+		mock_probe.return_value = (SITE_PROBE_UNKNOWN, None)
+
+		_reconcile_site_backup(
+			self._backup(),
+			self._gone_job(),
+			MagicMock(),
+			MagicMock(),
+		)
+
+		mock_finalize.assert_not_called()
+
+	@patch("kubeport.tasks.reconciliation._finalize_backup_status")
+	@patch("kubeport.tasks.reconciliation._probe_backup_archive_on_pvc")
+	@patch("kubeport.tasks.reconciliation._extract_backup_success_metadata")
+	@patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True)
+	def test_succeeded_job_with_missing_archive_marks_failed(
+		self,
+		_mock_belongs,
+		mock_extract_meta,
+		mock_probe,
+		mock_finalize,
+	):
+		"""Job exited zero and stdout reported a size, but the probe finds
+		no archive on the PVC (narrow window: tar exited 0 but the inode
+		was lost between exit and our read).  Better Failed than a
+		dangling Available row that points at nothing."""
+		mock_extract_meta.return_value = {
+			"size_bytes": 4096,
+			"bench_archive_name": "demo-2026-05-04.tar",
+		}
+		mock_probe.return_value = (SITE_PROBE_MISSING, None)
+
+		batch = MagicMock()
+		batch.read_namespaced_job.return_value = SimpleNamespace(
+			metadata=SimpleNamespace(name="ks-demo-deadbeef"),
+			status=SimpleNamespace(succeeded=1, failed=0),
+		)
+
+		_reconcile_site_backup(
+			self._backup(),
+			batch,
+			MagicMock(),
+			MagicMock(),
+		)
+
+		mock_finalize.assert_called_once()
+		args = mock_finalize.call_args
+		self.assertEqual(args.args[1:3], ("In Progress", "Failed"))
+		self.assertIn("not on the PVC", args.args[3])
+
+	@patch("kubeport.tasks.reconciliation._finalize_backup_status")
+	@patch("kubeport.tasks.reconciliation._probe_backup_archive_on_pvc")
+	def test_gone_job_defers_when_probe_budget_exhausted(
+		self,
+		mock_probe,
+		mock_finalize,
+	):
+		"""Per-tick budget cap: the synchronous probe is rate-limited so a
+		fleet of gone-Job rows can't blow the 300 s RQ timeout.  When the
+		budget is exhausted, the row stays In Progress and the next tick
+		tries again — the probe must NOT be called and the row must NOT be
+		finalized."""
+		_reconcile_site_backup(
+			self._backup(),
+			self._gone_job(),
+			MagicMock(),
+			MagicMock(),
+			{"remaining": 0},
+		)
+
+		mock_probe.assert_not_called()
+		mock_finalize.assert_not_called()
+
+	@patch("kubeport.tasks.reconciliation._finalize_backup_status")
+	@patch("kubeport.tasks.reconciliation._probe_backup_archive_on_pvc")
+	def test_succeeded_job_with_exhausted_budget_finalizes_on_log_metadata(
+		self,
+		mock_probe,
+		mock_finalize,
+	):
+		"""When the probe budget is exhausted, a succeeded Job's stdout
+		metadata is trusted (size_bytes > 0).  The alternative — defer —
+		would risk the Job aging out before the next tick can verify."""
+		# Patch the metadata extraction so the success path runs.
+		with patch("kubeport.tasks.reconciliation._extract_backup_success_metadata") as mock_meta, \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True):
+			mock_meta.return_value = {"size_bytes": 4096, "bench_archive_name": "demo.tar"}
+			batch = MagicMock()
+			batch.read_namespaced_job.return_value = SimpleNamespace(
+				metadata=SimpleNamespace(name="ks-demo-deadbeef"),
+				status=SimpleNamespace(succeeded=1, failed=0),
+			)
+			_reconcile_site_backup(
+				self._backup(),
+				batch,
+				MagicMock(),
+				MagicMock(),
+				{"remaining": 0},
+			)
+
+		mock_probe.assert_not_called()
+		mock_finalize.assert_called_once()
+		args = mock_finalize.call_args
+		self.assertEqual(args.args[1:4], ("In Progress", "Available", ""))
+		self.assertEqual(args.kwargs.get("size_bytes"), 4096)
+

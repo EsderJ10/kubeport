@@ -27,6 +27,13 @@ _NAMESPACED_KINDS = {
 	"Deployment",
 	"StatefulSet",
 }
+# Tighter allowlist for Delete: read access to all eight kinds is fine, but
+# destructive ops are restricted to ephemeral/restartable resources.  Deleting
+# a Secret breaks live workloads, a PVC destroys data, and a Deployment /
+# StatefulSet / Service causes outages — those want the operator to go through
+# the proper controllers (Helm Release, Service Bundle, Frappe Site).  Pods
+# and Jobs are restartable; ConfigMap is recoverable.
+_DELETABLE_KINDS = {"Pod", "Job", "ConfigMap"}
 _TERMINAL_STATUSES = {"Completed", "Failed"}
 
 
@@ -68,11 +75,20 @@ class KubernetesCommand(Document):
 			frappe.throw(f"Namespace is required for {self.resource_kind}.")
 		if self.action in ("Get", "Delete") and not self.resource_name:
 			frappe.throw(f"Resource Name is required for {self.action}.")
-		if self.action == "Delete" and not self.confirm_destructive:
-			# Surface here too so it's caught at form save, not only at execute()
-			# (the JS layer already prompts).  Keeps the audit row honest about
-			# whether a destructive op was approved.
-			pass
+		if self.action == "Delete":
+			if self.resource_kind not in _DELETABLE_KINDS:
+				frappe.throw(
+					f"{self.resource_kind} cannot be deleted via Kubernetes Command. "
+					f"Allowed kinds for Delete: {', '.join(sorted(_DELETABLE_KINDS))}. "
+					"Use the appropriate controller (Helm Release, Service Bundle, "
+					"or Frappe Site) for destructive changes to other kinds."
+				)
+			if not self.confirm_destructive:
+				frappe.throw(
+					"Confirm Destructive must be checked before saving a Delete "
+					"command.  This keeps the audit row honest about whether the "
+					"destructive op was approved at save time, not just at execute."
+				)
 
 	def before_insert(self) -> None:
 		self.triggered_by = frappe.session.user

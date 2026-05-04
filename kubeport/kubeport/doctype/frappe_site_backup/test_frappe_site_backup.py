@@ -39,8 +39,22 @@ class UnitTestFrappeSiteBackup(UnitTestCase):
 		self.assertEqual(_kwargs["storage_path"], "/mnt/kubeport-backups/c/ns/site/backup.tar.gz")
 
 	@patch("kubeport.kubeport.doctype.frappe_site_backup.frappe_site_backup.frappe.enqueue")
-	def test_on_trash_failed_backup_does_not_enqueue_archive_delete(self, mock_enqueue):
+	def test_on_trash_failed_backup_with_storage_path_enqueues_archive_delete(self, mock_enqueue):
+		"""A backup that partially wrote an archive then failed (e.g., tar
+		corruption mid-flush) still has a ``storage_path`` stamped on the
+		row.  Trashing it must clean the orphan file off the PVC; otherwise
+		the disk slowly leaks every time a backup fails."""
 		doc = self._doc(status="Failed")
+		doc.on_trash()
+		mock_enqueue.assert_called_once()
+		_kwargs = mock_enqueue.call_args.kwargs
+		self.assertEqual(_kwargs["storage_path"], "/mnt/kubeport-backups/c/ns/site/backup.tar.gz")
+
+	@patch("kubeport.kubeport.doctype.frappe_site_backup.frappe_site_backup.frappe.enqueue")
+	def test_on_trash_failed_backup_without_storage_path_skips_cleanup(self, mock_enqueue):
+		"""A Failed row that never made it as far as stamping a path has
+		no archive to clean up."""
+		doc = self._doc(status="Failed", storage_path="")
 		doc.on_trash()
 		mock_enqueue.assert_not_called()
 

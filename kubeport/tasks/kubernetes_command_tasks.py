@@ -23,6 +23,8 @@ from kubernetes.client.rest import ApiException
 from kubeport.utils.k8s_client import get_k8s_api_client
 
 _OUTPUT_LIMIT = 5000
+_AUDIT_EXCERPT_LIMIT = 500
+_TRUNCATION_MARKER = "\n[... truncated, original {N} chars ...]"
 
 # Maps each supported resource kind to (api_class_name, namespaced_method_suffix).
 # The kubernetes-python client exposes uniform method names of the form
@@ -93,9 +95,49 @@ def _execute_command(command_docname: str) -> None:
 
 
 def _finalize(cmd: Any, *, status: str, output: str) -> None:
+	original_length = len(output)
+	if original_length > _OUTPUT_LIMIT:
+		marker = _TRUNCATION_MARKER.format(N=original_length)
+		# Reserve space for the marker so the operator always sees it.
+		output = output[: _OUTPUT_LIMIT - len(marker)] + marker
+	completed_at = datetime.now(timezone.utc)
 	cmd.db_set("status", status)
-	cmd.db_set("output", output[:_OUTPUT_LIMIT])
-	cmd.db_set("completed_at", datetime.now(timezone.utc))
+	cmd.db_set("output", output)
+	cmd.db_set("completed_at", completed_at)
+	_append_audit_log(cmd, status=status, output=output, completed_at=completed_at)
+
+
+def _append_audit_log(cmd: Any, *, status: str, output: str, completed_at: datetime) -> None:
+	"""Insert an append-only audit log row.
+
+	Decoupled from the source ``Kubernetes Command`` so the audit trail
+	survives row deletion.  Errors writing the audit log are logged but
+	never propagate — the command itself already finalized, and a missing
+	audit entry is preferable to spurious task retries.
+	"""
+	try:
+		excerpt = (output or "")[:_AUDIT_EXCERPT_LIMIT]
+		audit = frappe.get_doc({
+			"doctype": "Kubernetes Command Audit Log",
+			"command": cmd.name,
+			"action": cmd.action,
+			"resource_kind": cmd.resource_kind,
+			"resource_name": cmd.resource_name or "",
+			"cluster": cmd.cluster,
+			"namespace": cmd.namespace or "",
+			"label_selector": cmd.label_selector or "",
+			"outcome": status,
+			"executed_at": completed_at,
+			"triggered_by": cmd.triggered_by,
+			"output_excerpt": excerpt,
+		})
+		audit.insert(ignore_permissions=True)
+	except Exception as audit_err:
+		frappe.logger("kubeport").warning(
+			"Could not write Kubernetes Command Audit Log for '%s': %s",
+			cmd.name,
+			audit_err,
+		)
 
 
 def _summarize_resource(resource: Any) -> str:

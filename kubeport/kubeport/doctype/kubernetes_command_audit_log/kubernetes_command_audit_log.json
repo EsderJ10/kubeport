@@ -1,0 +1,151 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:KCMD-AUD-.######.",
+ "creation": "2026-05-04 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_summary",
+  "command",
+  "action",
+  "resource_kind",
+  "resource_name",
+  "column_break_summary",
+  "cluster",
+  "namespace",
+  "label_selector",
+  "section_break_outcome",
+  "outcome",
+  "executed_at",
+  "triggered_by",
+  "column_break_outcome",
+  "output_excerpt"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_summary",
+   "fieldtype": "Section Break",
+   "label": "Command"
+  },
+  {
+   "description": "The Kubernetes Command row that triggered this audit entry.  May be blank if the source row was deleted.",
+   "fieldname": "command",
+   "fieldtype": "Data",
+   "label": "Command",
+   "read_only": 1
+  },
+  {
+   "fieldname": "action",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Action",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "resource_kind",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Resource Kind",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "resource_name",
+   "fieldtype": "Data",
+   "label": "Resource Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_summary",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "cluster",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Cluster",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "namespace",
+   "fieldtype": "Data",
+   "label": "Namespace",
+   "read_only": 1
+  },
+  {
+   "fieldname": "label_selector",
+   "fieldtype": "Data",
+   "label": "Label Selector",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_outcome",
+   "fieldtype": "Section Break",
+   "label": "Outcome"
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Outcome",
+   "options": "Completed\nFailed",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "executed_at",
+   "fieldtype": "Datetime",
+   "label": "Executed At",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "triggered_by",
+   "fieldtype": "Link",
+   "label": "Triggered By",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_outcome",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "First 500 characters of the command output, captured for auditability.  The full output is on the Kubernetes Command row (until it is deleted).",
+   "fieldname": "output_excerpt",
+   "fieldtype": "Small Text",
+   "label": "Output Excerpt",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "in_create": 1,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-05-04 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Kubeport",
+ "name": "Kubernetes Command Audit Log",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "executed_at",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

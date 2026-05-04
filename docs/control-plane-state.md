@@ -62,6 +62,10 @@ The current milestone is **robustness** — making discovery, background executi
 - **Migration (`bench migrate`)** does not need credentials — bench reads them from `site_config.json`. Reconciliation runs the same functional probe used for creation; if the Job exit code is non-zero but the site is still functional (false negative), the row recovers to `Active`.
 - **Backup/restore** uses standalone `Frappe Site Backup` rows. Backup Jobs run `bench backup --with-files`, package the generated files into a tar archive, and store it on a namespace-local `kubeport-backups` RWX PVC. Restore Jobs extract the archive and run `bench restore --force`; reconciliation treats a functional bench probe as success even if the restore Job exits non-zero.
 - Backup archive lifecycle is independent of the source site's PVC and row lifecycle. Available backup rows can outlive the original `Frappe Site` row and keep the metadata needed for recovery.
+- **Backup ground truth via PVC probe.** Reconciliation does not finalize a backup as `Available` purely on Job exit code or stdout metadata. A short-lived `busybox` probe Pod mounts the `kubeport-backups` PVC and reads the `<archive>.size` sidecar that the bench backup script writes only on a fully-flushed success. The probe is consulted in two places: (a) the gone-Job recovery path, replacing a broken `size_bytes` heuristic that always marked aged-out Jobs `Failed`, and (b) post-success verification, defending against the narrow window where `tar` exited zero but the inode was lost before reconciliation read it. `unknown` defers to the next tick.
+- **Cancel cascades to in-flight backups.** `cancel_site` and `Frappe Site.on_trash` rotate not only the parent site's `operation_token` but also force-fail every linked `Frappe Site Backup` row in `Pending` / `In Progress` / `Restoring`, rotating its independent `operation_token`, publishing a realtime event, and enqueueing cluster cleanup. Without this, backup rows would stay in-flight forever and `_has_in_flight_backup` would block all future backups for that site.
+- **Failed backups clean up archive files.** `Frappe Site Backup.on_trash` enqueues archive deletion whenever `storage_path` is stamped, regardless of status. A backup that partial-wrote an archive then was marked Failed used to leak the file on the PVC; now trashing the row removes it.
+- **Self-managed lifecycle Jobs are explicit.** Archive-delete Jobs carry `kubeport.io/operation=archive-delete`. The orphan sweep recognises this label and skips them so the auto-clean is no longer racing the sweep's grace window.
 - **Credentials flow through Kubernetes Secrets, never as plaintext env vars.** Create-site builds a `{job_name}-creds` Secret with `ADMIN_PASSWORD` (and `DB_ROOT_PASSWORD` when the user chose the plaintext field). Drop-site builds the same Secret shape but only with `DB_ROOT_PASSWORD` (no admin involved). Migrate needs no Secret at all. All Secrets are owner-referenced to their Job so they are garbage-collected alongside the Job's TTL cleanup. The Job reads values via `secretKeyRef`.
 - Only MariaDB is supported as a database backend. The `db_type` field is fixed to `mariadb`; postgres plumbing has been intentionally removed — there is no forward-compatibility shim and no UI path to select it.
 - Supports both direct database root password and Kubernetes Secret references.
@@ -86,7 +90,13 @@ The current milestone is **robustness** — making discovery, background executi
 - Scheduled every 5 minutes via `hooks.py`.
 - Helm releases: combines `helm status` with workload readiness from `helm get manifest`; recovers `Degraded` rows to `Deployed` when workloads become ready and marks pending/non-deployed Helm states as `Failed`.
 - Service Bundles: resource existence check via K8s API.
-- Frappe Sites and Backups: Job status polling with ground-truth site verification for create/delete/migrate/restore and archive metadata verification for backup.
+- Frappe Sites and Backups: Job status polling with ground-truth site verification for create/delete/migrate/restore and a PVC-side `<archive>.size` sidecar probe for backup completion (gone-Job recovery and post-success verification).
+
+### Operator Tools
+
+- **Kubernetes Command** is a deliberate operator-tools doctype for ad-hoc Get / List / Delete against a fixed allowlist of namespaced kinds. Read access spans 8 kinds (Pod, Job, Secret, ConfigMap, Service, Deployment, StatefulSet, PVC); Delete is restricted to `Pod`, `Job`, `ConfigMap` only — destructive changes to the dangerous quartet (Secret, PVC, Deployment, StatefulSet) must go through the proper controllers (Helm Release, Service Bundle, Frappe Site).
+- System Manager only. Delete requires `confirm_destructive` enforced at both validate (form save) and execute (background worker).
+- **Kubernetes Command Audit Log** is an append-only doctype written on every execute (success or failure). System Manager has read access; never written from the UI. Decoupled from the source row so the audit trail survives row deletion.
 
 ---
 

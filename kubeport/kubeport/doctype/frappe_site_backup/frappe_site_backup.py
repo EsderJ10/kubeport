@@ -79,7 +79,10 @@ class FrappeSiteBackup(Document):
 	def on_trash(self) -> None:
 		if self.status in ("In Progress", "Restoring"):
 			frappe.throw("Cannot delete a backup while an operation is in progress.")
-		if self.status != "Available" or not self.storage_path:
+		# Failed rows can stamp ``storage_path`` (e.g., a partial-write archive
+		# left behind by a crashed Job).  Cleaning these up requires the same
+		# enqueued task as Available rows so the PVC does not slowly leak.
+		if not self.storage_path:
 			return
 
 		frappe.enqueue(

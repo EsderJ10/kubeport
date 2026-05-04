@@ -51,6 +51,12 @@ _JOB_ACTIVE_DEADLINE_SECONDS = 1800
 # track of (e.g. worker hard-killed between Job apply and db_set).
 SITE_DOC_LABEL = "kubeport.io/frappe-site"
 SITE_BACKUP_DOC_LABEL = "kubeport.io/frappe-site-backup"
+# Tags Jobs whose lifecycle is self-managed by ttlSecondsAfterFinished and
+# which are NOT referenced by any DocType row.  Today this is only the
+# archive-delete cleanup Job.  The orphan sweep skips Jobs carrying this
+# label so it does not double-collect them.
+OPERATION_LABEL = "kubeport.io/operation"
+SELF_MANAGED_OPERATION_VALUES = frozenset({"archive-delete"})
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY_VALUE = "kubeport"
 BACKUP_PVC_NAME = "kubeport-backups"
@@ -592,7 +598,10 @@ def delete_backup_archive_task(cluster: str, namespace: str, release_name: str, 
 			container_command='rm -f "$BACKUP_ARCHIVE_PATH" "$BACKUP_ARCHIVE_PATH.size" "$BACKUP_ARCHIVE_PATH.name"',
 			container_env=[{"name": "BACKUP_ARCHIVE_PATH", "value": storage_path}],
 			ref_spec=ref_spec,
-			extra_labels={SITE_BACKUP_DOC_LABEL: _safe_label_value(job_name)},
+			extra_labels={
+				SITE_BACKUP_DOC_LABEL: _safe_label_value(job_name),
+				OPERATION_LABEL: "archive-delete",
+			},
 		)
 		apply_resource(api_client, job_manifest, namespace)
 	except Exception as e:
