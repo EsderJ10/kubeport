@@ -10,7 +10,10 @@ class UnitTestHooks(UnitTestCase):
 	def test_scheduler_events_use_direct_module_paths(self):
 		self.assertEqual(
 			hooks.scheduler_events["cron"]["*/5 * * * *"],
-			["kubeport.tasks.reconciliation.reconcile_all_releases"],
+			[
+				"kubeport.tasks.reconciliation.reconcile_all_releases",
+				"kubeport.tasks.reconciliation.reconcile_site_backups",
+			],
 		)
 		self.assertEqual(
 			hooks.scheduler_events["daily"],

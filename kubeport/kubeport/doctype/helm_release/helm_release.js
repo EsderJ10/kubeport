@@ -284,7 +284,7 @@ function kubeport_render_release_health(frm) {
         if (request_id !== frm.__helm_release_health_request_id) return;
         if (r && !r.exc) {
             const payload = r.message || {};
-            kubeport_paint_health_rows($wrapper, payload.rows || [], payload.error || '');
+            kubeport_paint_health_rows(frm, $wrapper, payload.rows || [], payload.error || '');
         } else {
             $wrapper.html(
                 `<div class="text-muted small">${__('Could not fetch workload readiness.')}</div>`
@@ -328,7 +328,7 @@ function kubeport_get_health_wrapper(frm) {
     return $panel.find('.kubeport-release-health-body');
 }
 
-function kubeport_paint_health_rows($body, rows, error) {
+function kubeport_paint_health_rows(frm, $body, rows, error) {
     const error_html = error
         ? `<div class="text-muted small" style="margin-bottom: 8px;">
                 ${__('Readiness check error:')} ${frappe.utils.escape_html(error)}
@@ -350,9 +350,10 @@ function kubeport_paint_health_rows($body, rows, error) {
         const reason = row.ready
             ? (row.message || __('ready'))
             : `${row.reason}${row.message ? ' - ' + row.message : ''}`;
+        const actions = row.ready ? '' : kubeport_render_health_actions(row);
         return `
             <div style="display: grid;
-                        grid-template-columns: 16px 110px 1fr 1.4fr;
+                        grid-template-columns: 16px 110px 1fr 1.4fr 190px;
                         gap: 8px; padding: 4px 0;
                         border-bottom: 1px solid var(--border-color);
                         font-size: 12px;">
@@ -362,10 +363,250 @@ function kubeport_paint_health_rows($body, rows, error) {
                     ${frappe.utils.escape_html(row.name)}
                 </div>
                 <div class="text-muted">${frappe.utils.escape_html(reason)}</div>
+                <div>${actions}</div>
             </div>
         `;
     }).join('');
     $body.html(`${error_html}${lines}`);
+    $body.find('.kubeport-health-action').on('click', function() {
+        const $button = $(this);
+        const row = {
+            kind: $button.attr('data-kind') || '',
+            name: $button.attr('data-name') || '',
+        };
+        const action = $button.attr('data-action');
+        if (action === 'logs') {
+            kubeport_show_resource_logs(frm, row);
+        } else if (action === 'events') {
+            kubeport_show_resource_events(frm, row);
+        } else if (action === 'rollout') {
+            kubeport_show_resource_rollout(frm, row);
+        }
+    });
+}
+
+function kubeport_render_health_actions(row) {
+    const kind = frappe.utils.escape_html(row.kind || '');
+    const name = frappe.utils.escape_html(row.name || '');
+    const log_kinds = ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod'];
+    const rollout_kinds = ['Deployment', 'StatefulSet', 'DaemonSet'];
+    let html = '<div style="display: flex; gap: 4px; flex-wrap: wrap;">';
+    if (log_kinds.includes(row.kind)) {
+        html += `
+            <button class="btn btn-xs btn-default kubeport-health-action"
+                    data-action="logs" data-kind="${kind}" data-name="${name}">
+                ${__('Logs')}
+            </button>`;
+    }
+    html += `
+        <button class="btn btn-xs btn-default kubeport-health-action"
+                data-action="events" data-kind="${kind}" data-name="${name}">
+            ${__('Events')}
+        </button>`;
+    if (rollout_kinds.includes(row.kind)) {
+        html += `
+            <button class="btn btn-xs btn-default kubeport-health-action"
+                    data-action="rollout" data-kind="${kind}" data-name="${name}">
+                ${__('Rollout')}
+            </button>`;
+    }
+    html += '</div>';
+    return html;
+}
+
+function kubeport_show_resource_logs(frm, row) {
+    const dialog = new frappe.ui.Dialog({
+        title: __('Logs: {0}/{1}', [row.kind, row.name]),
+        fields: [
+            {
+                fieldname: 'tail_lines',
+                fieldtype: 'Select',
+                label: __('Tail Lines'),
+                options: ['50', '200', '500', '2000'],
+                default: '200'
+            },
+            {
+                fieldname: 'container',
+                fieldtype: 'Data',
+                label: __('Container'),
+                description: __('Leave blank to use the Kubernetes default container.')
+            },
+            {
+                fieldname: 'previous',
+                fieldtype: 'Check',
+                label: __('Previous container')
+            },
+            {
+                fieldname: 'logs_html',
+                fieldtype: 'HTML'
+            }
+        ],
+        primary_action_label: __('Refresh'),
+        primary_action(values) {
+            kubeport_fetch_resource_logs(frm, row, dialog, values);
+        }
+    });
+    dialog.show();
+    kubeport_fetch_resource_logs(frm, row, dialog, dialog.get_values() || {});
+}
+
+function kubeport_fetch_resource_logs(frm, row, dialog, values) {
+    values = values || {};
+    const $target = dialog.fields_dict.logs_html.$wrapper;
+    $target.html(`<div class="text-muted small">${__('Loading logs…')}</div>`);
+    frappe.call({
+        method: 'kubeport.api.observability.get_release_resource_logs',
+        args: {
+            release_docname: frm.doc.name,
+            kind: row.kind,
+            name: row.name,
+            container: values.container || null,
+            tail_lines: cint(values.tail_lines || 200),
+            previous: cint(values.previous || 0) ? 1 : 0
+        }
+    }).then((r) => {
+        if (r.exc) return;
+        $target.html(kubeport_render_logs_payload(r.message || {}));
+    }, () => {
+        $target.html(`<div class="text-muted small">${__('Could not fetch logs.')}</div>`);
+    });
+}
+
+function kubeport_render_logs_payload(payload) {
+    const pods = payload.pods || [];
+    const logs_by_pod = payload.logs_by_pod || {};
+    const errors_by_pod = payload.errors_by_pod || {};
+    let html = '';
+    if (payload.error) {
+        html += `<div class="text-muted small" style="margin-bottom: 8px;">
+            ${frappe.utils.escape_html(payload.error)}
+        </div>`;
+    }
+    if (!pods.length) {
+        return html || `<div class="text-muted small">${__('No pods were found for this resource.')}</div>`;
+    }
+
+    pods.forEach((pod) => {
+        const pod_name = pod.name || '';
+        const containers = (pod.container_names || []).join(', ');
+        const status = `${pod.phase || __('Unknown')} · ${__('restarts')}: ${pod.restart_count || 0}`;
+        html += `
+            <div style="margin-bottom: 12px;">
+                <div style="display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
+                    <strong>${frappe.utils.escape_html(pod_name)}</strong>
+                    <span class="text-muted small">${frappe.utils.escape_html(status)}</span>
+                </div>
+                ${containers ? `<div class="text-muted small" style="margin-bottom: 4px;">
+                    ${__('Containers')}: ${frappe.utils.escape_html(containers)}
+                </div>` : ''}
+                ${errors_by_pod[pod_name] ? `<div class="text-muted small" style="margin-bottom: 4px;">
+                    ${frappe.utils.escape_html(errors_by_pod[pod_name])}
+                </div>` : ''}
+                <pre style="max-height: 420px; overflow: auto; white-space: pre-wrap;
+                            background: var(--fg-color); color: var(--text-color);
+                            border: 1px solid var(--border-color); border-radius: 4px;
+                            padding: 8px; font-size: 12px;">${frappe.utils.escape_html(logs_by_pod[pod_name] || '')}</pre>
+            </div>`;
+    });
+    return html;
+}
+
+function kubeport_show_resource_events(frm, row) {
+    const dialog = new frappe.ui.Dialog({
+        title: __('Events: {0}/{1}', [row.kind, row.name]),
+        fields: [{
+            fieldname: 'events_html',
+            fieldtype: 'HTML'
+        }]
+    });
+    dialog.show();
+    const $target = dialog.fields_dict.events_html.$wrapper;
+    $target.html(`<div class="text-muted small">${__('Loading events…')}</div>`);
+    frappe.call({
+        method: 'kubeport.api.observability.get_release_resource_events',
+        args: {
+            release_docname: frm.doc.name,
+            kind: row.kind,
+            name: row.name,
+            limit: 20
+        }
+    }).then((r) => {
+        if (r.exc) return;
+        $target.html(kubeport_render_events(r.message || []));
+    }, () => {
+        $target.html(`<div class="text-muted small">${__('Could not fetch events.')}</div>`);
+    });
+}
+
+function kubeport_render_events(rows) {
+    if (!rows.length) {
+        return `<div class="text-muted small">${__('No scoped events were returned for this resource.')}</div>`;
+    }
+    let html = '<div class="table-responsive"><table class="table table-bordered" style="margin-bottom: 0;">';
+    html += `<thead><tr>
+        <th>${__('Type')}</th><th>${__('Reason')}</th><th>${__('Count')}</th>
+        <th>${__('Last Seen')}</th><th>${__('Message')}</th>
+    </tr></thead><tbody>`;
+    rows.forEach((row) => {
+        html += `<tr>
+            <td>${frappe.utils.escape_html(row.type || '')}</td>
+            <td>${frappe.utils.escape_html(row.reason || '')}</td>
+            <td>${frappe.utils.escape_html(String(row.count || 0))}</td>
+            <td>${frappe.utils.escape_html(row.last_seen || row.first_seen || '')}</td>
+            <td style="word-break: break-word;">${frappe.utils.escape_html(row.message || '')}</td>
+        </tr>`;
+    });
+    html += '</tbody></table></div>';
+    return html;
+}
+
+function kubeport_show_resource_rollout(frm, row) {
+    const dialog = new frappe.ui.Dialog({
+        title: __('Rollout: {0}/{1}', [row.kind, row.name]),
+        fields: [{
+            fieldname: 'rollout_html',
+            fieldtype: 'HTML'
+        }]
+    });
+    dialog.show();
+    const $target = dialog.fields_dict.rollout_html.$wrapper;
+    $target.html(`<div class="text-muted small">${__('Loading rollout context…')}</div>`);
+    frappe.call({
+        method: 'kubeport.api.observability.get_release_resource_rollout',
+        args: {
+            release_docname: frm.doc.name,
+            kind: row.kind,
+            name: row.name,
+            limit: 10
+        }
+    }).then((r) => {
+        if (r.exc) return;
+        $target.html(kubeport_render_rollout(r.message || []));
+    }, () => {
+        $target.html(`<div class="text-muted small">${__('Could not fetch rollout context.')}</div>`);
+    });
+}
+
+function kubeport_render_rollout(rows) {
+    if (!rows.length) {
+        return `<div class="text-muted small">${__('No rollout context was returned for this resource.')}</div>`;
+    }
+    let html = '<div class="table-responsive"><table class="table table-bordered" style="margin-bottom: 0;">';
+    html += `<thead><tr>
+        <th>${__('Revision')}</th><th>${__('Current')}</th><th>${__('Created')}</th>
+        <th>${__('Change Cause')}</th><th>${__('Images')}</th>
+    </tr></thead><tbody>`;
+    rows.forEach((row) => {
+        html += `<tr>
+            <td>${frappe.utils.escape_html(String(row.revision || ''))}</td>
+            <td>${row.current ? __('Yes') : ''}</td>
+            <td>${frappe.utils.escape_html(row.created_at || '')}</td>
+            <td style="word-break: break-word;">${frappe.utils.escape_html(row.change_cause || '')}</td>
+            <td style="word-break: break-all;">${frappe.utils.escape_html(row.image_summary || '')}</td>
+        </tr>`;
+    });
+    html += '</tbody></table></div>';
+    return html;
 }
 
 // Namespace autocomplete — fetches live namespaces from the selected cluster
