@@ -914,6 +914,65 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 			{"status": "Active", "status_detail": ""},
 		)
 
+	@patch("kubeport.tasks.reconciliation._extract_job_failure_detail")
+	@patch("kubeport.tasks.reconciliation._probe_site_state")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_restore_missing_probe_marks_site_failed_and_backup_available(
+		self,
+		mock_get_all,
+		mock_get_api_client,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_publish,
+		mock_probe_state,
+		mock_failure_detail,
+	):
+		detail = "bench restore failed: database import failed"
+		mock_get_all.return_value = [self._backup(status="Restoring")]
+		mock_db_get_value.side_effect = [
+			{"operation_token": "token-1", "status": "Restoring"},
+			{"operation_token": "token-1", "status": "Migrating"},
+		]
+		mock_probe_state.return_value = SITE_PROBE_MISSING
+		mock_failure_detail.return_value = detail
+
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
+			patch("kubernetes.client.CoreV1Api"), \
+			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True):
+			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
+			_reconcile_frappe_site_backups()
+
+		backup_write = next(
+			call_args.args
+			for call_args in mock_db_set_value.call_args_list
+			if call_args.args[0:2] == ("Frappe Site Backup", "demo.example.com::demo-20260430120000")
+		)
+		backup_fields = backup_write[2]
+		self.assertEqual(backup_fields["status"], "Available")
+		self.assertEqual(backup_fields["status_detail"], detail)
+		self.assertIn("completed_at", backup_fields)
+		self.assertEqual(backup_fields["operation_job_name"], "")
+		self.assertEqual(backup_fields["operation_job_token"], "")
+		mock_db_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo.example.com",
+			{"status": "Failed", "status_detail": detail},
+		)
+		mock_publish.assert_any_call(
+			"frappe_site_backup_status_update",
+			{
+				"site_docname": "rel-a/demo.example.com",
+				"backup_docname": "demo.example.com::demo-20260430120000",
+				"status": "Available",
+			},
+			doctype="Frappe Site Backup",
+			docname="demo.example.com::demo-20260430120000",
+		)
+
 
 class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 	def _job(self, name: str) -> SimpleNamespace:
@@ -1813,4 +1872,3 @@ class UnitTestReconcileSiteBackupProbe(UnitTestCase):
 		args = mock_finalize.call_args
 		self.assertEqual(args.args[1:4], ("In Progress", "Available", ""))
 		self.assertEqual(args.kwargs.get("size_bytes"), 4096)
-

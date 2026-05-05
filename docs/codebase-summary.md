@@ -239,7 +239,7 @@ Frappe site lifecycle operations via Kubernetes Jobs:
 - `delete_site_task` — builds a Job running `bench drop-site --no-backup --force` with DB root credentials injected.
 - `migrate_site_task` — builds a Job running `bench migrate`; no credentials Secret needed (bench reads from `site_config.json`).
 - `backup_site_task` — ensures a namespace-local `kubeport-backups` RWX PVC, mounts it into a cloned bench Job, runs `bench backup --with-files`, and writes a tar archive plus metadata markers.
-- `restore_site_task` — mounts the same backup PVC, extracts the selected archive, and runs `bench restore --force` with public/private file archives when present.
+- `restore_site_task` — mounts the same backup PVC, extracts the selected archive, and runs `bench restore --force` with public/private file archives when present. Restore submission or reconciliation failures leave the backup row `Available` with failure detail while the target site becomes `Failed`.
 - Site operations share a single `_build_op_job_manifest` builder; only the command list, per-operation env, and backup PVC mount differ.
 - Job names are derived from the site name and operation token for uniqueness and traceability.
 - Credentials flow through per-Job Kubernetes Secrets (never plaintext env values), owner-referenced to the Job for automatic garbage collection.

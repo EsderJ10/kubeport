@@ -558,7 +558,12 @@ def restore_site_task(site_docname: str, backup_docname: str, operation_token: s
 		return True
 
 	def _fail_restore_submit(doc: Any, error: Exception) -> None:
-		_fail_restore_submission(site_docname, backup_docname, operation_token, f"Restore Job submission failed: {error}")
+		_fail_restore_submission(
+			site_docname,
+			backup_docname,
+			operation_token,
+			f"Restore Job submission failed: {error}",
+		)
 
 	_run_site_op(
 		site_docname=site_docname,
@@ -588,7 +593,13 @@ def delete_backup_archive_task(cluster: str, namespace: str, release_name: str, 
 			release_name=release_name,
 		)
 		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
-		_prepare_backup_ref_spec(SimpleNamespace(), SimpleNamespace(cluster=cluster), namespace, api_client, ref_spec)
+		_prepare_backup_ref_spec(
+			SimpleNamespace(),
+			SimpleNamespace(cluster=cluster),
+			namespace,
+			api_client,
+			ref_spec,
+		)
 		job_name = _archive_delete_job_name(storage_path)
 		job_manifest = _build_op_job_manifest(
 			job_name=job_name,
@@ -1367,16 +1378,25 @@ def _fail_backup_row(backup_docname: str, operation_token: str, detail: str) -> 
 	return True
 
 
+def _restore_failure_detail(detail: str) -> str:
+	if detail.lower().startswith("restore attempt failed"):
+		return detail
+	return f"Restore attempt failed: {detail}"
+
+
 def _fail_restore_submission(
 	site_docname: str,
 	backup_docname: str,
 	operation_token: str,
 	detail: str,
 ) -> None:
+	detail = _truncate(_restore_failure_detail(detail))
 	if _site_operation_matches(site_docname, operation_token, "Migrating"):
 		frappe.db.set_value("Frappe Site", site_docname, {
 			"status": "Failed",
-			"status_detail": _truncate(detail),
+			"status_detail": detail,
+			"operation_job_name": "",
+			"operation_job_token": "",
 		})
 		frappe.publish_realtime(
 			"frappe_site_status_update",
@@ -1387,7 +1407,7 @@ def _fail_restore_submission(
 	if _backup_operation_matches(backup_docname, operation_token, ("Restoring",)):
 		frappe.db.set_value("Frappe Site Backup", backup_docname, {
 			"status": "Available",
-			"status_detail": _truncate(detail),
+			"status_detail": detail,
 			"operation_job_name": "",
 			"operation_job_token": "",
 		})

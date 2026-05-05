@@ -473,6 +473,14 @@ def _reconcile_frappe_site_backups():
 		if backup.operation_job_name:
 			by_cluster[backup.cluster].append(backup)
 
+	# Per-tick probe budget shared across every cluster in this reconcile pass.
+	# Each gone-Job probe can take up to _BACKUP_PROBE_TIMEOUT_SECONDS, and the
+	# periodic task lives inside the RQ default 300 s window — bounding the
+	# total to _BACKUP_PROBE_PER_TICK_LIMIT keeps a fleet of clusters from
+	# multiplying the cost.  Remaining gone-Job rows defer to the next tick:
+	# their state is already terminal on disk, so deferring is safe.
+	probe_budget = {"remaining": _BACKUP_PROBE_PER_TICK_LIMIT}
+
 	for cluster_name, backups in by_cluster.items():
 		try:
 			api_client = get_k8s_api_client(cluster_name)
@@ -486,15 +494,6 @@ def _reconcile_frappe_site_backups():
 
 		batch_v1 = client.BatchV1Api(api_client=api_client)
 		core_v1 = client.CoreV1Api(api_client=api_client)
-
-		# Per-tick budget: each gone-Job probe can take up to
-		# _BACKUP_PROBE_TIMEOUT_SECONDS, and the periodic task lives inside
-		# the RQ default 300 s window.  Track usage here so the budget is
-		# shared across all backups in this cluster (and across clusters
-		# implicitly — the next cluster's loop sees the same counter via
-		# closure).  Remaining gone-Job rows defer to the next tick: their
-		# state is already terminal on disk, so deferring is safe.
-		probe_budget = {"remaining": _BACKUP_PROBE_PER_TICK_LIMIT}
 
 		for backup in backups:
 			try:

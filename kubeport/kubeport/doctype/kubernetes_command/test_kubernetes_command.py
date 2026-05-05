@@ -73,6 +73,7 @@ class UnitTestKubernetesCommand(UnitTestCase):
 		args, kwargs = mock_enqueue.call_args
 		self.assertEqual(args[0], "kubeport.tasks.kubernetes_command_tasks.run_kubernetes_command")
 		self.assertEqual(kwargs["command_docname"], "KCMD-00002")
+		self.assertEqual(kwargs["queue"], "long")
 		set_calls = {call.args[0]: call.args[1] for call in mock_db_set.call_args_list}
 		self.assertEqual(set_calls.get("status"), "Running")
 

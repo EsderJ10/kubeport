@@ -24,6 +24,7 @@ from kubeport.tasks.site_tasks import (
 	_backup_storage_path,
 	_clone_reference_pod_spec,
 	_prepare_backup_ref_spec,
+	_fail_restore_submission,
 	_job_name,
 	_merge_env,
 	_parse_install_apps,
@@ -980,6 +981,55 @@ class UnitTestCreateSiteTask(UnitTestCase):
 		field_values = {call.args[0]: call.args[1] for call in doc.db_set.call_args_list}
 		self.assertEqual(field_values.get("status"), "Failed")
 		self.assertIn("simulated apiserver blip", field_values.get("status_detail", ""))
+
+
+class UnitTestRestoreSubmissionFailure(UnitTestCase):
+	@patch("kubeport.tasks.site_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.site_tasks.frappe.db.set_value")
+	@patch("kubeport.tasks.site_tasks._backup_operation_matches", return_value=True)
+	@patch("kubeport.tasks.site_tasks._site_operation_matches", return_value=True)
+	def test_failure_marks_site_failed_but_backup_available(
+		self,
+		mock_site_matches,
+		mock_backup_matches,
+		mock_set_value,
+		mock_publish,
+	):
+		_fail_restore_submission(
+			"rel-a/demo.example.com",
+			"demo.example.com::demo-20260430120000",
+			"token-1",
+			"Kubernetes API refused the restore Job.",
+		)
+
+		mock_site_matches.assert_called_once_with("rel-a/demo.example.com", "token-1", "Migrating")
+		mock_backup_matches.assert_called_once_with(
+			"demo.example.com::demo-20260430120000",
+			"token-1",
+			("Restoring",),
+		)
+		mock_set_value.assert_any_call("Frappe Site", "rel-a/demo.example.com", {
+			"status": "Failed",
+			"status_detail": "Restore attempt failed: Kubernetes API refused the restore Job.",
+			"operation_job_name": "",
+			"operation_job_token": "",
+		})
+		mock_set_value.assert_any_call("Frappe Site Backup", "demo.example.com::demo-20260430120000", {
+			"status": "Available",
+			"status_detail": "Restore attempt failed: Kubernetes API refused the restore Job.",
+			"operation_job_name": "",
+			"operation_job_token": "",
+		})
+		mock_publish.assert_any_call(
+			"frappe_site_backup_status_update",
+			{
+				"site_docname": "rel-a/demo.example.com",
+				"backup_docname": "demo.example.com::demo-20260430120000",
+				"status": "Available",
+			},
+			doctype="Frappe Site Backup",
+			docname="demo.example.com::demo-20260430120000",
+		)
 
 
 class UnitTestBestEffortDeleteJob(UnitTestCase):

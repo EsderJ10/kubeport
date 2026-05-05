@@ -117,7 +117,7 @@ class KubernetesCommand(Document):
 			frappe.enqueue(
 				"kubeport.tasks.kubernetes_command_tasks.run_kubernetes_command",
 				command_docname=self.name,
-				queue="default",
+				queue="long",
 				enqueue_after_commit=True,
 			)
 			return {"queued": True, "docname": self.name}

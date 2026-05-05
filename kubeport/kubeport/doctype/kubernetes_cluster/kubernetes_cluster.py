@@ -18,6 +18,7 @@ class KubernetesCluster(Document):
 
 		api_server_url: DF.Data | None
 		auth_method: DF.Literal["Kubeconfig", "Bearer Token", "In-Cluster"]
+		backup_access_mode: DF.Literal["ReadWriteMany", "ReadWriteOnce"]
 		backup_storage_class: DF.Data | None
 		bearer_token: DF.Password | None
 		ca_certificate: DF.Code | None
