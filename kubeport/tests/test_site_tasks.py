@@ -9,15 +9,22 @@ from unittest.mock import MagicMock, patch
 from frappe.tests import UnitTestCase
 
 from kubeport.tasks.site_tasks import (
+	BACKUP_MOUNT_PATH,
+	BACKUP_PVC_NAME,
 	_bench_drop_site_command,
+	_bench_backup_command,
 	_bench_migrate_command,
 	_bench_new_site_command,
+	_bench_restore_command,
 	_build_creds_secret_manifest,
 	_build_drop_creds_secret_manifest,
 	_build_drop_env,
 	_build_env,
 	_build_op_job_manifest,
+	_backup_storage_path,
 	_clone_reference_pod_spec,
+	_prepare_backup_ref_spec,
+	_fail_restore_submission,
 	_job_name,
 	_merge_env,
 	_parse_install_apps,
@@ -96,6 +103,11 @@ class UnitTestSiteHelpers(UnitTestCase):
 		cmd = _bench_new_site_command("s1", ["erpnext", "payments"], force=False)
 		self.assertIn('--install-app="erpnext"', cmd)
 		self.assertIn('--install-app="payments"', cmd)
+
+	def test_bench_new_site_command_uses_mariadb_user_host_login_scope(self):
+		cmd = _bench_new_site_command("s1", [], force=False)
+		self.assertIn("--mariadb-user-host-login-scope='%'", cmd)
+		self.assertNotIn("--no-mariadb-socket", cmd)
 
 
 	def test_build_env_admin_password_always_references_creds_secret(self):
@@ -405,6 +417,24 @@ class UnitTestJobManifest(UnitTestCase):
 		self.assertEqual(cmd, 'bench --site "$SITE_NAME" migrate')
 		self.assertNotIn("demo", cmd)
 
+	def test_backup_command_creates_archive_and_metadata_markers(self):
+		cmd = _bench_backup_command()
+		self.assertIn('bench --site "$SITE_NAME" backup --with-files', cmd)
+		self.assertIn('tar -C "$backup_dir" -czf "$BACKUP_ARCHIVE_PATH"', cmd)
+		self.assertIn("KUBEPORT_BACKUP_SIZE", cmd)
+
+	def test_restore_command_uses_archive_and_force_restore(self):
+		cmd = _bench_restore_command()
+		self.assertIn('tar -xzf "$BACKUP_ARCHIVE_PATH"', cmd)
+		self.assertIn('bench --site "$SITE_NAME" restore "$db_file" --force', cmd)
+		self.assertIn("--with-private-files", cmd)
+
+	def test_backup_storage_path_is_inside_backup_mount(self):
+		path = _backup_storage_path("cluster/a", "bench ns", "demo.example.com", "demo.20260430")
+		self.assertTrue(path.startswith(BACKUP_MOUNT_PATH + "/"))
+		self.assertNotIn(" ", path)
+		self.assertNotIn("//", path)
+
 	def test_build_drop_env_omits_admin_password(self):
 		"""Drop-site env must not carry ADMIN_PASSWORD — it is a no-op for
 		drop-site and would expose a credential the Job does not need.
@@ -447,6 +477,211 @@ class UnitTestJobManifest(UnitTestCase):
 		labels = manifest["metadata"]["labels"]
 		self.assertIn("kubeport.io/frappe-site", labels)
 		self.assertIn("app.kubernetes.io/managed-by", labels)
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_applies_rwx_pvc_and_mounts_it(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		from kubernetes.client.rest import ApiException
+
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class="fast-rwx",
+			backup_access_mode="ReadWriteMany",
+		)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.side_effect = ApiException(
+			status=404,
+		)
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		_prepare_backup_ref_spec(
+			doc=SimpleNamespace(),
+			release=SimpleNamespace(cluster="cluster-a"),
+			namespace="ns",
+			api_client=api_client,
+			ref_spec=ref_spec,
+		)
+
+		manifest = mock_apply_resource.call_args.args[1]
+		self.assertEqual(manifest["metadata"]["name"], BACKUP_PVC_NAME)
+		self.assertEqual(manifest["spec"]["accessModes"], ["ReadWriteMany"])
+		self.assertEqual(manifest["spec"]["storageClassName"], "fast-rwx")
+		self.assertEqual(ref_spec["volumes"][0]["persistentVolumeClaim"]["claimName"], BACKUP_PVC_NAME)
+		self.assertEqual(ref_spec["volume_mounts"][0]["mountPath"], BACKUP_MOUNT_PATH)
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_honours_rwo_access_mode(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		from kubernetes.client.rest import ApiException
+
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode="ReadWriteOnce",
+		)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.side_effect = ApiException(
+			status=404,
+		)
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		_prepare_backup_ref_spec(
+			doc=SimpleNamespace(),
+			release=SimpleNamespace(cluster="cluster-a"),
+			namespace="ns",
+			api_client=api_client,
+			ref_spec=ref_spec,
+		)
+
+		manifest = mock_apply_resource.call_args.args[1]
+		self.assertEqual(manifest["spec"]["accessModes"], ["ReadWriteOnce"])
+		self.assertNotIn("storageClassName", manifest["spec"])
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_defaults_to_rwx_when_unset(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		from kubernetes.client.rest import ApiException
+
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode=None,
+		)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.side_effect = ApiException(
+			status=404,
+		)
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		_prepare_backup_ref_spec(
+			doc=SimpleNamespace(),
+			release=SimpleNamespace(cluster="cluster-a"),
+			namespace="ns",
+			api_client=api_client,
+			ref_spec=ref_spec,
+		)
+
+		manifest = mock_apply_resource.call_args.args[1]
+		self.assertEqual(manifest["spec"]["accessModes"], ["ReadWriteMany"])
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_skips_apply_when_existing_pvc_matches(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode="ReadWriteOnce",
+		)
+		existing = SimpleNamespace(spec=SimpleNamespace(access_modes=["ReadWriteOnce"]))
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.return_value = existing
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		_prepare_backup_ref_spec(
+			doc=SimpleNamespace(),
+			release=SimpleNamespace(cluster="cluster-a"),
+			namespace="ns",
+			api_client=api_client,
+			ref_spec=ref_spec,
+		)
+
+		mock_apply_resource.assert_not_called()
+		self.assertEqual(ref_spec["volumes"][0]["persistentVolumeClaim"]["claimName"], BACKUP_PVC_NAME)
+		self.assertEqual(ref_spec["volume_mounts"][0]["mountPath"], BACKUP_MOUNT_PATH)
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_prepare_backup_ref_spec_raises_on_access_mode_mismatch(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode="ReadWriteOnce",
+		)
+		existing = SimpleNamespace(spec=SimpleNamespace(access_modes=["ReadWriteMany"]))
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.return_value = existing
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		with self.assertRaises(RuntimeError) as cm:
+			_prepare_backup_ref_spec(
+				doc=SimpleNamespace(),
+				release=SimpleNamespace(cluster="cluster-a"),
+				namespace="ns",
+				api_client=api_client,
+				ref_spec=ref_spec,
+			)
+
+		message = str(cm.exception)
+		self.assertIn("immutable", message)
+		self.assertIn("ReadWriteMany", message)
+		self.assertIn("ReadWriteOnce", message)
+		mock_apply_resource.assert_not_called()
+
+	@patch("kubeport.tasks.site_tasks.client.CoreV1Api")
+	@patch("kubeport.tasks.site_tasks.apply_resource")
+	@patch("kubeport.tasks.site_tasks.frappe.get_doc")
+	def test_ensure_backup_pvc_converts_422_to_runtime_error(
+		self,
+		mock_get_doc,
+		mock_apply_resource,
+		mock_core_v1,
+	):
+		"""422 from apply_resource (race or pre-existing PVC) becomes a clear RuntimeError."""
+		from kubernetes.client.rest import ApiException
+
+		api_client = MagicMock()
+		mock_get_doc.return_value = SimpleNamespace(
+			backup_storage_class=None,
+			backup_access_mode="ReadWriteMany",
+		)
+		# Simulate: read returns 404 (PVC not found initially)
+		not_found = ApiException(status=404)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.side_effect = [
+			not_found,  # first call in _ensure_backup_pvc
+			SimpleNamespace(spec=SimpleNamespace(access_modes=["ReadWriteOnce"])),  # re-read after 422
+		]
+		# apply_resource raises 422 (PVC was created concurrently with wrong mode)
+		mock_apply_resource.side_effect = ApiException(status=422)
+		ref_spec = {"volumes": [], "volume_mounts": []}
+
+		with self.assertRaises(RuntimeError) as cm:
+			_prepare_backup_ref_spec(
+				doc=SimpleNamespace(),
+				release=SimpleNamespace(cluster="cluster-a"),
+				namespace="ns",
+				api_client=api_client,
+				ref_spec=ref_spec,
+			)
+
+		message = str(cm.exception)
+		self.assertIn("immutable", message)
+		self.assertIn("ReadWriteOnce", message)
+		self.assertIn("ReadWriteMany", message)
 
 
 class UnitTestOperationTokenGuard(UnitTestCase):
@@ -748,6 +983,55 @@ class UnitTestCreateSiteTask(UnitTestCase):
 		self.assertIn("simulated apiserver blip", field_values.get("status_detail", ""))
 
 
+class UnitTestRestoreSubmissionFailure(UnitTestCase):
+	@patch("kubeport.tasks.site_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.site_tasks.frappe.db.set_value")
+	@patch("kubeport.tasks.site_tasks._backup_operation_matches", return_value=True)
+	@patch("kubeport.tasks.site_tasks._site_operation_matches", return_value=True)
+	def test_failure_marks_site_failed_but_backup_available(
+		self,
+		mock_site_matches,
+		mock_backup_matches,
+		mock_set_value,
+		mock_publish,
+	):
+		_fail_restore_submission(
+			"rel-a/demo.example.com",
+			"demo.example.com::demo-20260430120000",
+			"token-1",
+			"Kubernetes API refused the restore Job.",
+		)
+
+		mock_site_matches.assert_called_once_with("rel-a/demo.example.com", "token-1", "Migrating")
+		mock_backup_matches.assert_called_once_with(
+			"demo.example.com::demo-20260430120000",
+			"token-1",
+			("Restoring",),
+		)
+		mock_set_value.assert_any_call("Frappe Site", "rel-a/demo.example.com", {
+			"status": "Failed",
+			"status_detail": "Restore attempt failed: Kubernetes API refused the restore Job.",
+			"operation_job_name": "",
+			"operation_job_token": "",
+		})
+		mock_set_value.assert_any_call("Frappe Site Backup", "demo.example.com::demo-20260430120000", {
+			"status": "Available",
+			"status_detail": "Restore attempt failed: Kubernetes API refused the restore Job.",
+			"operation_job_name": "",
+			"operation_job_token": "",
+		})
+		mock_publish.assert_any_call(
+			"frappe_site_backup_status_update",
+			{
+				"site_docname": "rel-a/demo.example.com",
+				"backup_docname": "demo.example.com::demo-20260430120000",
+				"status": "Available",
+			},
+			doctype="Frappe Site Backup",
+			docname="demo.example.com::demo-20260430120000",
+		)
+
+
 class UnitTestBestEffortDeleteJob(UnitTestCase):
 	def test_ignores_404_without_logging(self):
 		from unittest.mock import patch
@@ -977,8 +1261,9 @@ class UnitTestOnTrashCleanup(UnitTestCase):
 		doc.on_trash = FrappeSite.on_trash.__get__(doc, FrappeSite)
 		return doc
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_enqueues_cancel_for_failed_row_with_job(self, mock_enqueue):
+	def test_on_trash_enqueues_cancel_for_failed_row_with_job(self, mock_enqueue, _mock_cascade):
 		doc = self._doc(status="Failed", operation_job_name="ks-demo-abc123abc123")
 		doc.on_trash()
 		mock_enqueue.assert_called_once()
@@ -986,32 +1271,54 @@ class UnitTestOnTrashCleanup(UnitTestCase):
 		self.assertEqual(kwargs["job_name"], "ks-demo-abc123abc123")
 		self.assertEqual(kwargs["cluster"], "cluster-a")
 		self.assertEqual(kwargs["namespace"], "ns")
+		# Cancel must run on the long queue — it issues a cluster mutation
+		# (delete_namespaced_job), per the project design rule.
+		self.assertEqual(kwargs["queue"], "long")
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_no_enqueue_for_failed_row_without_job(self, mock_enqueue):
+	def test_on_trash_no_enqueue_for_failed_row_without_job(self, mock_enqueue, _mock_cascade):
 		doc = self._doc(status="Failed", operation_job_name=None)
 		doc.on_trash()
 		mock_enqueue.assert_not_called()
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_still_enqueues_for_in_flight_with_job(self, mock_enqueue):
+	def test_on_trash_still_enqueues_for_in_flight_with_job(self, mock_enqueue, _mock_cascade):
 		# Regression guard: existing in-flight cleanup branch still works.
 		doc = self._doc(status="In Progress", operation_job_name="ks-demo-deadbeef0000")
 		doc.on_trash()
 		mock_enqueue.assert_called_once()
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_no_enqueue_for_draft_row(self, mock_enqueue):
+	def test_on_trash_no_enqueue_for_draft_row(self, mock_enqueue, _mock_cascade):
 		doc = self._doc(status="Draft", operation_job_name=None)
 		doc.on_trash()
 		mock_enqueue.assert_not_called()
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
-	def test_on_trash_refuses_migrating_row(self, mock_enqueue):
+	def test_on_trash_refuses_migrating_row(self, mock_enqueue, _mock_cascade):
 		doc = self._doc(status="Migrating", operation_job_name="ks-demo-abc123abc123")
 		with self.assertRaises(frappe.ValidationError):
 			doc.on_trash()
 		mock_enqueue.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	def test_on_trash_cascades_backup_cancellation(self, _mock_enqueue, mock_cascade):
+		"""Trashing a Frappe Site row must cascade to in-flight backups so
+		they don't sit in Pending forever after the parent disappears."""
+		doc = self._doc(status="Failed", operation_job_name="ks-demo-deadbeef0000")
+		doc.name = "rel-a/demo"
+		doc.on_trash()
+		mock_cascade.assert_called_once()
+		# The reason must reference site deletion so the operator viewing
+		# the orphaned backup understands what happened.
+		_args, kwargs = mock_cascade.call_args
+		self.assertEqual(mock_cascade.call_args.args[0], "rel-a/demo")
+		self.assertIn("deleted", kwargs["reason"].lower())
 
 
 class UnitTestCancelSiteConfirmation(UnitTestCase):
@@ -1030,6 +1337,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		doc.cancel_site = FrappeSite.cancel_site.__get__(doc, FrappeSite)
 		return doc
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
@@ -1040,6 +1348,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_msgprint,
 		mock_publish,
 		mock_session,
+		_mock_cascade,
 	):
 		mock_session.user = "alice@example.com"
 		doc = self._doc(status="Migrating")
@@ -1049,6 +1358,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_msgprint.assert_not_called()
 		mock_publish.assert_not_called()
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
@@ -1059,6 +1369,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_msgprint,
 		mock_publish,
 		mock_session,
+		_mock_cascade,
 	):
 		mock_session.user = "alice@example.com"
 		doc = self._doc(status="Migrating")
@@ -1073,6 +1384,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		self.assertIn("destructive cancel acknowledged", detail_value)
 		self.assertIn("alice@example.com", detail_value)
 
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.session")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
 	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint")
@@ -1083,6 +1395,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_msgprint,
 		mock_publish,
 		mock_session,
+		_mock_cascade,
 	):
 		mock_session.user = "alice@example.com"
 		doc = self._doc(status="In Progress")
@@ -1101,9 +1414,178 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		mock_session,
 	):
 		mock_session.user = "alice@example.com"
-		doc = self._doc(status="Deleting")
-		doc.cancel_site()
+		# We need to also patch the cascade here; this test predates it.
+		with patch("kubeport.kubeport.doctype.frappe_site.frappe_site._cancel_inflight_backups_for_site"):
+			doc = self._doc(status="Deleting")
+			doc.cancel_site()
 		mock_enqueue.assert_called_once()
+		# Cancel must run on the long queue per the cluster-mutation rule.
+		_args, kwargs = mock_enqueue.call_args
+		self.assertEqual(kwargs["queue"], "long")
+
+
+class UnitTestCancelInflightBackupsCascade(UnitTestCase):
+	"""When a site is cancelled or trashed, every in-flight backup row
+	linked to it must be force-failed and its operation_token rotated.
+
+	Without this cascade, the backup row stays in Pending / In Progress /
+	Restoring forever (its token is independent of the site's), and
+	``_has_in_flight_backup`` blocks all future backups for that site."""
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.utils.now_datetime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.db.set_value")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.get_all")
+	def test_cascade_fails_each_inflight_backup_row(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_enqueue,
+		mock_publish,
+		mock_now,
+	):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import (
+			_cancel_inflight_backups_for_site,
+		)
+
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="demo::demo-2026",
+				cluster="cluster-a",
+				namespace="ns",
+				operation_job_name="ks-bk-deadbeef",
+			),
+			SimpleNamespace(
+				name="demo::demo-2025",
+				cluster="cluster-a",
+				namespace="ns",
+				operation_job_name="",
+			),
+		]
+
+		_cancel_inflight_backups_for_site("rel-a/demo", reason="Site cancelled.")
+
+		# Both rows get failed.
+		self.assertEqual(mock_set_value.call_count, 2)
+		# Each set_value writes a token + Failed status + detail.
+		for call_args in mock_set_value.call_args_list:
+			fields = call_args.args[2]
+			self.assertEqual(fields["status"], "Failed")
+			self.assertEqual(fields["operation_job_token"], "")
+			self.assertEqual(fields["status_detail"], "Site cancelled.")
+			# operation_token is rotated to a fresh hex value.
+			self.assertTrue(fields["operation_token"])
+			self.assertNotEqual(fields["operation_token"], "")
+		# Only the row with a recorded Job name enqueues a cluster cleanup.
+		mock_enqueue.assert_called_once()
+		_args, kwargs = mock_enqueue.call_args
+		self.assertEqual(kwargs["job_name"], "ks-bk-deadbeef")
+		self.assertEqual(kwargs["queue"], "long")
+		# Realtime events fired for both rows so any open form refreshes.
+		self.assertEqual(mock_publish.call_count, 2)
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.publish_realtime")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.db.set_value")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.get_all")
+	def test_cascade_no_op_when_no_inflight_rows(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_enqueue,
+		mock_publish,
+	):
+		"""No backups in-flight ⇒ no DB writes, no enqueue, no event."""
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import (
+			_cancel_inflight_backups_for_site,
+		)
+
+		mock_get_all.return_value = []
+
+		_cancel_inflight_backups_for_site("rel-a/demo", reason="Site cancelled.")
+
+		mock_set_value.assert_not_called()
+		mock_enqueue.assert_not_called()
+		mock_publish.assert_not_called()
+
+
+class UnitTestBackupRestoreController(UnitTestCase):
+	def _doc(self, **overrides):
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+		doc = MagicMock(spec=FrappeSite)
+		doc.name = overrides.get("name", "rel-a/demo.example.com")
+		doc.status = overrides.get("status", "Active")
+		doc.site_name = overrides.get("site_name", "demo.example.com")
+		doc.bench_release = overrides.get("bench_release", "rel-a")
+		doc.cluster = overrides.get("cluster", "cluster-a")
+		doc.namespace = overrides.get("namespace", "ns")
+		doc._has_in_flight_backup = FrappeSite._has_in_flight_backup.__get__(doc, FrappeSite)
+		doc.backup_site = FrappeSite.backup_site.__get__(doc, FrappeSite)
+		doc.restore_site = FrappeSite.restore_site.__get__(doc, FrappeSite)
+		return doc
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.secrets.token_hex", return_value="tok-1")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe")
+	def test_backup_site_creates_backup_row_and_enqueues_task(self, mock_frappe, _mock_token):
+		doc = self._doc()
+		release = SimpleNamespace(cluster="cluster-a", namespace="ns", release_name="bench-a")
+		backup_doc = MagicMock()
+		backup_doc.name = "demo.example.com::demo-20260430120000"
+
+		def _get_doc(arg, name=None):
+			if isinstance(arg, dict):
+				self.assertEqual(arg["doctype"], "Frappe Site Backup")
+				self.assertEqual(arg["operation_token"], "tok-1")
+				return backup_doc
+			return release
+
+		mock_frappe.get_doc.side_effect = _get_doc
+		mock_frappe.db.exists.return_value = None
+		mock_frappe.session.user = "alice@example.com"
+
+		result = doc.backup_site()
+
+		self.assertEqual(result["backup_docname"], backup_doc.name)
+		backup_doc.insert.assert_called_once_with(ignore_permissions=True)
+		doc.db_set.assert_any_call("status", "In Progress")
+		doc.db_set.assert_any_call("operation_token", "tok-1")
+		mock_frappe.enqueue.assert_called_once()
+		self.assertEqual(mock_frappe.enqueue.call_args.kwargs["backup_docname"], backup_doc.name)
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe")
+	def test_restore_site_requires_destructive_confirmation(self, mock_frappe):
+		doc = self._doc()
+		mock_frappe.throw.side_effect = frappe.ValidationError
+
+		with self.assertRaises(frappe.ValidationError):
+			doc.restore_site("backup-a")
+
+		mock_frappe.enqueue.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.secrets.token_hex", return_value="tok-restore")
+	@patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe")
+	def test_restore_site_marks_backup_restoring_and_enqueues_task(self, mock_frappe, _mock_token):
+		doc = self._doc()
+		backup = MagicMock()
+		backup.name = "backup-a"
+		backup.status = "Available"
+		backup.storage_backend = "pvc"
+		backup.storage_path = "/mnt/kubeport-backups/c/ns/site/backup.tar.gz"
+		backup.cluster = "cluster-a"
+		backup.namespace = "ns"
+		backup.site_name = "demo.example.com"
+		mock_frappe.get_doc.return_value = backup
+		mock_frappe.db.exists.return_value = None
+
+		result = doc.restore_site("backup-a", confirm_destructive=True)
+
+		self.assertEqual(result["backup_docname"], "backup-a")
+		doc.db_set.assert_any_call("status", "Migrating")
+		backup.db_set.assert_any_call("status", "Restoring")
+		backup.db_set.assert_any_call("operation_token", "tok-restore")
+		mock_frappe.enqueue.assert_called_once()
 
 
 class UnitTestRunSiteOp(UnitTestCase):

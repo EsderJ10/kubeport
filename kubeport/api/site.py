@@ -96,3 +96,77 @@ def get_site_job_logs(site_docname: str) -> dict:
 			"logs": "",
 			"error": str(e),
 		}
+
+
+@frappe.whitelist()
+def list_site_backups(site_docname: str) -> list[dict]:
+	"""Return backup rows for a Frappe Site, newest first."""
+	return frappe.get_all(
+		"Frappe Site Backup",
+		filters={"frappe_site": site_docname},
+		fields=[
+			"name",
+			"backup_name",
+			"status",
+			"size_bytes",
+			"storage_path",
+			"started_at",
+			"completed_at",
+			"status_detail",
+		],
+		order_by="creation desc",
+		limit_page_length=50,
+	)
+
+
+@frappe.whitelist()
+def get_site_backup_job_logs(backup_docname: str) -> dict:
+	"""Return stdout logs from the backup or restore Job for a backup row."""
+	doc = frappe.get_doc("Frappe Site Backup", backup_docname)
+	if not doc.operation_job_name:
+		return {"job_name": "", "logs": "", "error": "No backup operation job has been submitted yet."}
+	if not doc.cluster:
+		return {
+			"job_name": doc.operation_job_name,
+			"logs": "",
+			"error": "Backup document is missing cluster information.",
+		}
+
+	try:
+		from kubernetes import client
+		from kubernetes.client.rest import ApiException
+
+		from kubeport.utils.k8s_client import get_k8s_api_client
+
+		api_client = get_k8s_api_client(doc.cluster)
+		core_v1 = client.CoreV1Api(api_client=api_client)
+		pods = core_v1.list_namespaced_pod(
+			namespace=doc.namespace or "default",
+			label_selector=f"job-name={doc.operation_job_name}",
+			_request_timeout=15,
+		)
+		if not pods.items:
+			return {
+				"job_name": doc.operation_job_name,
+				"logs": "",
+				"error": "Job pod not found — it may still be pending or has been cleaned up.",
+			}
+		pod = pods.items[0]
+		pod_name = pod.metadata.name if pod.metadata else None
+		if not pod_name:
+			return {"job_name": doc.operation_job_name, "logs": "", "error": "Job pod name unavailable."}
+		try:
+			logs = core_v1.read_namespaced_pod_log(
+				name=pod_name,
+				namespace=doc.namespace or "default",
+				tail_lines=200,
+				_request_timeout=15,
+			)
+		except ApiException as e:
+			if e.status == 400:
+				logs = ""
+			else:
+				raise
+		return {"job_name": doc.operation_job_name, "logs": logs or "", "error": None}
+	except Exception as e:
+		return {"job_name": doc.operation_job_name, "logs": "", "error": str(e)}

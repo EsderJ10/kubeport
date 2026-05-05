@@ -26,6 +26,7 @@ frappe.ui.form.on('Frappe Site', {
 
 		// Migrate is only meaningful on a healthy site.
 		frm.toggle_display('migrate_site_btn', frm.doc.status === 'Active');
+		frm.toggle_display('backup_site_btn', frm.doc.status === 'Active');
 
 		// Delete drops the bench-side site. Available from Active (the normal
 		// path) and Failed rows that previously launched a Job (so a real site
@@ -65,7 +66,13 @@ frappe.ui.form.on('Frappe Site', {
 				}
 				frm.reload_doc();
 			});
+			frappe.realtime.on('frappe_site_backup_status_update', (data) => {
+				if (data.site_docname && data.site_docname !== frm.doc.name) return;
+				frm.reload_doc();
+			});
 		}
+
+		render_backups(frm);
 	},
 
 	create_site_btn: function (frm) {
@@ -102,6 +109,24 @@ frappe.ui.form.on('Frappe Site', {
 				frappe.call({
 					doc: frm.doc,
 					method: 'migrate_site',
+					callback: function (r) {
+						if (!r.exc) frm.reload_doc();
+					}
+				});
+			}
+		);
+	},
+
+	backup_site_btn: function (frm) {
+		if (frm.is_dirty()) {
+			frappe.throw(__('Save the document before backing up the site.'));
+		}
+		frappe.confirm(
+			__('Create a backup of site "{0}"?', [frm.doc.site_name]),
+			() => {
+				frappe.call({
+					doc: frm.doc,
+					method: 'backup_site',
 					callback: function (r) {
 						if (!r.exc) frm.reload_doc();
 					}
@@ -232,3 +257,158 @@ frappe.ui.form.on('Frappe Site', {
 		});
 	}
 });
+
+function render_backups(frm) {
+	const field = frm.fields_dict.backups_html;
+	if (!field) return;
+	if (frm.is_new()) {
+		field.$wrapper.empty();
+		return;
+	}
+
+	frappe.call({
+		method: 'kubeport.api.site.list_site_backups',
+		args: { site_docname: frm.doc.name },
+		callback: function (r) {
+			const rows = r.message || [];
+			if (!rows.length) {
+				field.$wrapper.html('<div class="text-muted">' + __('No backups') + '</div>');
+				return;
+			}
+			const html = rows.map((row) => {
+				const status_class = {
+					'Available': 'green',
+					'Failed': 'red',
+					'In Progress': 'blue',
+					'Restoring': 'blue',
+					'Pending': 'orange',
+				}[row.status] || 'grey';
+				const size = row.size_bytes ? format_bytes(row.size_bytes) : '';
+				const restore = row.status === 'Available'
+					? `<button class="btn btn-xs btn-primary restore-backup" data-name="${frappe.utils.escape_html(row.name)}">${__('Restore')}</button>`
+					: '';
+				const logs = ['In Progress', 'Restoring', 'Failed'].includes(row.status)
+					? `<button class="btn btn-xs btn-default backup-logs" data-name="${frappe.utils.escape_html(row.name)}">${__('Logs')}</button>`
+					: '';
+				return `
+					<tr>
+						<td><a href="/app/frappe-site-backup/${encodeURIComponent(row.name)}">${frappe.utils.escape_html(row.backup_name || row.name)}</a></td>
+						<td><span class="indicator-pill ${status_class}">${frappe.utils.escape_html(row.status || '')}</span></td>
+						<td>${frappe.utils.escape_html(size)}</td>
+						<td>${frappe.utils.escape_html(row.completed_at || row.started_at || '')}</td>
+						<td class="text-right">${restore} ${logs}</td>
+					</tr>
+				`;
+			}).join('');
+			field.$wrapper.html(`
+				<div class="table-responsive">
+					<table class="table table-bordered table-hover">
+						<thead>
+							<tr>
+								<th>${__('Backup')}</th>
+								<th>${__('Status')}</th>
+								<th>${__('Size')}</th>
+								<th>${__('Time')}</th>
+								<th></th>
+							</tr>
+						</thead>
+						<tbody>${html}</tbody>
+					</table>
+				</div>
+			`);
+			field.$wrapper.find('.restore-backup').on('click', function () {
+				show_restore_dialog(frm, $(this).data('name'));
+			});
+			field.$wrapper.find('.backup-logs').on('click', function () {
+				show_backup_logs($(this).data('name'));
+			});
+		}
+	});
+}
+
+function show_restore_dialog(frm, backup_docname) {
+	const expected = `RESTORE ${frm.doc.site_name}`;
+	const dialog = new frappe.ui.Dialog({
+		title: __('Restore "{0}"', [frm.doc.site_name]),
+		fields: [
+			{
+				fieldtype: 'HTML',
+				fieldname: 'warning',
+				options: `<div class="alert alert-danger">${__('This overwrites the current database and files.')}</div>`,
+			},
+			{
+				fieldtype: 'Data',
+				fieldname: 'confirm',
+				label: __('Type {0}', [expected]),
+				reqd: 1,
+			},
+		],
+		primary_action_label: __('Restore'),
+		primary_action(values) {
+			if ((values.confirm || '').trim() !== expected) {
+				frappe.show_alert({
+					message: __('Confirmation text does not match.'),
+					indicator: 'orange',
+				});
+				return;
+			}
+			dialog.hide();
+			frappe.call({
+				doc: frm.doc,
+				method: 'restore_site',
+				args: {
+					backup_docname: backup_docname,
+					confirm_destructive: 1,
+				},
+				callback: function (r) {
+					if (!r.exc) frm.reload_doc();
+				}
+			});
+		},
+	});
+	dialog.show();
+	const $btn = dialog.get_primary_btn();
+	$btn.prop('disabled', true);
+	dialog.fields_dict.confirm.$input.on('input', function () {
+		$btn.prop('disabled', ($(this).val() || '').trim() !== expected);
+	});
+}
+
+function show_backup_logs(backup_docname) {
+	frappe.call({
+		method: 'kubeport.api.site.get_site_backup_job_logs',
+		args: { backup_docname: backup_docname },
+		freeze: true,
+		freeze_message: __('Fetching job logs...'),
+		callback: function (r) {
+			const payload = r.message || {};
+			const header = payload.job_name
+				? __('Job: {0}', [payload.job_name])
+				: __('No job has been submitted yet.');
+			const body = payload.error
+				? `<div class="text-muted">${frappe.utils.escape_html(payload.error)}</div>`
+				: `<pre style="white-space: pre-wrap; max-height: 60vh; overflow: auto;">${
+					frappe.utils.escape_html(payload.logs || __('(no logs yet)'))
+				}</pre>`;
+			const dialog = new frappe.ui.Dialog({
+				title: __('Backup Job Logs'),
+				size: 'large',
+			});
+			dialog.$body.html(`<p><strong>${header}</strong></p>${body}`);
+			dialog.show();
+		}
+	});
+}
+
+function format_bytes(value) {
+	const bytes = Number(value || 0);
+	if (!bytes) return '';
+	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	let size = bytes;
+	let index = 0;
+	while (size >= 1024 && index < units.length - 1) {
+		size = size / 1024;
+		index += 1;
+	}
+	return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import frappe
@@ -33,6 +34,8 @@ from kubeport.utils.discovery import (
 )
 from kubeport.utils.k8s_client import get_k8s_api_client
 from kubeport.utils.k8s_resources import apply_resource
+
+FRAPPE_BENCH_ROOT = "/home/frappe/frappe-bench"
 
 _STATUS_DETAIL_LIMIT = 500
 _JOB_TTL_SECONDS = 7200  # 2 h — enough for reconciliation (5-min cadence) to read result
@@ -47,8 +50,17 @@ _JOB_ACTIVE_DEADLINE_SECONDS = 1800
 # orphan-sweep in reconciliation to find resources the DocType layer has lost
 # track of (e.g. worker hard-killed between Job apply and db_set).
 SITE_DOC_LABEL = "kubeport.io/frappe-site"
+SITE_BACKUP_DOC_LABEL = "kubeport.io/frappe-site-backup"
+# Tags Jobs whose lifecycle is self-managed by ttlSecondsAfterFinished and
+# which are NOT referenced by any DocType row.  Today this is only the
+# archive-delete cleanup Job.  The orphan sweep skips Jobs carrying this
+# label so it does not double-collect them.
+OPERATION_LABEL = "kubeport.io/operation"
+SELF_MANAGED_OPERATION_VALUES = frozenset({"archive-delete"})
 MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 MANAGED_BY_VALUE = "kubeport"
+BACKUP_PVC_NAME = "kubeport-backups"
+BACKUP_MOUNT_PATH = "/mnt/kubeport-backups"
 # Duplicated from frappe_site.py on purpose: if a malformed value ever reaches
 # the worker (direct DB write, schema import, etc.), we must not interpolate
 # shell metacharacters into the bench command string.
@@ -90,6 +102,24 @@ _MIGRATE_OP_CONFIG = SiteOpConfig(
 	container_label="migrate-site",
 	failure_log_title="Frappe Site Migrate Submission Failed",
 	failure_detail_prefix="Migrate Job submission failed",
+)
+
+
+_BACKUP_OP_CONFIG = SiteOpConfig(
+	op_kind="backup",
+	expected_status="In Progress",
+	container_label="backup-site",
+	failure_log_title="Frappe Site Backup Submission Failed",
+	failure_detail_prefix="Backup Job submission failed",
+)
+
+
+_RESTORE_OP_CONFIG = SiteOpConfig(
+	op_kind="restore",
+	expected_status="Migrating",
+	container_label="restore-site",
+	failure_log_title="Frappe Site Restore Submission Failed",
+	failure_detail_prefix="Restore Job submission failed",
 )
 
 
@@ -241,6 +271,193 @@ def _migrate_env(doc: Any, creds_secret_name: str | None) -> list[dict[str, Any]
 	return [{"name": "SITE_NAME", "value": doc.site_name}]
 
 
+def _backup_env(site_name: str, storage_path: str) -> list[dict[str, Any]]:
+	return [
+		{"name": "SITE_NAME", "value": site_name},
+		{"name": "BACKUP_ARCHIVE_PATH", "value": storage_path},
+		{"name": "BACKUP_TARGET_DIR", "value": storage_path.rsplit("/", 1)[0]},
+	]
+
+
+def _restore_env(site_name: str, storage_path: str) -> list[dict[str, Any]]:
+	return [
+		{"name": "SITE_NAME", "value": site_name},
+		{"name": "BACKUP_ARCHIVE_PATH", "value": storage_path},
+	]
+
+
+def _bench_backup_command() -> str:
+	return r"""
+set -euo pipefail
+backup_dir="sites/$SITE_NAME/private/backups"
+mkdir -p "$backup_dir" "$BACKUP_TARGET_DIR"
+before="$(mktemp)"
+after="$(mktemp)"
+find "$backup_dir" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort > "$before" || true
+bench --site "$SITE_NAME" backup --with-files
+find "$backup_dir" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort > "$after"
+new_files="$(comm -13 "$before" "$after" || true)"
+if [ -z "$new_files" ]; then
+	echo "bench backup did not create any files in $backup_dir"
+	exit 1
+fi
+printf '%s\n' "$new_files" > /tmp/kubeport-backup-files.txt
+tar -C "$backup_dir" -czf "$BACKUP_ARCHIVE_PATH" -T /tmp/kubeport-backup-files.txt
+size="$(stat -c '%s' "$BACKUP_ARCHIVE_PATH")"
+first_file="$(head -n 1 /tmp/kubeport-backup-files.txt)"
+printf '%s' "$size" > "$BACKUP_ARCHIVE_PATH.size"
+printf '%s' "$first_file" > "$BACKUP_ARCHIVE_PATH.name"
+echo "KUBEPORT_BACKUP_ARCHIVE=$BACKUP_ARCHIVE_PATH"
+echo "KUBEPORT_BACKUP_SIZE=$size"
+echo "KUBEPORT_BENCH_ARCHIVE=$first_file"
+""".strip()
+
+
+def _bench_restore_command() -> str:
+	return r"""
+set -euo pipefail
+restore_dir="$(mktemp -d)"
+tar -xzf "$BACKUP_ARCHIVE_PATH" -C "$restore_dir"
+db_file="$(find "$restore_dir" -maxdepth 1 -type f -name '*database.sql.gz' | sort | head -n 1)"
+if [ -z "$db_file" ]; then
+	echo "Backup archive does not contain a database.sql.gz file"
+	exit 1
+fi
+public_file="$(find "$restore_dir" -maxdepth 1 -type f -name '*public-files.tar' | sort | head -n 1)"
+private_file="$(find "$restore_dir" -maxdepth 1 -type f -name '*private-files.tar' | sort | head -n 1)"
+cmd=(bench --site "$SITE_NAME" restore "$db_file" --force)
+if [ -n "$public_file" ]; then
+	cmd+=(--with-public-files "$public_file")
+fi
+if [ -n "$private_file" ]; then
+	cmd+=(--with-private-files "$private_file")
+fi
+"${cmd[@]}"
+echo "KUBEPORT_RESTORE_ARCHIVE=$BACKUP_ARCHIVE_PATH"
+""".strip()
+
+
+def _prepare_backup_ref_spec(
+	doc: Any,
+	release: Any,
+	namespace: str,
+	api_client: client.ApiClient,
+	ref_spec: dict[str, Any],
+) -> None:
+	_ensure_backup_pvc(api_client, release.cluster, namespace)
+	volumes = ref_spec.setdefault("volumes", [])
+	mounts = ref_spec.setdefault("volume_mounts", [])
+	if not any(volume.get("name") == "kubeport-backups" for volume in volumes):
+		volumes.append({
+			"name": "kubeport-backups",
+			"persistentVolumeClaim": {"claimName": BACKUP_PVC_NAME},
+		})
+	if not any(mount.get("name") == "kubeport-backups" for mount in mounts):
+		mounts.append({"name": "kubeport-backups", "mountPath": BACKUP_MOUNT_PATH})
+
+
+def _ensure_backup_pvc(api_client: client.ApiClient, cluster_name: str, namespace: str) -> None:
+	"""Ensure the namespace-local kubeport-backups PVC exists with the configured spec.
+
+	PVC ``spec.accessModes`` and ``spec.storageClassName`` are immutable after
+	creation — server-side apply with a different value returns 422.  Read the
+	PVC first; if it already exists with a mismatched access mode (the common
+	case after switching ``backup_access_mode`` on the cluster doc), surface a
+	clear error instead of letting the cryptic 422 propagate.
+	"""
+	from kubernetes.client.rest import ApiException
+
+	cluster = frappe.get_doc("Kubernetes Cluster", cluster_name)
+	desired_access_mode = getattr(cluster, "backup_access_mode", None) or "ReadWriteMany"
+	desired_storage_class = getattr(cluster, "backup_storage_class", None) or None
+
+	core_v1 = client.CoreV1Api(api_client=api_client)
+	try:
+		existing = core_v1.read_namespaced_persistent_volume_claim(
+			name=BACKUP_PVC_NAME,
+			namespace=namespace,
+			_request_timeout=15,
+		)
+	except ApiException as e:
+		if e.status != 404:
+			raise
+		existing = None
+
+	if existing is not None:
+		existing_modes = list((existing.spec.access_modes if existing.spec else None) or [])
+		if desired_access_mode not in existing_modes:
+			raise RuntimeError(
+				f"PersistentVolumeClaim '{BACKUP_PVC_NAME}' in namespace '{namespace}' "
+				f"already exists with accessModes={existing_modes}, but the cluster's "
+				f"Backup PVC Access Mode is '{desired_access_mode}'.  PVC accessModes "
+				f"are immutable; delete the PVC to recreate it (this discards any "
+				f"backup archives stored on it)."
+			)
+		return
+
+	manifest: dict[str, Any] = {
+		"apiVersion": "v1",
+		"kind": "PersistentVolumeClaim",
+		"metadata": {
+			"name": BACKUP_PVC_NAME,
+			"namespace": namespace,
+			"labels": {
+				MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+			},
+		},
+		"spec": {
+			"accessModes": [desired_access_mode],
+			"resources": {"requests": {"storage": "10Gi"}},
+		},
+	}
+	if desired_storage_class:
+		manifest["spec"]["storageClassName"] = desired_storage_class
+
+	try:
+		apply_resource(api_client, manifest, namespace)
+	except ApiException as e:
+		if e.status != 422:
+			raise
+		# 422 can arrive in two cases: (a) the PVC was created between our read and
+		# this apply (rare race), or (b) the cluster's desired accessMode differs from
+		# what was already committed.  Re-read to produce a clear, actionable error.
+		try:
+			race_pvc = core_v1.read_namespaced_persistent_volume_claim(
+				name=BACKUP_PVC_NAME, namespace=namespace, _request_timeout=15
+			)
+			existing_modes = list((race_pvc.spec.access_modes if race_pvc.spec else None) or [])
+		except Exception:
+			existing_modes = ["<unreadable>"]
+		raise RuntimeError(
+			f"PersistentVolumeClaim '{BACKUP_PVC_NAME}' in namespace '{namespace}' "
+			f"already exists with accessModes={existing_modes} and cannot be changed to "
+			f"'{desired_access_mode}' (PVC spec is immutable). To fix: either set the "
+			f"cluster's Backup PVC Access Mode to '{existing_modes[0] if existing_modes else '?'}' "
+			f"or delete the PVC to recreate it (this discards backup archives on it)."
+		) from e
+
+
+def _backup_storage_path(cluster: str, namespace: str, site_name: str, backup_name: str) -> str:
+	return "/".join([
+		BACKUP_MOUNT_PATH,
+		_safe_path_segment(cluster),
+		_safe_path_segment(namespace),
+		_safe_path_segment(site_name),
+		f"{_safe_path_segment(backup_name)}.tar.gz",
+	])
+
+
+def _safe_path_segment(value: str) -> str:
+	sanitized = re.sub(r"[^a-zA-Z0-9._-]", "-", value or "unknown")
+	sanitized = re.sub(r"-+", "-", sanitized).strip("-.")
+	return sanitized or "unknown"
+
+
+def _archive_delete_job_name(storage_path: str) -> str:
+	slug = _safe_path_segment(storage_path.rsplit("/", 1)[-1]).lower()
+	return f"ks-delete-backup-{slug[:30]}"
+
+
 def migrate_site_task(site_docname: str, operation_token: str):
 	"""Background task: submit a Kubernetes Job that runs ``bench migrate``."""
 	_run_site_op(
@@ -251,6 +468,158 @@ def migrate_site_task(site_docname: str, operation_token: str):
 		build_env=_migrate_env,
 		build_creds_secret=None,
 	)
+
+
+def backup_site_task(site_docname: str, backup_docname: str, operation_token: str):
+	"""Background task: submit a Kubernetes Job that runs ``bench backup``."""
+	if not _backup_operation_matches(backup_docname, operation_token, ("Pending",)):
+		return
+
+	backup = frappe.get_doc("Frappe Site Backup", backup_docname)
+	storage_path = backup.storage_path or _backup_storage_path(
+		cluster=backup.cluster,
+		namespace=backup.namespace or "default",
+		site_name=backup.site_name,
+		backup_name=backup.backup_name,
+	)
+	backup.db_set("storage_path", storage_path)
+
+	def _record_backup_job(doc: Any, release: Any, job_name: str, token: str, namespace: str) -> bool:
+		if not _backup_operation_matches(backup_docname, token, ("Pending",)):
+			return False
+		now = frappe.utils.now_datetime()
+		frappe.db.set_value("Frappe Site Backup", backup_docname, {
+			"status": "In Progress",
+			"started_at": now,
+			"operation_started_at": now,
+			"operation_job_name": job_name,
+			"operation_job_token": token,
+			"status_detail": "",
+		})
+		frappe.publish_realtime(
+			"frappe_site_backup_status_update",
+			{"site_docname": site_docname, "backup_docname": backup_docname, "status": "In Progress"},
+			doctype="Frappe Site Backup",
+			docname=backup_docname,
+		)
+		return True
+
+	def _fail_backup_submission(doc: Any, error: Exception) -> None:
+		_detail = _truncate(f"Backup Job submission failed: {error}")
+		doc.db_set("status", "Active")
+		doc.db_set("status_detail", _detail)
+		_fail_backup_row(backup_docname, operation_token, _detail)
+		frappe.publish_realtime(
+			"frappe_site_status_update",
+			{"site_docname": site_docname, "status": "Active"},
+			doctype="Frappe Site",
+			docname=site_docname,
+		)
+
+	_run_site_op(
+		site_docname=site_docname,
+		operation_token=operation_token,
+		config=_BACKUP_OP_CONFIG,
+		build_command=lambda doc: _bench_backup_command(),
+		build_env=lambda doc, secret: _backup_env(doc.site_name, storage_path),
+		build_creds_secret=None,
+		prepare_ref_spec=_prepare_backup_ref_spec,
+		record_job=_record_backup_job,
+		handle_submission_failure=_fail_backup_submission,
+		extra_job_labels={SITE_BACKUP_DOC_LABEL: _safe_label_value(backup_docname)},
+	)
+
+
+def restore_site_task(site_docname: str, backup_docname: str, operation_token: str):
+	"""Background task: submit a Kubernetes Job that runs ``bench restore``."""
+	if not _backup_operation_matches(backup_docname, operation_token, ("Restoring",)):
+		return
+
+	backup = frappe.get_doc("Frappe Site Backup", backup_docname)
+	if not backup.storage_path:
+		_fail_restore_submission(site_docname, backup_docname, operation_token, "Backup storage path is empty.")
+		return
+
+	def _record_restore_job(doc: Any, release: Any, job_name: str, token: str, namespace: str) -> bool:
+		if not _backup_operation_matches(backup_docname, token, ("Restoring",)):
+			return False
+		frappe.db.set_value("Frappe Site Backup", backup_docname, {
+			"operation_job_name": job_name,
+			"operation_job_token": token,
+			"operation_started_at": frappe.utils.now_datetime(),
+			"status_detail": "",
+		})
+		frappe.publish_realtime(
+			"frappe_site_backup_status_update",
+			{"site_docname": site_docname, "backup_docname": backup_docname, "status": "Restoring"},
+			doctype="Frappe Site Backup",
+			docname=backup_docname,
+		)
+		return True
+
+	def _fail_restore_submit(doc: Any, error: Exception) -> None:
+		_fail_restore_submission(
+			site_docname,
+			backup_docname,
+			operation_token,
+			f"Restore Job submission failed: {error}",
+		)
+
+	_run_site_op(
+		site_docname=site_docname,
+		operation_token=operation_token,
+		config=_RESTORE_OP_CONFIG,
+		build_command=lambda doc: _bench_restore_command(),
+		build_env=lambda doc, secret: _restore_env(doc.site_name, backup.storage_path),
+		build_creds_secret=None,
+		prepare_ref_spec=_prepare_backup_ref_spec,
+		record_job=_record_restore_job,
+		handle_submission_failure=_fail_restore_submit,
+		extra_job_labels={SITE_BACKUP_DOC_LABEL: _safe_label_value(backup_docname)},
+	)
+
+
+def delete_backup_archive_task(cluster: str, namespace: str, release_name: str, storage_path: str):
+	"""Best-effort archive delete for an Available backup row being trashed."""
+	if not storage_path:
+		return
+
+	try:
+		api_client = get_k8s_api_client(cluster)
+		core_v1 = client.CoreV1Api(api_client=api_client)
+		ref_pod = _select_site_discovery_pod(
+			core_v1=core_v1,
+			namespace=namespace,
+			release_name=release_name,
+		)
+		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
+		_prepare_backup_ref_spec(
+			SimpleNamespace(),
+			SimpleNamespace(cluster=cluster),
+			namespace,
+			api_client,
+			ref_spec,
+		)
+		job_name = _archive_delete_job_name(storage_path)
+		job_manifest = _build_op_job_manifest(
+			job_name=job_name,
+			namespace=namespace,
+			site_docname=f"backup-archive/{job_name}",
+			operation_label="delete-backup",
+			container_command='rm -f "$BACKUP_ARCHIVE_PATH" "$BACKUP_ARCHIVE_PATH.size" "$BACKUP_ARCHIVE_PATH.name"',
+			container_env=[{"name": "BACKUP_ARCHIVE_PATH", "value": storage_path}],
+			ref_spec=ref_spec,
+			extra_labels={
+				SITE_BACKUP_DOC_LABEL: _safe_label_value(job_name),
+				OPERATION_LABEL: "archive-delete",
+			},
+		)
+		apply_resource(api_client, job_manifest, namespace)
+	except Exception as e:
+		frappe.log_error(
+			title="Frappe Site Backup Archive Delete Failed",
+			message=str(e),
+		)
 
 
 def _attach_creds_secret_owner_ref(
@@ -290,6 +659,10 @@ def _run_site_op(
 	build_command: Callable[[Any], str],
 	build_env: Callable[[Any, str | None], list[dict[str, Any]]],
 	build_creds_secret: Callable[[Any, str], dict[str, Any] | None] | None = None,
+	prepare_ref_spec: Callable[[Any, Any, str, client.ApiClient, dict[str, Any]], None] | None = None,
+	record_job: Callable[[Any, Any, str, str, str], bool] | None = None,
+	handle_submission_failure: Callable[[Any, Exception], None] | None = None,
+	extra_job_labels: dict[str, str] | None = None,
 ) -> None:
 	"""Run a one-shot bench operation Job under the shared lifecycle scaffolding."""
 	if not _site_operation_matches(site_docname, operation_token, config.expected_status):
@@ -319,6 +692,8 @@ def _run_site_op(
 			release_name=release_name,
 		)
 		ref_spec = _clone_reference_pod_spec(api_client, ref_pod)
+		if prepare_ref_spec is not None:
+			prepare_ref_spec(doc, release, namespace, api_client, ref_spec)
 
 		job_name = _job_name(doc.site_name, operation_token)
 		job_name_for_cleanup = job_name
@@ -339,6 +714,7 @@ def _run_site_op(
 			container_command=bench_cmd,
 			container_env=container_env,
 			ref_spec=ref_spec,
+			extra_labels=extra_job_labels,
 		)
 
 		apply_resource(api_client, job_manifest, namespace)
@@ -358,14 +734,19 @@ def _run_site_op(
 				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
 			return
 
-		doc.db_set("operation_job_name", job_name)
-		doc.db_set("operation_job_token", operation_token)
-		frappe.publish_realtime(
-			"frappe_site_status_update",
-			{"site_docname": site_docname, "status": config.expected_status, "job_name": job_name},
-			doctype="Frappe Site",
-			docname=site_docname,
-		)
+		if record_job is None:
+			doc.db_set("operation_job_name", job_name)
+			doc.db_set("operation_job_token", operation_token)
+			frappe.publish_realtime(
+				"frappe_site_status_update",
+				{"site_docname": site_docname, "status": config.expected_status, "job_name": job_name},
+				doctype="Frappe Site",
+				docname=site_docname,
+			)
+		elif not record_job(doc, release, job_name, operation_token, namespace):
+			_best_effort_delete_job(api_client, job_name, namespace)
+			if creds_secret_name:
+				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
 
 	except Exception as e:
 		if api_client is not None and namespace:
@@ -377,18 +758,22 @@ def _run_site_op(
 		if not _site_operation_matches(site_docname, operation_token, config.expected_status):
 			return
 
-		doc.db_set("status", "Failed")
-		doc.db_set("status_detail", _truncate(f"{config.failure_detail_prefix}: {e}"))
+		if handle_submission_failure is not None:
+			handle_submission_failure(doc, e)
+		else:
+			doc.db_set("status", "Failed")
+			doc.db_set("status_detail", _truncate(f"{config.failure_detail_prefix}: {e}"))
 		frappe.log_error(
 			title=f"{config.failure_log_title}: {site_docname}",
 			message=str(e),
 		)
-		frappe.publish_realtime(
-			"frappe_site_status_update",
-			{"site_docname": site_docname, "status": "Failed"},
-			doctype="Frappe Site",
-			docname=site_docname,
-		)
+		if handle_submission_failure is None:
+			frappe.publish_realtime(
+				"frappe_site_status_update",
+				{"site_docname": site_docname, "status": "Failed"},
+				doctype="Frappe Site",
+				docname=site_docname,
+			)
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +788,7 @@ def _build_op_job_manifest(
 	container_command: str,
 	container_env: list[dict[str, Any]],
 	ref_spec: dict[str, Any],
+	extra_labels: dict[str, str] | None = None,
 ) -> dict[str, Any]:
 	"""Build a Job manifest for any single-shot bench operation.
 
@@ -422,6 +808,7 @@ def _build_op_job_manifest(
 		"args": [container_command],
 		"env": env,
 		"volumeMounts": ref_spec.get("volume_mounts") or [],
+		"workingDir": FRAPPE_BENCH_ROOT,
 	}
 	if ref_spec.get("container_env_from"):
 		container["envFrom"] = ref_spec["container_env_from"]
@@ -437,16 +824,20 @@ def _build_op_job_manifest(
 	}
 	pod_spec.update(ref_spec.get("pod_level") or {})
 
+	labels = {
+		MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+		SITE_DOC_LABEL: _safe_label_value(site_docname),
+	}
+	if extra_labels:
+		labels.update(extra_labels)
+
 	return {
 		"apiVersion": "batch/v1",
 		"kind": "Job",
 		"metadata": {
 			"name": job_name,
 			"namespace": namespace,
-			"labels": {
-				MANAGED_BY_LABEL: MANAGED_BY_VALUE,
-				SITE_DOC_LABEL: _safe_label_value(site_docname),
-			},
+			"labels": labels,
 		},
 		"spec": {
 			"backoffLimit": 0,
@@ -473,7 +864,7 @@ def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool
 		"bench",
 		"new-site",
 		'"$SITE_NAME"',
-		"--no-mariadb-socket",
+		"--mariadb-user-host-login-scope='%'",
 		'--db-type="$DB_TYPE"',
 		'--mariadb-root-username="$DB_ROOT_USER"',
 		'--mariadb-root-password="$DB_ROOT_PASSWORD"',
@@ -940,3 +1331,89 @@ def _site_operation_matches(
 		site_docname,
 	)
 	return False
+
+
+def _backup_operation_matches(
+	backup_docname: str,
+	operation_token: str,
+	expected_statuses: tuple[str, ...],
+) -> bool:
+	current = frappe.db.get_value(
+		"Frappe Site Backup",
+		backup_docname,
+		["operation_token", "status"],
+		as_dict=True,
+	)
+	if (
+		current
+		and current.get("operation_token") == operation_token
+		and current.get("status") in expected_statuses
+	):
+		return True
+
+	frappe.logger("kubeport").info(
+		"Skipping stale backup worker for Frappe Site Backup '%s' because token/status "
+		"no longer match the queued operation.",
+		backup_docname,
+	)
+	return False
+
+
+def _fail_backup_row(backup_docname: str, operation_token: str, detail: str) -> bool:
+	if not _backup_operation_matches(backup_docname, operation_token, ("Pending", "In Progress")):
+		return False
+	frappe.db.set_value("Frappe Site Backup", backup_docname, {
+		"status": "Failed",
+		"status_detail": _truncate(detail),
+		"completed_at": frappe.utils.now_datetime(),
+		"operation_job_name": "",
+		"operation_job_token": "",
+	})
+	frappe.publish_realtime(
+		"frappe_site_backup_status_update",
+		{"backup_docname": backup_docname, "status": "Failed"},
+		doctype="Frappe Site Backup",
+		docname=backup_docname,
+	)
+	return True
+
+
+def _restore_failure_detail(detail: str) -> str:
+	if detail.lower().startswith("restore attempt failed"):
+		return detail
+	return f"Restore attempt failed: {detail}"
+
+
+def _fail_restore_submission(
+	site_docname: str,
+	backup_docname: str,
+	operation_token: str,
+	detail: str,
+) -> None:
+	detail = _truncate(_restore_failure_detail(detail))
+	if _site_operation_matches(site_docname, operation_token, "Migrating"):
+		frappe.db.set_value("Frappe Site", site_docname, {
+			"status": "Failed",
+			"status_detail": detail,
+			"operation_job_name": "",
+			"operation_job_token": "",
+		})
+		frappe.publish_realtime(
+			"frappe_site_status_update",
+			{"site_docname": site_docname, "status": "Failed"},
+			doctype="Frappe Site",
+			docname=site_docname,
+		)
+	if _backup_operation_matches(backup_docname, operation_token, ("Restoring",)):
+		frappe.db.set_value("Frappe Site Backup", backup_docname, {
+			"status": "Available",
+			"status_detail": detail,
+			"operation_job_name": "",
+			"operation_job_token": "",
+		})
+	frappe.publish_realtime(
+		"frappe_site_backup_status_update",
+		{"site_docname": site_docname, "backup_docname": backup_docname, "status": "Available"},
+		doctype="Frappe Site Backup",
+		docname=backup_docname,
+	)

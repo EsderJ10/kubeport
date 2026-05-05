@@ -5,10 +5,11 @@ Periodic task that compares desired state (Frappe DB) with actual state
 (Kubernetes cluster) and flags drift.  Runs via ``scheduler_events`` in
 ``hooks.py`` every 5 minutes.
 
-Covers three DocTypes:
+Covers four DocTypes:
 - **Helm Release** — combines ``helm status`` with workload readiness checks
 - **Service Bundle** — uses K8s API to check raw manifest resources
 - **Frappe Site** — polls Kubernetes Job status for in-progress site creations
+- **Frappe Site Backup** — polls backup/restore Jobs and finalizes backup rows
 """
 
 from datetime import datetime, timezone
@@ -30,6 +31,24 @@ SITE_PROBE_EXISTS = "exists"
 SITE_PROBE_MISSING = "missing"
 SITE_PROBE_UNKNOWN = "unknown"
 
+# Maximum time the synchronous archive probe Job is allowed to take from
+# submission to readable logs.  busybox is small (~1MB) so cold-pull + start
+# is typically <10s; on a cluster with the image cached it is 2–3s.  This
+# bounds reconciliation tick latency added by gone-Job recovery.
+_BACKUP_PROBE_TIMEOUT_SECONDS = 15
+_BACKUP_PROBE_IMAGE = "busybox:1.36"
+# Cap how many synchronous archive probes one reconciliation tick will run.
+# Each probe can take up to _BACKUP_PROBE_TIMEOUT_SECONDS, and the periodic
+# task budget is the RQ default of 300 s minus the rest of the work.  At 5
+# gone-Job probes we spend at most ~75 s; remaining gone-Job rows defer to
+# the next tick (their state is already terminal on-disk so deferring is
+# safe).
+_BACKUP_PROBE_PER_TICK_LIMIT = 5
+# busybox runs `cat` — adding the small overhead of a Job + Pod startup,
+# 60 s is comfortably past the worst image-pull case while still letting
+# the cluster reclaim the resources promptly.
+_BACKUP_PROBE_TTL_SECONDS = 60
+
 # The worker records operation_job_name after Kubernetes acknowledges Job
 # apply.  The sweep must not race that apply -> db_set window.
 _ORPHAN_SWEEP_GRACE_SECONDS = 300
@@ -45,6 +64,16 @@ def reconcile_all_releases():
 	_reconcile_service_bundles()
 	_reconcile_frappe_sites()
 	_sweep_orphan_site_jobs()
+
+
+def reconcile_site_backups():
+	"""Periodic task: finalize in-flight Frappe Site Backup and Restore operations.
+
+	Runs every 5 minutes as a separate scheduled job so that blocking K8s probe
+	calls (pod exec, log reads) cannot consume the reconcile_all_releases budget
+	and trigger the RQ 300-second task timeout.
+	"""
+	_reconcile_frappe_site_backups()
 
 
 def _reconcile_helm_releases():
@@ -351,6 +380,7 @@ def _reconcile_service_bundles():
 
 
 _SITE_IN_FLIGHT_STATUSES = ("In Progress", "Deleting", "Migrating")
+_BACKUP_IN_FLIGHT_STATUSES = ("In Progress", "Restoring")
 
 
 def _reconcile_frappe_sites():
@@ -418,6 +448,224 @@ def _reconcile_frappe_sites():
 					title=f"Frappe Site Reconciliation Error: {site.name}",
 					message=str(e),
 				)
+
+
+def _reconcile_frappe_site_backups():
+	"""Poll Kubernetes Job status for in-flight backup and restore operations."""
+	from collections import defaultdict
+
+	from kubernetes import client
+
+	from kubeport.utils.k8s_client import get_k8s_api_client
+
+	in_flight = frappe.get_all(
+		"Frappe Site Backup",
+		filters={"status": ("in", _BACKUP_IN_FLIGHT_STATUSES)},
+		fields=[
+			"name", "frappe_site", "cluster", "namespace", "status", "site_name",
+			"source_bench_release", "operation_job_name", "operation_job_token",
+			"operation_token", "storage_path", "size_bytes",
+		],
+	)
+
+	by_cluster: dict[str, list["frappe._dict"]] = defaultdict(list)
+	for backup in in_flight:
+		if backup.operation_job_name:
+			by_cluster[backup.cluster].append(backup)
+
+	# Per-tick probe budget shared across every cluster in this reconcile pass.
+	# Each gone-Job probe can take up to _BACKUP_PROBE_TIMEOUT_SECONDS, and the
+	# periodic task lives inside the RQ default 300 s window — bounding the
+	# total to _BACKUP_PROBE_PER_TICK_LIMIT keeps a fleet of clusters from
+	# multiplying the cost.  Remaining gone-Job rows defer to the next tick:
+	# their state is already terminal on disk, so deferring is safe.
+	probe_budget = {"remaining": _BACKUP_PROBE_PER_TICK_LIMIT}
+
+	for cluster_name, backups in by_cluster.items():
+		try:
+			api_client = get_k8s_api_client(cluster_name)
+		except Exception as e:
+			for backup in backups:
+				frappe.log_error(
+					title=f"Frappe Site Backup Reconciliation Error: {backup.name}",
+					message=str(e),
+				)
+			continue
+
+		batch_v1 = client.BatchV1Api(api_client=api_client)
+		core_v1 = client.CoreV1Api(api_client=api_client)
+
+		for backup in backups:
+			try:
+				if backup.status == "In Progress":
+					_reconcile_site_backup(backup, batch_v1, core_v1, api_client, probe_budget)
+				elif backup.status == "Restoring":
+					_reconcile_site_restore(backup, batch_v1, core_v1)
+			except Exception as e:
+				frappe.log_error(
+					title=f"Frappe Site Backup Reconciliation Error: {backup.name}",
+					message=str(e),
+				)
+
+
+def _reconcile_site_backup(
+	backup: "frappe._dict",
+	batch_v1: "client.BatchV1Api",
+	core_v1: "client.CoreV1Api",
+	api_client: "client.ApiClient",
+	probe_budget: dict[str, int] | None = None,
+) -> None:
+	job, gone = _read_op_job(backup, batch_v1)
+	if gone:
+		# Job aged out (TTL elapsed) before reconciliation read its status.
+		# size_bytes is only ever written on the Available transition itself,
+		# so the only authoritative signal here is the PVC ground truth.
+		if not _take_probe_budget(probe_budget):
+			# Budget exhausted for this tick; the row stays In Progress and
+			# the next tick will retry.  This is safe: gone-Job state is
+			# already terminal on disk, deferring only delays recovery.
+			return
+		probe_state, probe_size = _probe_backup_archive_on_pvc(backup, api_client, core_v1)
+		if probe_state == SITE_PROBE_EXISTS:
+			_finalize_backup_status(
+				backup,
+				"In Progress",
+				"Available",
+				"",
+				size_bytes=probe_size or 0,
+			)
+		elif probe_state == SITE_PROBE_MISSING:
+			_finalize_backup_status(
+				backup,
+				"In Progress",
+				"Failed",
+				"Backup Job disappeared and the archive is not present on the PVC.",
+			)
+		# SITE_PROBE_UNKNOWN: defer to next tick.
+		return
+
+	if not _job_belongs_to_backup(job, backup):
+		frappe.logger("kubeport").warning(
+			"Skipping reconciliation for Frappe Site Backup '%s': Job '%s' is not labeled for this backup.",
+			backup.name,
+			backup.operation_job_name,
+		)
+		return
+
+	succeeded = (job.status.succeeded or 0) if job.status else 0
+	failed = (job.status.failed or 0) if job.status else 0
+
+	if succeeded > 0:
+		metadata = _extract_backup_success_metadata(core_v1, job, backup.namespace or "default")
+		size_bytes = int(metadata.get("size_bytes") or 0)
+		if size_bytes <= 0:
+			_finalize_backup_status(
+				backup,
+				"In Progress",
+				"Failed",
+				"Backup Job succeeded but did not report a non-zero archive size.",
+			)
+			return
+		# Verify the archive is actually present on the PVC before flipping
+		# the row to Available — guards against the narrow window where the
+		# Job exited zero but the inode was lost between exit and our read.
+		# If the budget is exhausted, trust the Job logs and defer the
+		# verification rather than risk flipping a good row to Failed.
+		if not _take_probe_budget(probe_budget):
+			_finalize_backup_status(
+				backup,
+				"In Progress",
+				"Available",
+				"",
+				size_bytes=size_bytes,
+				bench_archive_name=metadata.get("bench_archive_name") or "",
+			)
+			return
+		probe_state, probe_size = _probe_backup_archive_on_pvc(backup, api_client, core_v1)
+		if probe_state == SITE_PROBE_MISSING:
+			_finalize_backup_status(
+				backup,
+				"In Progress",
+				"Failed",
+				"Backup Job reported success but the archive is not on the PVC.",
+			)
+			return
+		# UNKNOWN: trust the Job logs (size_bytes > 0) — probe failure should
+		# not flip a likely-good backup to Failed; defer-mode would risk the
+		# Job aging out before the next tick can re-verify.
+		final_size = probe_size if probe_state == SITE_PROBE_EXISTS and probe_size else size_bytes
+		_finalize_backup_status(
+			backup,
+			"In Progress",
+			"Available",
+			"",
+			size_bytes=final_size,
+			bench_archive_name=metadata.get("bench_archive_name") or "",
+		)
+	elif failed > 0:
+		detail = _extract_job_failure_detail(
+			core_v1=core_v1,
+			job=job,
+			namespace=backup.namespace or "default",
+			operation_label="bench backup",
+		)
+		_finalize_backup_status(backup, "In Progress", "Failed", _truncate_status_detail(detail))
+
+
+def _reconcile_site_restore(
+	backup: "frappe._dict",
+	batch_v1: "client.BatchV1Api",
+	core_v1: "client.CoreV1Api",
+) -> None:
+	job, gone = _read_op_job(backup, batch_v1)
+	if gone:
+		_apply_restore_probe(backup, core_v1, failure_detail=None)
+		return
+
+	if not _job_belongs_to_backup(job, backup):
+		frappe.logger("kubeport").warning(
+			"Skipping reconciliation for Frappe Site Backup '%s': restore Job '%s' is not labeled for this backup.",
+			backup.name,
+			backup.operation_job_name,
+		)
+		return
+
+	succeeded = (job.status.succeeded or 0) if job.status else 0
+	failed = (job.status.failed or 0) if job.status else 0
+
+	if succeeded > 0:
+		_apply_restore_probe(backup, core_v1, failure_detail=None)
+	elif failed > 0:
+		detail = _extract_job_failure_detail(
+			core_v1=core_v1,
+			job=job,
+			namespace=backup.namespace or "default",
+			operation_label="bench restore",
+		)
+		_apply_restore_probe(backup, core_v1, failure_detail=detail)
+
+
+def _apply_restore_probe(
+	backup: "frappe._dict",
+	core_v1: "client.CoreV1Api",
+	failure_detail: str | None,
+) -> None:
+	site = _site_from_backup_for_probe(backup)
+	probe = _probe_site_state(site, core_v1)
+	if probe == SITE_PROBE_EXISTS:
+		_finalize_restore_status(backup, "Active", "")
+	elif probe == SITE_PROBE_MISSING:
+		detail = failure_detail or "Restore Job ran but the site is not functional on the bench."
+		_finalize_restore_status(backup, "Failed", _truncate_status_detail(detail))
+
+
+def _site_from_backup_for_probe(backup: "frappe._dict") -> Any:
+	return frappe._dict({
+		"name": backup.frappe_site or backup.name,
+		"bench_release": backup.source_bench_release,
+		"namespace": backup.namespace or "default",
+		"site_name": backup.site_name,
+	})
 
 
 def _read_op_job(
@@ -717,6 +965,109 @@ def _finalize_site_status(
 	return True
 
 
+def _finalize_backup_status(
+	backup: "frappe._dict",
+	expected_status: str,
+	next_status: str,
+	detail: str,
+	*,
+	size_bytes: int | None = None,
+	bench_archive_name: str = "",
+) -> bool:
+	current = frappe.db.get_value(
+		"Frappe Site Backup",
+		backup.name,
+		["operation_token", "status"],
+		as_dict=True,
+	)
+	if not current or current.get("status") != expected_status:
+		return False
+	if current.get("operation_token") != backup.operation_job_token:
+		frappe.logger("kubeport").info(
+			"Skipping stale reconciliation for Frappe Site Backup '%s' — operation token rotated.",
+			backup.name,
+		)
+		return False
+
+	fields: dict[str, object] = {
+		"status": next_status,
+		"status_detail": detail,
+		"completed_at": frappe.utils.now_datetime(),
+		"operation_job_name": "",
+		"operation_job_token": "",
+	}
+	if size_bytes is not None:
+		fields["size_bytes"] = size_bytes
+	if bench_archive_name:
+		fields["bench_archive_name"] = bench_archive_name
+	frappe.db.set_value("Frappe Site Backup", backup.name, fields)
+
+	if backup.frappe_site:
+		parent_status = "Active" if next_status in ("Available", "Failed") else None
+		if parent_status:
+			_finalize_site_status(
+				frappe._dict({
+					"name": backup.frappe_site,
+					"operation_job_token": backup.operation_job_token,
+					"operation_job_name": backup.operation_job_name,
+				}),
+				"In Progress",
+				parent_status,
+				"" if next_status == "Available" else detail,
+			)
+
+	frappe.publish_realtime(
+		"frappe_site_backup_status_update",
+		{"site_docname": backup.frappe_site, "backup_docname": backup.name, "status": next_status},
+		doctype="Frappe Site Backup",
+		docname=backup.name,
+	)
+	return True
+
+
+def _finalize_restore_status(
+	backup: "frappe._dict",
+	site_status: str,
+	detail: str,
+) -> bool:
+	current = frappe.db.get_value(
+		"Frappe Site Backup",
+		backup.name,
+		["operation_token", "status"],
+		as_dict=True,
+	)
+	if not current or current.get("status") != "Restoring":
+		return False
+	if current.get("operation_token") != backup.operation_job_token:
+		return False
+
+	frappe.db.set_value("Frappe Site Backup", backup.name, {
+		"status": "Available",
+		"status_detail": detail,
+		"completed_at": frappe.utils.now_datetime(),
+		"operation_job_name": "",
+		"operation_job_token": "",
+	})
+	if backup.frappe_site:
+		_finalize_site_status(
+			frappe._dict({
+				"name": backup.frappe_site,
+				"operation_job_token": backup.operation_job_token,
+				"operation_job_name": backup.operation_job_name,
+			}),
+			"Migrating",
+			site_status,
+			detail,
+		)
+	frappe.publish_realtime(
+		"frappe_site_backup_status_update",
+		{"site_docname": backup.frappe_site, "backup_docname": backup.name, "status": "Available"},
+		doctype="Frappe Site Backup",
+		docname=backup.name,
+	)
+	return True
+
+
 def _finalize_site_deletion(site: "frappe._dict") -> bool:
 	"""Delete the Frappe Site row after a confirmed-missing probe.
 
@@ -829,6 +1180,201 @@ def _probe_site_state(site: "frappe._dict", core_v1: "client.CoreV1Api") -> str:
 	return SITE_PROBE_EXISTS if is_functional else SITE_PROBE_MISSING
 
 
+def _take_probe_budget(probe_budget: dict[str, int] | None) -> bool:
+	"""Atomically consume one slot from the per-tick archive-probe budget.
+
+	The budget object is a small mutable dict so the cap survives across
+	the per-cluster loop in ``_reconcile_frappe_site_backups`` without
+	threading the counter through every call.  Returns True if a slot was
+	consumed (caller may proceed to probe), False if the budget is
+	exhausted (caller should defer to the next tick).  ``None`` means
+	"no caller-imposed cap" — used by tests that want unlimited probing.
+	"""
+	if probe_budget is None:
+		return True
+	if probe_budget.get("remaining", 0) <= 0:
+		return False
+	probe_budget["remaining"] -= 1
+	return True
+
+
+def _probe_backup_archive_on_pvc(
+	backup: "frappe._dict",
+	api_client: "client.ApiClient",
+	core_v1: "client.CoreV1Api",
+) -> tuple[str, int | None]:
+	"""Verify the backup archive on the namespace-local ``kubeport-backups`` PVC.
+
+	The bench backup script writes ``<archive>.size`` and ``<archive>.name``
+	sidecar files only after ``tar`` and ``stat`` both succeed (see
+	``_bench_backup_command`` in ``site_tasks``).  Their presence is the
+	ground-truth signal that the archive was fully flushed; their absence
+	means the archive should be treated as missing even if the Job exited
+	zero.
+
+	Bench workload pods do not mount the backup PVC, so we cannot exec on
+	an existing pod.  Instead we submit a short-lived ``busybox`` probe
+	Job with the PVC mounted (a Job rather than a Pod so the cluster's
+	``ttlSecondsAfterFinished`` reaps it even if our worker is hard-killed
+	between submission and the explicit delete).  Wait synchronously up
+	to ``_BACKUP_PROBE_TIMEOUT_SECONDS``, read the pod's logs, and
+	best-effort delete the Job.  Returns one of:
+	  - ``("exists", size_bytes)`` when the sidecar reports a positive size
+	  - ``("missing", None)`` when the sidecar is absent or zero-size
+	  - ``("unknown", None)`` on probe submission / read failures so the
+	    caller defers to the next reconcile tick.
+	"""
+	import secrets
+	import time
+
+	from kubernetes.client.rest import ApiException
+
+	from kubeport.tasks.site_tasks import (
+		BACKUP_MOUNT_PATH,
+		BACKUP_PVC_NAME,
+		MANAGED_BY_LABEL,
+		MANAGED_BY_VALUE,
+		OPERATION_LABEL,
+		_safe_label_value,
+	)
+	from kubeport.utils.k8s_resources import apply_resource
+
+	storage_path = backup.storage_path or ""
+	if not storage_path:
+		return (SITE_PROBE_UNKNOWN, None)
+
+	namespace = backup.namespace or "default"
+	slug = _safe_label_value(backup.name)[:35] or "probe"
+	job_name = f"ks-probe-{slug}-{secrets.token_hex(3)}"
+	# Tiny shell: print the size sidecar if present, otherwise the literal
+	# string MISSING.  We never trust file contents beyond a small integer.
+	probe_cmd = (
+		f'if [ -f "{storage_path}.size" ]; then '
+		f'cat "{storage_path}.size"; '
+		f'else echo MISSING; fi'
+	)
+	manifest: dict[str, Any] = {
+		"apiVersion": "batch/v1",
+		"kind": "Job",
+		"metadata": {
+			"name": job_name,
+			"namespace": namespace,
+			"labels": {
+				MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+				OPERATION_LABEL: "probe-backup-archive",
+			},
+		},
+		"spec": {
+			"backoffLimit": 0,
+			"ttlSecondsAfterFinished": _BACKUP_PROBE_TTL_SECONDS,
+			"activeDeadlineSeconds": _BACKUP_PROBE_TIMEOUT_SECONDS,
+			"template": {
+				"metadata": {
+					"labels": {
+						MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+						OPERATION_LABEL: "probe-backup-archive",
+					},
+				},
+				"spec": {
+					"restartPolicy": "Never",
+					"containers": [{
+						"name": "probe",
+						"image": _BACKUP_PROBE_IMAGE,
+						"command": ["sh", "-c", probe_cmd],
+						"volumeMounts": [{
+							"name": "kubeport-backups",
+							"mountPath": BACKUP_MOUNT_PATH,
+						}],
+					}],
+					"volumes": [{
+						"name": "kubeport-backups",
+						"persistentVolumeClaim": {"claimName": BACKUP_PVC_NAME},
+					}],
+				},
+			},
+		},
+	}
+
+	try:
+		apply_resource(api_client, manifest, namespace)
+	except Exception as e:
+		frappe.logger("kubeport").warning(
+			"Could not submit archive probe Job for backup '%s': %s",
+			backup.name,
+			e,
+		)
+		return (SITE_PROBE_UNKNOWN, None)
+
+	from kubernetes import client
+
+	batch_v1 = client.BatchV1Api(api_client=api_client)
+	deadline = time.monotonic() + _BACKUP_PROBE_TIMEOUT_SECONDS
+	job_terminal = False
+	while time.monotonic() < deadline:
+		try:
+			job = batch_v1.read_namespaced_job(
+				name=job_name, namespace=namespace, _request_timeout=5
+			)
+			succeeded = (job.status.succeeded or 0) if job.status else 0
+			failed = (job.status.failed or 0) if job.status else 0
+			if succeeded > 0 or failed > 0:
+				job_terminal = True
+				break
+		except ApiException:
+			pass
+		time.sleep(1)
+
+	logs = ""
+	try:
+		pods = core_v1.list_namespaced_pod(
+			namespace=namespace,
+			label_selector=f"job-name={job_name}",
+			_request_timeout=5,
+		)
+		for pod in (pods.items or []):
+			pod_meta = getattr(pod, "metadata", None)
+			pod_name = pod_meta.name if pod_meta else None
+			if not pod_name:
+				continue
+			try:
+				logs = core_v1.read_namespaced_pod_log(
+					name=pod_name, namespace=namespace, _request_timeout=5
+				) or ""
+				if logs:
+					break
+			except Exception:
+				continue
+	except Exception:
+		pass
+
+	# Best-effort delete.  ttlSecondsAfterFinished is the safety net for the
+	# leak path (worker hard-killed between submit and delete) so this call
+	# is purely an optimisation to free cluster resources sooner.
+	try:
+		batch_v1.delete_namespaced_job(
+			name=job_name,
+			namespace=namespace,
+			propagation_policy="Background",
+			_request_timeout=5,
+		)
+	except Exception:
+		pass
+
+	if not job_terminal:
+		return (SITE_PROBE_UNKNOWN, None)
+
+	output = (logs or "").strip()
+	if output == "MISSING" or not output:
+		return (SITE_PROBE_MISSING, None)
+	try:
+		size = int(output)
+	except ValueError:
+		return (SITE_PROBE_UNKNOWN, None)
+	if size <= 0:
+		return (SITE_PROBE_MISSING, None)
+	return (SITE_PROBE_EXISTS, size)
+
+
 def _job_belongs_to_site(job: "client.V1Job", site: "frappe._dict") -> bool:
 	"""Return True if the Job's labels match the expected site docname.
 
@@ -845,6 +1391,70 @@ def _job_belongs_to_site(job: "client.V1Job", site: "frappe._dict") -> bool:
 	if labels.get("app.kubernetes.io/managed-by") != MANAGED_BY_VALUE:
 		return False
 	return labels.get(SITE_DOC_LABEL) == _safe_label_value(site.name)
+
+
+def _job_belongs_to_backup(job: "client.V1Job", backup: "frappe._dict") -> bool:
+	from kubeport.tasks.site_tasks import MANAGED_BY_VALUE, SITE_BACKUP_DOC_LABEL, _safe_label_value
+
+	metadata = getattr(job, "metadata", None)
+	labels = (metadata.labels or {}) if metadata and metadata.labels else {}
+	if labels.get("app.kubernetes.io/managed-by") != MANAGED_BY_VALUE:
+		return False
+	return labels.get(SITE_BACKUP_DOC_LABEL) == _safe_label_value(backup.name)
+
+
+def _extract_backup_success_metadata(
+	core_v1: "client.CoreV1Api",
+	job: "client.V1Job",
+	namespace: str,
+) -> dict[str, str | int]:
+	logs = _read_job_logs(core_v1, job, namespace, tail_lines=80)
+	metadata: dict[str, str | int] = {}
+	for line in (logs or "").splitlines():
+		if line.startswith("KUBEPORT_BACKUP_SIZE="):
+			try:
+				metadata["size_bytes"] = int(line.split("=", 1)[1].strip())
+			except ValueError:
+				pass
+		elif line.startswith("KUBEPORT_BENCH_ARCHIVE="):
+			metadata["bench_archive_name"] = line.split("=", 1)[1].strip()
+		elif line.startswith("KUBEPORT_BACKUP_ARCHIVE="):
+			metadata["storage_path"] = line.split("=", 1)[1].strip()
+	return metadata
+
+
+def _read_job_logs(
+	core_v1: "client.CoreV1Api",
+	job: "client.V1Job",
+	namespace: str,
+	*,
+	tail_lines: int,
+) -> str:
+	if not job.metadata or not job.metadata.name:
+		return ""
+	job_name = job.metadata.name
+	try:
+		pods = core_v1.list_namespaced_pod(
+			namespace=namespace,
+			label_selector=f"job-name={job_name}",
+			_request_timeout=15,
+		)
+		for pod in (pods.items or []):
+			pod_name = pod.metadata.name if pod.metadata else None
+			if not pod_name:
+				continue
+			try:
+				return core_v1.read_namespaced_pod_log(
+					name=pod_name,
+					namespace=namespace,
+					tail_lines=tail_lines,
+					_request_timeout=15,
+				) or ""
+			except Exception:
+				continue
+	except Exception:
+		return ""
+	return ""
 
 
 def _sweep_orphan_site_jobs():
@@ -869,6 +1479,9 @@ def _sweep_orphan_site_jobs():
 	from kubeport.tasks.site_tasks import (
 		MANAGED_BY_LABEL,
 		MANAGED_BY_VALUE,
+		OPERATION_LABEL,
+		SELF_MANAGED_OPERATION_VALUES,
+		SITE_BACKUP_DOC_LABEL,
 		SITE_DOC_LABEL,
 		_best_effort_delete_job,
 	)
@@ -876,6 +1489,10 @@ def _sweep_orphan_site_jobs():
 
 	all_sites = frappe.get_all(
 		"Frappe Site",
+		fields=["name", "cluster", "namespace", "operation_job_name"],
+	)
+	all_backups = frappe.get_all(
+		"Frappe Site Backup",
 		fields=["name", "cluster", "namespace", "operation_job_name"],
 	)
 
@@ -891,6 +1508,14 @@ def _sweep_orphan_site_jobs():
 			# Touch the key so we still sweep the namespace even when every row
 			# has an empty operation_job_name (the exact case this sweep targets).
 			tracked.setdefault((site.cluster, ns), set())
+	for backup in all_backups:
+		if not backup.cluster:
+			continue
+		ns = backup.namespace or "default"
+		if backup.operation_job_name:
+			tracked[(backup.cluster, ns)].add(backup.operation_job_name)
+		else:
+			tracked.setdefault((backup.cluster, ns), set())
 
 	for (cluster_name, namespace), known_names in tracked.items():
 		try:
@@ -906,7 +1531,7 @@ def _sweep_orphan_site_jobs():
 			batch_v1 = client.BatchV1Api(api_client=api_client)
 			jobs = batch_v1.list_namespaced_job(
 				namespace=namespace,
-				label_selector=f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE},{SITE_DOC_LABEL}",
+				label_selector=f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}",
 				_request_timeout=15,
 			)
 		except Exception as e:
@@ -921,6 +1546,15 @@ def _sweep_orphan_site_jobs():
 			metadata = getattr(job, "metadata", None)
 			job_name = metadata.name if metadata and metadata.name else None
 			if not job_name or job_name in known_names:
+				continue
+			labels = (metadata.labels or {}) if metadata and metadata.labels else {}
+			if SITE_DOC_LABEL not in labels and SITE_BACKUP_DOC_LABEL not in labels:
+				continue
+			# Self-managed lifecycle Jobs (e.g., archive-delete) clean themselves
+			# up via ttlSecondsAfterFinished and are intentionally not tracked
+			# by any DocType row.  Skipping them here is what keeps the sweep
+			# from racing the cleanup it just submitted.
+			if labels.get(OPERATION_LABEL) in SELF_MANAGED_OPERATION_VALUES:
 				continue
 			created = getattr(metadata, "creation_timestamp", None) if metadata else None
 			if created is not None:
@@ -1040,18 +1674,78 @@ def _extract_job_failure_detail(
 			except Exception:
 				pass
 
-			# Log unavailable — fall back to exit code from container status
-			status = getattr(pod, "status", None)
-			if status:
-				for cs in (status.container_statuses or []):
-					terminated = getattr(getattr(cs, "state", None), "terminated", None)
-					if terminated:
-						exit_code = getattr(terminated, "exit_code", "unknown")
-						return f"Job pod exited with code {exit_code} and no readable logs."
+			detail = _summarize_unrunnable_pod(pod)
+			if detail:
+				return detail
 	except Exception:
 		pass
 
 	return f"Job '{job_name}' reported failure (could not retrieve pod logs)."
+
+
+def _summarize_unrunnable_pod(pod: Any) -> str | None:
+	"""Build a human-readable failure detail from a pod that produced no logs.
+
+	Pods that fail before bench runs (PVC unbound, image pull error,
+	scheduling failure) leave the container without a Running phase, so
+	``read_namespaced_pod_log`` returns nothing.  Inspect the pod status to
+	surface the actual reason (waiting reason + message, scheduling
+	condition, or pod-level phase/message) instead of the unhelpful
+	"could not retrieve pod logs" fallback.
+	"""
+	status = getattr(pod, "status", None)
+	if not status:
+		return None
+
+	for cs in (status.container_statuses or []):
+		terminated = getattr(getattr(cs, "state", None), "terminated", None)
+		if terminated:
+			exit_code = getattr(terminated, "exit_code", "unknown")
+			reason = getattr(terminated, "reason", "") or ""
+			message = (getattr(terminated, "message", "") or "").strip()
+			base = f"Job pod exited with code {exit_code}"
+			if reason:
+				base = f"{base} ({reason})"
+			if message:
+				return f"{base}: {message}"
+			return f"{base} and no readable logs."
+
+	waiting_statuses = list(status.container_statuses or []) + list(
+		getattr(status, "init_container_statuses", None) or []
+	)
+	for cs in waiting_statuses:
+		waiting = getattr(getattr(cs, "state", None), "waiting", None)
+		if waiting:
+			reason = getattr(waiting, "reason", "") or "Unknown"
+			message = (getattr(waiting, "message", "") or "").strip()
+			base = f"Job pod stuck in {reason}"
+			if message:
+				return f"{base}: {message}"
+			return base
+
+	for cond in (status.conditions or []):
+		if getattr(cond, "status", "") != "False":
+			continue
+		cond_reason = getattr(cond, "reason", "") or ""
+		cond_message = (getattr(cond, "message", "") or "").strip()
+		if cond_reason or cond_message:
+			base = f"Job pod could not run ({cond_reason or 'unknown reason'})"
+			if cond_message:
+				return f"{base}: {cond_message}"
+			return base
+
+	phase = getattr(status, "phase", "") or ""
+	pod_reason = getattr(status, "reason", "") or ""
+	pod_message = (getattr(status, "message", "") or "").strip()
+	if phase or pod_reason or pod_message:
+		base = f"Job pod phase={phase or 'Unknown'}"
+		if pod_reason:
+			base = f"{base}, reason={pod_reason}"
+		if pod_message:
+			return f"{base}: {pod_message}"
+		return base
+
+	return None
 
 
 def _set_helm_reconciliation_state(

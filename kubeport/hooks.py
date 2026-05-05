@@ -146,7 +146,8 @@ app_license = "mit"
 scheduler_events = {
 	"cron": {
 		"*/5 * * * *": [
-			"kubeport.tasks.reconciliation.reconcile_all_releases"
+			"kubeport.tasks.reconciliation.reconcile_all_releases",
+			"kubeport.tasks.reconciliation.reconcile_site_backups",
 		],
 	},
 	"daily": [
