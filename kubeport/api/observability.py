@@ -11,7 +11,13 @@ from typing import Any
 
 import frappe
 
+from kubeport.utils import helm
 from kubeport.utils.observability import (
+	_EVENT_KINDS,
+	_LOG_KINDS,
+	_ROLLOUT_KINDS,
+	_validate_kind,
+	_validate_name,
 	get_pod_logs,
 	get_rollout_history,
 	list_pods_for_resource,
@@ -27,21 +33,29 @@ def get_release_resource_logs(
 	container: str | None = None,
 	tail_lines: int = 200,
 	previous: bool = False,
+	namespace: str | None = None,
 ) -> dict[str, Any]:
 	"""Return capped logs for pods backing one Helm Release resource."""
 	release = _get_release_scope(release_docname)
 	cluster = str(release["cluster"])
-	namespace = str(release.get("namespace") or "default")
+	resource_namespace = str(namespace or release.get("namespace") or "default")
 
 	try:
-		pods = list_pods_for_resource(cluster, namespace, kind, name)
+		_assert_release_resource_member(
+			release=release,
+			kind=kind,
+			name=name,
+			namespace=resource_namespace,
+			allowed_kinds=_LOG_KINDS,
+		)
+		pods = list_pods_for_resource(cluster, resource_namespace, kind, name)
 	except ValueError as e:
 		frappe.throw(str(e))
 	except Exception as e:
 		return {
 			"kind": kind,
 			"name": name,
-			"namespace": namespace,
+			"namespace": resource_namespace,
 			"pods": [],
 			"logs_by_pod": {},
 			"errors_by_pod": {},
@@ -57,7 +71,7 @@ def get_release_resource_logs(
 		try:
 			logs_by_pod[pod_name] = get_pod_logs(
 				cluster=cluster,
-				namespace=namespace,
+				namespace=resource_namespace,
 				pod=pod_name,
 				container=container,
 				tail_lines=tail_lines,
@@ -70,7 +84,7 @@ def get_release_resource_logs(
 	return {
 		"kind": kind,
 		"name": name,
-		"namespace": namespace,
+		"namespace": resource_namespace,
 		"pods": pods,
 		"logs_by_pod": logs_by_pod,
 		"errors_by_pod": errors_by_pod,
@@ -84,13 +98,22 @@ def get_release_resource_events(
 	kind: str,
 	name: str,
 	limit: int = 20,
+	namespace: str | None = None,
 ) -> list[dict[str, Any]]:
 	"""Return recent Kubernetes events scoped to one Helm Release resource."""
 	release = _get_release_scope(release_docname)
+	resource_namespace = str(namespace or release.get("namespace") or "default")
 	try:
+		_assert_release_resource_member(
+			release=release,
+			kind=kind,
+			name=name,
+			namespace=resource_namespace,
+			allowed_kinds=_EVENT_KINDS,
+		)
 		return list_resource_events(
 			cluster=str(release["cluster"]),
-			namespace=str(release.get("namespace") or "default"),
+			namespace=resource_namespace,
 			kind=kind,
 			name=name,
 			limit=limit,
@@ -115,13 +138,22 @@ def get_release_resource_rollout(
 	kind: str,
 	name: str,
 	limit: int = 10,
+	namespace: str | None = None,
 ) -> list[dict[str, Any]]:
 	"""Return rollout context for a Helm Release workload resource."""
 	release = _get_release_scope(release_docname)
+	resource_namespace = str(namespace or release.get("namespace") or "default")
 	try:
+		_assert_release_resource_member(
+			release=release,
+			kind=kind,
+			name=name,
+			namespace=resource_namespace,
+			allowed_kinds=_ROLLOUT_KINDS,
+		)
 		return get_rollout_history(
 			cluster=str(release["cluster"]),
-			namespace=str(release.get("namespace") or "default"),
+			namespace=resource_namespace,
 			kind=kind,
 			name=name,
 			limit=limit,
@@ -148,11 +180,45 @@ def _get_release_scope(release_docname: str) -> dict[str, Any]:
 	release = frappe.db.get_value(
 		"Helm Release",
 		release_docname,
-		["cluster", "namespace"],
+		["cluster", "namespace", "release_name"],
 		as_dict=True,
 	)
 	if not release:
 		frappe.throw(f"Helm Release '{release_docname}' was not found.")
 	if not release.get("cluster"):
 		frappe.throw(f"Helm Release '{release_docname}' is missing cluster information.")
+	if not release.get("release_name"):
+		frappe.throw(f"Helm Release '{release_docname}' is missing release name information.")
 	return release
+
+
+def _assert_release_resource_member(
+	release: dict[str, Any],
+	kind: str,
+	name: str,
+	namespace: str,
+	allowed_kinds: frozenset[str],
+) -> None:
+	kind = _validate_kind(kind, allowed_kinds)
+	name = _validate_name(name)
+	namespace = str(namespace or release.get("namespace") or "default")
+	release_namespace = str(release.get("namespace") or "default")
+
+	manifest = helm.get_manifest(
+		release_name=str(release["release_name"]),
+		namespace=release_namespace,
+		cluster_name=str(release["cluster"]),
+	)
+	for resource in manifest:
+		metadata = resource.get("metadata") or {}
+		resource_kind = str(resource.get("kind") or "")
+		resource_name = str(metadata.get("name") or "")
+		resource_namespace = str(metadata.get("namespace") or release_namespace)
+		if (
+			resource_kind == kind
+			and resource_name == name
+			and resource_namespace == namespace
+		):
+			return
+
+	raise ValueError("Resource is not part of this Helm Release.")

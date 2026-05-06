@@ -192,13 +192,15 @@ function kubeport_show_release_history(frm) {
         freeze_message: __('Loading release history...'),
         callback: function(r) {
             if (r.exc) return;
-            const rows = r.message || [];
+            const payload = r.message || {};
+            const rows = payload.rows || [];
+            const error = payload.error || '';
             const dialog = new frappe.ui.Dialog({
                 title: __('Release History'),
                 fields: [{
                     fieldname: 'history_html',
                     fieldtype: 'HTML',
-                    options: kubeport_render_history_table(rows)
+                    options: kubeport_render_history_table(rows, error)
                 }]
             });
             dialog.show();
@@ -225,7 +227,13 @@ function kubeport_show_release_history(frm) {
     });
 }
 
-function kubeport_render_history_table(rows) {
+function kubeport_render_history_table(rows, error) {
+    if (error) {
+        return `<div class="text-muted small">${__('Could not load release history:')}
+            ${frappe.utils.escape_html(error)}
+        </div>`;
+    }
+
     if (!rows.length) {
         return `<div class="text-muted small">${__('No release history was returned by Helm.')}</div>`;
     }
@@ -373,6 +381,7 @@ function kubeport_paint_health_rows(frm, $body, rows, error) {
         const row = {
             kind: $button.attr('data-kind') || '',
             name: $button.attr('data-name') || '',
+            namespace: $button.attr('data-namespace') || '',
         };
         const action = $button.attr('data-action');
         if (action === 'logs') {
@@ -388,25 +397,29 @@ function kubeport_paint_health_rows(frm, $body, rows, error) {
 function kubeport_render_health_actions(row) {
     const kind = frappe.utils.escape_html(row.kind || '');
     const name = frappe.utils.escape_html(row.name || '');
+    const namespace = frappe.utils.escape_html(row.namespace || '');
     const log_kinds = ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod'];
     const rollout_kinds = ['Deployment', 'StatefulSet', 'DaemonSet'];
     let html = '<div style="display: flex; gap: 4px; flex-wrap: wrap;">';
     if (log_kinds.includes(row.kind)) {
         html += `
             <button class="btn btn-xs btn-default kubeport-health-action"
-                    data-action="logs" data-kind="${kind}" data-name="${name}">
+                    data-action="logs" data-kind="${kind}" data-name="${name}"
+                    data-namespace="${namespace}">
                 ${__('Logs')}
             </button>`;
     }
     html += `
         <button class="btn btn-xs btn-default kubeport-health-action"
-                data-action="events" data-kind="${kind}" data-name="${name}">
+                data-action="events" data-kind="${kind}" data-name="${name}"
+                data-namespace="${namespace}">
             ${__('Events')}
         </button>`;
     if (rollout_kinds.includes(row.kind)) {
         html += `
             <button class="btn btn-xs btn-default kubeport-health-action"
-                    data-action="rollout" data-kind="${kind}" data-name="${name}">
+                    data-action="rollout" data-kind="${kind}" data-name="${name}"
+                    data-namespace="${namespace}">
                 ${__('Rollout')}
             </button>`;
     }
@@ -460,6 +473,7 @@ function kubeport_fetch_resource_logs(frm, row, dialog, values) {
             release_docname: frm.doc.name,
             kind: row.kind,
             name: row.name,
+            namespace: row.namespace || null,
             container: values.container || null,
             tail_lines: cint(values.tail_lines || 200),
             previous: cint(values.previous || 0) ? 1 : 0
@@ -528,6 +542,7 @@ function kubeport_show_resource_events(frm, row) {
             release_docname: frm.doc.name,
             kind: row.kind,
             name: row.name,
+            namespace: row.namespace || null,
             limit: 20
         }
     }).then((r) => {
@@ -577,6 +592,7 @@ function kubeport_show_resource_rollout(frm, row) {
             release_docname: frm.doc.name,
             kind: row.kind,
             name: row.name,
+            namespace: row.namespace || null,
             limit: 10
         }
     }).then((r) => {

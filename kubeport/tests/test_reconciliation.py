@@ -226,6 +226,44 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_publish.assert_called_once()
 		mock_log_error.assert_called_once()
 
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.helm.status", side_effect=RuntimeError("release: not found"))
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_helm_releases_surfaces_missing_live_release(
+		self,
+		mock_get_all,
+		mock_set_value,
+		_mock_helm_status,
+		mock_get_value,
+		_mock_publish,
+		mock_log_error,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				status="Deployed",
+				operation_token="tok-1",
+			),
+		]
+		mock_get_value.return_value = {
+			"operation_token": "tok-1",
+			"status": "Deployed",
+		}
+
+		_reconcile_helm_releases()
+
+		mock_set_value.assert_called_once()
+		_, _, fields = mock_set_value.call_args.args
+		self.assertEqual(fields["status"], "Degraded")
+		self.assertIn("missing from the cluster", fields["helm_status_detail"])
+		mock_log_error.assert_called_once()
+
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
 	@patch("kubeport.utils.release_health.walk")

@@ -138,14 +138,17 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Discovery and Observability
 
-- Discovery is a UI payload, not a richer observed-state model. Helm Release health shows resource readiness, but there is still no full in-app drilldown for pod logs, Kubernetes event history, rollout timelines, or per-site health.
+- Discovery is a UI payload, not a richer observed-state model. Helm Release health shows resource
+  readiness and release-scoped drilldowns for pod logs, Kubernetes events, and workload rollout
+  context, but there is still no per-site health surface.
 - Supported bench discovery is intentionally narrow: only official `erpnext` chart releases. Widening to other chart variants requires deliberate design.
 - Discovery data is not linked back to persisted `Helm Release` documents beyond matching names and namespaces.
 
 ### Health Depth
 
 - Helm release health covers built-in readiness for `Deployment`, `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, and `Ingress`, and surfaces partial per-resource rows in the form.
-- Helm health still does not inspect storage pressure beyond PVC binding, application-level HTTP health, or CRD-specific health.
+- Helm health still does not inspect stored log/event history, storage pressure beyond PVC binding,
+  application-level HTTP health, or CRD-specific health.
 - Service Bundle health only checks resource existence.
 
 ### Platform Coverage

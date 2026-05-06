@@ -24,17 +24,23 @@ class UnitTestObservabilityAPI(UnitTestCase):
 
 	@patch("kubeport.api.observability.get_pod_logs", return_value="pod logs")
 	@patch("kubeport.api.observability.list_pods_for_resource")
+	@patch("kubeport.api.observability.helm.get_manifest")
 	@patch("kubeport.api.observability.frappe.db.get_value")
 	def test_logs_endpoint_resolves_cluster_from_release_row(
 		self,
 		mock_get_value,
+		mock_get_manifest,
 		mock_list_pods,
 		mock_get_logs,
 	):
 		mock_get_value.return_value = {
 			"cluster": "server-cluster",
 			"namespace": "erp",
+			"release_name": "bench",
 		}
+		mock_get_manifest.return_value = [
+			{"kind": "Deployment", "metadata": {"name": "bench-web"}},
+		]
 		mock_list_pods.return_value = [{"name": "bench-web-1", "container_names": ["web"]}]
 
 		result = observability.get_release_resource_logs(
@@ -47,6 +53,11 @@ class UnitTestObservabilityAPI(UnitTestCase):
 		)
 
 		self.assertEqual(result["logs_by_pod"]["bench-web-1"], "pod logs")
+		mock_get_manifest.assert_called_once_with(
+			release_name="bench",
+			namespace="erp",
+			cluster_name="server-cluster",
+		)
 		mock_list_pods.assert_called_once_with("server-cluster", "erp", "Deployment", "bench-web")
 		mock_get_logs.assert_called_once_with(
 			cluster="server-cluster",
@@ -58,16 +69,22 @@ class UnitTestObservabilityAPI(UnitTestCase):
 		)
 
 	@patch("kubeport.api.observability.list_resource_events", return_value=[])
+	@patch("kubeport.api.observability.helm.get_manifest")
 	@patch("kubeport.api.observability.frappe.db.get_value")
 	def test_events_endpoint_does_not_accept_client_controlled_cluster(
 		self,
 		mock_get_value,
+		mock_get_manifest,
 		mock_list_events,
 	):
 		mock_get_value.return_value = {
 			"cluster": "server-cluster",
 			"namespace": "erp",
+			"release_name": "bench",
 		}
+		mock_get_manifest.return_value = [
+			{"kind": "Pod", "metadata": {"name": "bench-web-1"}},
+		]
 
 		result = observability.get_release_resource_events(
 			release_docname="cluster-a/erp/bench",
@@ -85,20 +102,81 @@ class UnitTestObservabilityAPI(UnitTestCase):
 			limit=5,
 		)
 
-	@patch("kubeport.api.observability.frappe.throw")
-	@patch("kubeport.api.observability.list_resource_events")
+	@patch("kubeport.api.observability.list_resource_events", return_value=[])
+	@patch("kubeport.api.observability.helm.get_manifest")
 	@patch("kubeport.api.observability.frappe.db.get_value")
-	def test_events_endpoint_rejects_malformed_kind(
+	def test_events_endpoint_uses_manifest_resource_namespace(
 		self,
 		mock_get_value,
+		mock_get_manifest,
 		mock_list_events,
+	):
+		mock_get_value.return_value = {
+			"cluster": "server-cluster",
+			"namespace": "erp",
+			"release_name": "bench",
+		}
+		mock_get_manifest.return_value = [
+			{"kind": "Pod", "metadata": {"name": "bench-web-1", "namespace": "jobs"}},
+		]
+
+		result = observability.get_release_resource_events(
+			release_docname="cluster-a/erp/bench",
+			kind="Pod",
+			name="bench-web-1",
+			namespace="jobs",
+			limit=5,
+		)
+
+		self.assertEqual(result, [])
+		mock_list_events.assert_called_once_with(
+			cluster="server-cluster",
+			namespace="jobs",
+			kind="Pod",
+			name="bench-web-1",
+			limit=5,
+		)
+
+	@patch("kubeport.api.observability.frappe.throw")
+	@patch("kubeport.api.observability.helm.get_manifest")
+	@patch("kubeport.api.observability.frappe.db.get_value")
+	def test_events_endpoint_rejects_resource_not_in_release_manifest(
+		self,
+		mock_get_value,
+		mock_get_manifest,
 		mock_throw,
 	):
 		mock_get_value.return_value = {
 			"cluster": "server-cluster",
 			"namespace": "erp",
+			"release_name": "bench",
 		}
-		mock_list_events.side_effect = ValueError("Unsupported resource kind")
+		mock_get_manifest.return_value = [
+			{"kind": "Pod", "metadata": {"name": "bench-web-1"}},
+		]
+		mock_throw.side_effect = RuntimeError("not part")
+
+		with self.assertRaisesRegex(RuntimeError, "not part"):
+			observability.get_release_resource_events(
+				release_docname="cluster-a/erp/bench",
+				kind="Pod",
+				name="other-pod",
+			)
+
+		mock_throw.assert_called_once()
+
+	@patch("kubeport.api.observability.frappe.throw")
+	@patch("kubeport.api.observability.frappe.db.get_value")
+	def test_events_endpoint_rejects_malformed_kind(
+		self,
+		mock_get_value,
+		mock_throw,
+	):
+		mock_get_value.return_value = {
+			"cluster": "server-cluster",
+			"namespace": "erp",
+			"release_name": "bench",
+		}
 		mock_throw.side_effect = RuntimeError("Unsupported resource kind")
 
 		with self.assertRaisesRegex(RuntimeError, "Unsupported resource kind"):
@@ -111,19 +189,17 @@ class UnitTestObservabilityAPI(UnitTestCase):
 		mock_throw.assert_called_once()
 
 	@patch("kubeport.api.observability.frappe.throw")
-	@patch("kubeport.api.observability.list_pods_for_resource")
 	@patch("kubeport.api.observability.frappe.db.get_value")
 	def test_logs_endpoint_rejects_malformed_name(
 		self,
 		mock_get_value,
-		mock_list_pods,
 		mock_throw,
 	):
 		mock_get_value.return_value = {
 			"cluster": "server-cluster",
 			"namespace": "erp",
+			"release_name": "bench",
 		}
-		mock_list_pods.side_effect = ValueError("Resource name is required")
 		mock_throw.side_effect = RuntimeError("Resource name is required")
 
 		with self.assertRaisesRegex(RuntimeError, "Resource name is required"):
