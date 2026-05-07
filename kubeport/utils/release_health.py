@@ -60,6 +60,7 @@ class ResourceHealth:
 	# Longer detail useful inside the form drilldown.  Truncated at the call
 	# site if it ever needs to land in ``helm_status_detail``.
 	message: str
+	pod_count: int = 0
 
 	def to_dict(self) -> dict[str, Any]:
 		return {
@@ -69,6 +70,7 @@ class ResourceHealth:
 			"ready": self.ready,
 			"reason": self.reason,
 			"message": self.message,
+			"pod_count": self.pod_count,
 		}
 
 
@@ -277,19 +279,23 @@ def _check_deployment(obj: Any, namespace: str) -> ResourceHealth:
 	status_obj = getattr(obj, "status", None)
 	available = getattr(status_obj, "available_replicas", None) or 0
 	updated = getattr(status_obj, "updated_replicas", None) or 0
+	pod_count = getattr(status_obj, "replicas", None)
+	if pod_count is None:
+		pod_count = available
 	conditions = getattr(status_obj, "conditions", None) or []
 
 	available_cond = _find_condition(conditions, "Available")
 	progressing_cond = _find_condition(conditions, "Progressing")
 
 	if spec_replicas == 0:
-		return ResourceHealth("Deployment", name, namespace, True, "", "scaled to 0 replicas")
+		return ResourceHealth("Deployment", name, namespace, True, "", "scaled to 0 replicas", pod_count=0)
 
 	if available >= spec_replicas and updated >= spec_replicas:
 		if available_cond is None or available_cond.get("status") != "False":
 			return ResourceHealth(
 				"Deployment", name, namespace, True, "",
 				f"{available}/{spec_replicas} available",
+				pod_count=pod_count,
 			)
 
 	# Surface the most informative condition reason.
@@ -305,7 +311,7 @@ def _check_deployment(obj: Any, namespace: str) -> ResourceHealth:
 		reason = f"rollout {available}/{spec_replicas}"
 		message = f"updated={updated}, available={available}, desired={spec_replicas}"
 
-	return ResourceHealth("Deployment", name, namespace, False, reason, message)
+	return ResourceHealth("Deployment", name, namespace, False, reason, message, pod_count=pod_count)
 
 
 def _check_stateful_set(obj: Any, namespace: str) -> ResourceHealth:
@@ -315,11 +321,14 @@ def _check_stateful_set(obj: Any, namespace: str) -> ResourceHealth:
 		spec_replicas = 1
 	status_obj = getattr(obj, "status", None)
 	ready = getattr(status_obj, "ready_replicas", None) or 0
+	pod_count = getattr(status_obj, "replicas", None)
+	if pod_count is None:
+		pod_count = ready
 	current_revision = getattr(status_obj, "current_revision", None) or ""
 	update_revision = getattr(status_obj, "update_revision", None) or ""
 
 	if spec_replicas == 0:
-		return ResourceHealth("StatefulSet", name, namespace, True, "", "scaled to 0 replicas")
+		return ResourceHealth("StatefulSet", name, namespace, True, "", "scaled to 0 replicas", pod_count=0)
 
 	if ready >= spec_replicas and (
 		not update_revision or current_revision == update_revision
@@ -327,6 +336,7 @@ def _check_stateful_set(obj: Any, namespace: str) -> ResourceHealth:
 		return ResourceHealth(
 			"StatefulSet", name, namespace, True, "",
 			f"{ready}/{spec_replicas} ready",
+			pod_count=pod_count,
 		)
 
 	if update_revision and current_revision != update_revision:
@@ -339,7 +349,7 @@ def _check_stateful_set(obj: Any, namespace: str) -> ResourceHealth:
 		reason = f"rollout {ready}/{spec_replicas}"
 		message = f"ready={ready}, desired={spec_replicas}"
 
-	return ResourceHealth("StatefulSet", name, namespace, False, reason, message)
+	return ResourceHealth("StatefulSet", name, namespace, False, reason, message, pod_count=pod_count)
 
 
 def _check_daemon_set(obj: Any, namespace: str) -> ResourceHealth:
@@ -348,17 +358,22 @@ def _check_daemon_set(obj: Any, namespace: str) -> ResourceHealth:
 	desired = getattr(status_obj, "desired_number_scheduled", None) or 0
 	ready = getattr(status_obj, "number_ready", None) or 0
 	mis_scheduled = getattr(status_obj, "number_misscheduled", None) or 0
+	pod_count = getattr(status_obj, "current_number_scheduled", None)
+	if pod_count is None:
+		pod_count = desired
 
 	if desired == 0:
 		return ResourceHealth(
 			"DaemonSet", name, namespace, True, "",
 			"no nodes match the DaemonSet's selector",
+			pod_count=0,
 		)
 
 	if ready >= desired and mis_scheduled == 0:
 		return ResourceHealth(
 			"DaemonSet", name, namespace, True, "",
 			f"{ready}/{desired} ready",
+			pod_count=pod_count,
 		)
 
 	if mis_scheduled > 0:
@@ -368,7 +383,7 @@ def _check_daemon_set(obj: Any, namespace: str) -> ResourceHealth:
 		reason = f"rollout {ready}/{desired}"
 		message = f"ready={ready}, desired={desired}"
 
-	return ResourceHealth("DaemonSet", name, namespace, False, reason, message)
+	return ResourceHealth("DaemonSet", name, namespace, False, reason, message, pod_count=pod_count)
 
 
 def _check_pod(obj: Any, namespace: str) -> ResourceHealth:
@@ -380,18 +395,18 @@ def _check_pod(obj: Any, namespace: str) -> ResourceHealth:
 	# Job, etc.) are "ready" in the sense that they are not blocking the
 	# release — they have done their work and exited.
 	if phase == "Succeeded":
-		return ResourceHealth("Pod", name, namespace, True, "", "phase=Succeeded")
+		return ResourceHealth("Pod", name, namespace, True, "", "phase=Succeeded", pod_count=1)
 
 	if phase == "Running":
 		conditions = getattr(status_obj, "conditions", None) or []
 		ready_cond = _find_condition(conditions, "Ready")
 		if ready_cond and ready_cond.get("status") == "True":
-			return ResourceHealth("Pod", name, namespace, True, "", "phase=Running, Ready=True")
+			return ResourceHealth("Pod", name, namespace, True, "", "phase=Running, Ready=True", pod_count=1)
 		# Running but not Ready — fall through to surface the container reason.
 
 	# Mine the container statuses for the most actionable reason.
 	reason, message = _pod_failure_reason(status_obj, phase)
-	return ResourceHealth("Pod", name, namespace, False, reason, message)
+	return ResourceHealth("Pod", name, namespace, False, reason, message, pod_count=1)
 
 
 def _check_job(obj: Any, namespace: str) -> ResourceHealth:
@@ -629,6 +644,7 @@ def _attach_warning_events(
 		health.ready,
 		health.reason,
 		message,
+		health.pod_count,
 	)
 
 
@@ -676,12 +692,15 @@ def _resource_health_from_api_error(
 	error: ApiException,
 ) -> ResourceHealth:
 	if error.status == 404:
+		pod_count = 1 if kind == "Pod" else 0
 		return ResourceHealth(
 			kind, name, namespace, False, "missing",
 			"Resource is in the rendered manifest but missing from the cluster.",
+			pod_count=pod_count,
 		)
 	return ResourceHealth(
 		kind, name, namespace, False,
 		f"api-error-{error.status}",
 		(error.reason or "")[:200],
+		pod_count=1 if kind == "Pod" else 0,
 	)

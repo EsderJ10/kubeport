@@ -47,6 +47,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		self.assertTrue(health.ready)
 		self.assertEqual(health.kind, "Deployment")
 		self.assertEqual(health.reason, "")
+		self.assertEqual(health.pod_count, 2)
 
 	def test_check_deployment_unready_during_rollout_surfaces_replica_count(self):
 		obj = SimpleNamespace(
@@ -61,6 +62,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		health = _check_deployment(obj, "tfg")
 		self.assertFalse(health.ready)
 		self.assertIn("1/2", health.reason)
+		self.assertEqual(health.pod_count, 1)
 
 	def test_check_deployment_uses_available_condition_when_unavailable(self):
 		obj = SimpleNamespace(
@@ -90,6 +92,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		)
 		health = _check_deployment(obj, "tfg")
 		self.assertTrue(health.ready)
+		self.assertEqual(health.pod_count, 0)
 
 	# -----------------------------------------------------------------------
 	# StatefulSet
@@ -107,6 +110,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		)
 		health = _check_stateful_set(obj, "tfg")
 		self.assertTrue(health.ready)
+		self.assertEqual(health.pod_count, 1)
 
 	def test_check_stateful_set_flags_partition_revision_mismatch(self):
 		obj = SimpleNamespace(
@@ -150,6 +154,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		)
 		health = _check_daemon_set(obj, "tfg")
 		self.assertTrue(health.ready)
+		self.assertEqual(health.pod_count, 3)
 
 	# -----------------------------------------------------------------------
 	# Pod
@@ -167,6 +172,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		)
 		health = _check_pod(obj, "tfg")
 		self.assertTrue(health.ready)
+		self.assertEqual(health.pod_count, 1)
 
 	def test_check_pod_surfaces_image_pull_back_off_reason(self):
 		container_status = SimpleNamespace(
@@ -219,6 +225,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		)
 		health = _check_job(obj, "tfg")
 		self.assertTrue(health.ready)
+		self.assertEqual(health.to_dict()["pod_count"], 0)
 
 	def test_check_job_failed_surfaces_failure_reason(self):
 		obj = SimpleNamespace(
