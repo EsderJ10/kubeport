@@ -69,6 +69,55 @@ class UnitTestObservability(UnitTestCase):
 		self.assertEqual([pod["name"] for pod in pods], ["bench-web-abc-1"])
 		self.assertEqual(core_v1.list_namespaced_pod.call_args.kwargs["label_selector"], "app=bench")
 
+	@patch("kubeport.utils.observability.client.AppsV1Api")
+	@patch("kubeport.utils.observability.client.CoreV1Api")
+	@patch("kubeport.utils.observability.get_k8s_api_client", return_value=object())
+	def test_list_pods_for_deployment_does_not_fallback_to_selector_only_pods(
+		self,
+		_mock_api_client,
+		mock_core_api,
+		mock_apps_api,
+	):
+		apps_v1 = mock_apps_api.return_value
+		core_v1 = mock_core_api.return_value
+		apps_v1.read_namespaced_deployment.return_value = SimpleNamespace(
+			spec=SimpleNamespace(selector=_selector({"app": "bench"})),
+		)
+		apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(items=[
+			SimpleNamespace(metadata=_metadata("other-abc", owner_references=[_owner("Deployment", "other")])),
+		])
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
+			_pod("selector-match-1", owner_references=[_owner("ReplicaSet", "other-abc")]),
+			_pod("selector-match-2"),
+		])
+
+		pods = list_pods_for_resource("cluster-a", "erp", "Deployment", "bench-web")
+
+		self.assertEqual(pods, [])
+
+	@patch("kubeport.utils.observability.client.AppsV1Api")
+	@patch("kubeport.utils.observability.client.CoreV1Api")
+	@patch("kubeport.utils.observability.get_k8s_api_client", return_value=object())
+	def test_list_pods_for_controller_does_not_fallback_to_selector_only_pods(
+		self,
+		_mock_api_client,
+		mock_core_api,
+		mock_apps_api,
+	):
+		apps_v1 = mock_apps_api.return_value
+		core_v1 = mock_core_api.return_value
+		apps_v1.read_namespaced_stateful_set.return_value = SimpleNamespace(
+			spec=SimpleNamespace(selector=_selector({"app": "bench"})),
+		)
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
+			_pod("selector-match-1", owner_references=[_owner("StatefulSet", "other")]),
+			_pod("selector-match-2"),
+		])
+
+		pods = list_pods_for_resource("cluster-a", "erp", "StatefulSet", "bench-worker")
+
+		self.assertEqual(pods, [])
+
 	@patch("kubeport.utils.observability.client.CoreV1Api")
 	@patch("kubeport.utils.observability.get_k8s_api_client", return_value=object())
 	def test_list_pods_for_missing_standalone_pod_returns_empty(self, _mock_api_client, mock_core_api):
@@ -200,3 +249,30 @@ class UnitTestObservability(UnitTestCase):
 
 		self.assertEqual(len(rows), 20)
 		self.assertEqual(rows[0]["revision"], "29")
+
+	@patch("kubeport.utils.observability.client.AppsV1Api")
+	@patch("kubeport.utils.observability.get_k8s_api_client", return_value=object())
+	def test_controller_revision_rows_distinguish_current_and_update(self, _mock_api_client, mock_apps_api):
+		apps_v1 = mock_apps_api.return_value
+		apps_v1.read_namespaced_stateful_set.return_value = SimpleNamespace(
+			spec=SimpleNamespace(selector=_selector({"app": "bench"})),
+			status=SimpleNamespace(current_revision="bench-worker-1", update_revision="bench-worker-2"),
+		)
+		apps_v1.list_namespaced_controller_revision.return_value = SimpleNamespace(items=[
+			SimpleNamespace(
+				metadata=_metadata("bench-worker-1", owner_references=[_owner("StatefulSet", "bench-worker")]),
+				revision=1,
+			),
+			SimpleNamespace(
+				metadata=_metadata("bench-worker-2", owner_references=[_owner("StatefulSet", "bench-worker")]),
+				revision=2,
+			),
+		])
+
+		rows = get_rollout_history("cluster-a", "erp", "StatefulSet", "bench-worker")
+
+		by_name = {row["name"]: row for row in rows}
+		self.assertTrue(by_name["bench-worker-1"]["current"])
+		self.assertFalse(by_name["bench-worker-1"]["update"])
+		self.assertFalse(by_name["bench-worker-2"]["current"])
+		self.assertTrue(by_name["bench-worker-2"]["update"])

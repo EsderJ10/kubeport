@@ -164,7 +164,8 @@ Read-only Helm Release drilldown endpoints:
 
 - Resolves cluster identity from the `Helm Release` row after System Manager and document read checks.
 - Validates the requested resource against the live Helm manifest before reading logs, events, or rollout context.
-- Returns bounded, selected-pod logs plus release-scoped event and rollout payloads without persisting observed state.
+- Returns bounded logs for all ownership-proven pods plus release-scoped event and rollout payloads without persisting observed state.
+- Uses explicit `{rows, error}` wrappers for event and rollout lookup failures so the form can render panel-level degradation.
 
 ---
 

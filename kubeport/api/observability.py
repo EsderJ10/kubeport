@@ -67,19 +67,22 @@ def get_release_resource_logs(
 
 	logs_by_pod: dict[str, str] = {}
 	errors_by_pod: dict[str, str] = {}
-	if selected_pod:
+	for pod in pods:
+		pod_name_value = str(pod.get("name") or "")
+		if not pod_name_value:
+			continue
 		try:
-			logs_by_pod[selected_pod] = get_pod_logs(
+			logs_by_pod[pod_name_value] = get_pod_logs(
 				cluster=cluster,
 				namespace=resource_namespace,
-				pod=selected_pod,
+				pod=pod_name_value,
 				container=container,
 				tail_lines=tail_lines,
 				previous=previous,
 			)
 		except Exception as e:
-			logs_by_pod[selected_pod] = ""
-			errors_by_pod[selected_pod] = str(e)
+			logs_by_pod[pod_name_value] = ""
+			errors_by_pod[pod_name_value] = str(e)
 
 	return {
 		"kind": kind,
@@ -100,7 +103,7 @@ def get_release_resource_events(
 	name: str,
 	limit: int = 20,
 	namespace: str | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
 	"""Return recent Kubernetes events scoped to one Helm Release resource."""
 	release = _get_release_scope(release_docname)
 	resource_namespace = str(namespace or release.get("namespace") or "default")
@@ -112,25 +115,18 @@ def get_release_resource_events(
 			namespace=resource_namespace,
 			allowed_kinds=_EVENT_KINDS,
 		)
-		return list_resource_events(
+		rows = list_resource_events(
 			cluster=str(release["cluster"]),
 			namespace=resource_namespace,
 			kind=kind,
 			name=name,
 			limit=limit,
 		)
+		return {"rows": rows, "error": ""}
 	except ValueError as e:
 		frappe.throw(str(e))
 	except Exception as e:
-		return [{
-			"type": "Error",
-			"reason": "EventLookupFailed",
-			"message": str(e),
-			"count": 0,
-			"first_seen": "",
-			"last_seen": "",
-			"source": "kubeport",
-		}]
+		return {"rows": [], "error": str(e)}
 
 
 @frappe.whitelist()
@@ -140,7 +136,7 @@ def get_release_resource_rollout(
 	name: str,
 	limit: int = 10,
 	namespace: str | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
 	"""Return rollout context for a Helm Release workload resource."""
 	release = _get_release_scope(release_docname)
 	resource_namespace = str(namespace or release.get("namespace") or "default")
@@ -152,25 +148,18 @@ def get_release_resource_rollout(
 			namespace=resource_namespace,
 			allowed_kinds=_ROLLOUT_KINDS,
 		)
-		return get_rollout_history(
+		rows = get_rollout_history(
 			cluster=str(release["cluster"]),
 			namespace=resource_namespace,
 			kind=kind,
 			name=name,
 			limit=limit,
 		)
+		return {"rows": rows, "error": ""}
 	except ValueError as e:
 		frappe.throw(str(e))
 	except Exception as e:
-		return [{
-			"kind": "Error",
-			"name": "",
-			"revision": "",
-			"created_at": "",
-			"change_cause": str(e),
-			"current": False,
-			"image_summary": "",
-		}]
+		return {"rows": [], "error": str(e)}
 
 
 def _get_release_scope(release_docname: str) -> dict[str, Any]:

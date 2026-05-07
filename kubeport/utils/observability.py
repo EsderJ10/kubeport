@@ -217,8 +217,6 @@ def _list_deployment_pods(
 		pod for pod in getattr(pods, "items", []) or []
 		if _has_any_owner(pod, "ReplicaSet", replica_set_names)
 	]
-	if not matched:
-		matched = list(getattr(pods, "items", []) or [])
 	return [_pod_to_dict(pod) for pod in matched]
 
 
@@ -246,8 +244,6 @@ def _list_controller_pods(
 		pod for pod in getattr(pods, "items", []) or []
 		if _has_owner(pod, kind, name)
 	]
-	if not matched:
-		matched = list(getattr(pods, "items", []) or [])
 	return [_pod_to_dict(pod) for pod in matched]
 
 
@@ -312,10 +308,8 @@ def _controller_revision_rows(
 			"revision": getattr(revision, "revision", None) or "",
 			"created_at": _timestamp(revision),
 			"change_cause": _annotation(revision, "kubernetes.io/change-cause"),
-			"current": bool(
-				revision_name
-				and revision_name in {current_revision_name, update_revision_name}
-			),
+			"current": bool(revision_name and revision_name == current_revision_name),
+			"update": bool(revision_name and revision_name == update_revision_name),
 			"image_summary": _image_summary_from_controller_revision(revision),
 		})
 	return rows

@@ -459,7 +459,9 @@ function kubeport_open_observability_panel(frm, type, row) {
             sort_key: 'last_seen',
             sort_dir: 'desc'
         },
-        rows: []
+        rows: [],
+        error: '',
+        log_payload: null
     };
     kubeport_render_observability_shell(frm);
     kubeport_refresh_active_observability_panel(frm);
@@ -540,7 +542,6 @@ function kubeport_render_logs_panel(frm) {
     if (!state || !$body) return;
 
     const values = state.values;
-    const pod_picker_style = cint(state.row.pod_count || 0) > 1 ? '' : 'display: none;';
     $body.html(`
         <div class="kubeport-log-controls"
              style="display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end;
@@ -553,7 +554,7 @@ function kubeport_render_logs_panel(frm) {
                     `).join('')}
                 </select>
             </label>
-            <label class="control-label kubeport-log-pod-control" style="margin-bottom: 0; ${pod_picker_style}">
+            <label class="control-label kubeport-log-pod-control" style="margin-bottom: 0; display: none;">
                 ${__('Pod')}
                 <select class="form-control input-xs kubeport-log-pod" style="min-width: 220px;"></select>
             </label>
@@ -571,8 +572,17 @@ function kubeport_render_logs_panel(frm) {
         <div class="kubeport-log-result"></div>
     `);
     $body.find('.kubeport-log-refresh').on('click', () => kubeport_fetch_resource_logs(frm));
-    $body.find('.kubeport-log-tail, .kubeport-log-pod, .kubeport-log-previous').on('change', () => {
+    $body.find('.kubeport-log-tail, .kubeport-log-previous').on('change', () => {
         kubeport_fetch_resource_logs(frm);
+    });
+    $body.find('.kubeport-log-pod').on('change', () => {
+        kubeport_read_log_values(frm);
+        if (state.log_payload) {
+            state.log_payload.selected_pod = state.values.pod_name || state.log_payload.selected_pod || '';
+            $body.find('.kubeport-log-result').html(kubeport_render_logs_payload(state.log_payload));
+        } else {
+            kubeport_fetch_resource_logs(frm);
+        }
     });
     $body.find('.kubeport-log-container').on('keydown', (event) => {
         if (event.key === 'Enter') kubeport_fetch_resource_logs(frm);
@@ -607,6 +617,7 @@ function kubeport_fetch_resource_logs(frm) {
             return;
         }
         const payload = r.message || {};
+        state.log_payload = payload;
         kubeport_sync_log_pod_select(frm, payload);
         $target.html(kubeport_render_logs_payload(payload));
     }, () => {
@@ -641,6 +652,7 @@ function kubeport_sync_log_pod_select(frm, payload) {
             ${frappe.utils.escape_html(option)}
         </option>`;
     }).join(''));
+    $body.find('.kubeport-log-pod-control').toggle(options.length > 1);
 
     const selected = payload.selected_pod || '';
     if (selected && options.includes(selected)) {
@@ -653,12 +665,7 @@ function kubeport_render_logs_payload(payload) {
     const logs_by_pod = payload.logs_by_pod || {};
     const errors_by_pod = payload.errors_by_pod || {};
     const selected_pod = payload.selected_pod || (pods[0] && pods[0].name) || '';
-    let html = '';
-    if (payload.error) {
-        html += `<div class="text-muted small" style="margin-bottom: 8px;">
-            ${frappe.utils.escape_html(payload.error)}
-        </div>`;
-    }
+    let html = kubeport_render_panel_error(payload.error || '');
     if (!pods.length) {
         return html || `<div class="text-muted small">${__('No pods were found for this resource.')}</div>`;
     }
@@ -712,7 +719,9 @@ function kubeport_fetch_resource_events(frm) {
         }
     }).then((r) => {
         if (r.exc) return;
-        state.rows = r.message || [];
+        const payload = kubeport_normalize_observability_rows(r.message);
+        state.rows = payload.rows;
+        state.error = payload.error;
         kubeport_render_events_result(frm);
     }, () => {
         $target.html(`<div class="text-muted small">${__('Could not fetch events.')}</div>`);
@@ -725,7 +734,7 @@ function kubeport_render_events_result(frm) {
     if (!state || !$body) return;
 
     const $target = $body.find('.kubeport-events-result');
-    $target.html(kubeport_render_events(state.rows || [], state.values));
+    $target.html(kubeport_render_events(state.rows || [], state.values, state.error || ''));
     $target.find('.kubeport-events-sort').on('click', function() {
         const key = $(this).attr('data-sort-key') || 'last_seen';
         if (state.values.sort_key === key) {
@@ -738,12 +747,14 @@ function kubeport_render_events_result(frm) {
     });
 }
 
-function kubeport_render_events(rows, values) {
+function kubeport_render_events(rows, values, error) {
     if (!rows.length) {
-        return `<div class="text-muted small">${__('No scoped events were returned for this resource.')}</div>`;
+        return kubeport_render_panel_error(error)
+            || `<div class="text-muted small">${__('No scoped events were returned for this resource.')}</div>`;
     }
     rows = kubeport_sort_rows(rows, values.sort_key || 'last_seen', values.sort_dir || 'desc');
-    let html = '<div class="table-responsive"><table class="table table-bordered" style="margin-bottom: 0;">';
+    let html = kubeport_render_panel_error(error);
+    html += '<div class="table-responsive"><table class="table table-bordered" style="margin-bottom: 0;">';
     html += `<thead><tr>
         <th><button class="btn btn-xs btn-link kubeport-events-sort" data-sort-key="type">${__('Type')}</button></th>
         <th><button class="btn btn-xs btn-link kubeport-events-sort" data-sort-key="reason">${__('Reason')}</button></th>
@@ -795,25 +806,29 @@ function kubeport_fetch_resource_rollout(frm) {
         }
     }).then((r) => {
         if (r.exc) return;
-        $target.html(kubeport_render_rollout(r.message || []));
+        const payload = kubeport_normalize_observability_rows(r.message);
+        $target.html(kubeport_render_rollout(payload.rows, payload.error));
     }, () => {
         $target.html(`<div class="text-muted small">${__('Could not fetch rollout context.')}</div>`);
     });
 }
 
-function kubeport_render_rollout(rows) {
+function kubeport_render_rollout(rows, error) {
     if (!rows.length) {
-        return `<div class="text-muted small">${__('No rollout context was returned for this resource.')}</div>`;
+        return kubeport_render_panel_error(error)
+            || `<div class="text-muted small">${__('No rollout context was returned for this resource.')}</div>`;
     }
-    let html = '<div class="table-responsive"><table class="table table-bordered" style="margin-bottom: 0;">';
+    let html = kubeport_render_panel_error(error);
+    html += '<div class="table-responsive"><table class="table table-bordered" style="margin-bottom: 0;">';
     html += `<thead><tr>
-        <th>${__('Revision')}</th><th>${__('Current')}</th><th>${__('Created')}</th>
+        <th>${__('Revision')}</th><th>${__('State')}</th><th>${__('Created')}</th>
         <th>${__('Change Cause')}</th><th>${__('Images')}</th>
     </tr></thead><tbody>`;
     rows.forEach((row) => {
+        const revision_state = row.current ? __('Current') : (row.update ? __('Update') : '');
         html += `<tr>
             <td>${frappe.utils.escape_html(String(row.revision || ''))}</td>
-            <td>${row.current ? __('Yes') : ''}</td>
+            <td>${frappe.utils.escape_html(revision_state)}</td>
             <td>${frappe.utils.escape_html(row.created_at || '')}</td>
             <td style="word-break: break-word;">${frappe.utils.escape_html(row.change_cause || '')}</td>
             <td style="word-break: break-all;">${frappe.utils.escape_html(row.image_summary || '')}</td>
@@ -828,6 +843,24 @@ function kubeport_get_observability_body(frm) {
     if (!detail_field || !detail_field.$wrapper) return null;
     const $body = detail_field.$wrapper.find('.kubeport-observability-body');
     return $body.length ? $body : null;
+}
+
+function kubeport_normalize_observability_rows(message) {
+    if (Array.isArray(message)) {
+        return { rows: message, error: '' };
+    }
+    message = message || {};
+    return {
+        rows: message.rows || [],
+        error: message.error || ''
+    };
+}
+
+function kubeport_render_panel_error(error) {
+    if (!error) return '';
+    return `<div class="text-danger small" style="margin-bottom: 8px;">
+        ${frappe.utils.escape_html(error)}
+    </div>`;
 }
 
 function kubeport_sort_rows(rows, key, direction) {
