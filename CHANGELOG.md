@@ -19,11 +19,16 @@ rollout context.
 - Added read-only Helm Release observability endpoints that resolve cluster identity from the
   release row, enforce System Manager plus document read access, and validate the requested
   resource against the live Helm manifest before returning diagnostic data.
-- Added Kubernetes observability helpers for selected-pod logs, resource-scoped events, and
-  Deployment / StatefulSet / DaemonSet rollout context. Log reads are bounded by tail line count,
-  response size, and one selected pod per request.
-- Extended the Helm Release readiness panel with actions on unready rows for Logs, Events, and
-  Rollout. Logs use a pod selector instead of fetching every matching pod at once.
+- Added Kubernetes observability helpers for resource-scoped pod logs, events, and
+  Deployment / StatefulSet / DaemonSet rollout context. Per-pod log reads are bounded by tail line
+  count and response size; the API resolves every ownership-proven pod for the resource and
+  returns logs keyed by pod name plus a default `selected_pod` for the UI.
+- Extended the Helm Release readiness panel into an in-form persistent observability panel. Each
+  unready row exposes Logs, Events, and Rollout actions; the Logs view ships a pod picker that
+  switches between pods without a round trip, while Events and Rollout return uniform
+  `{rows, error}` payloads so the panel can degrade per-section.
+- Added a `pod_count` field to the workload readiness rows so the form can hide the pod picker
+  when only one pod backs a resource.
 - Kept all observability data ephemeral. No new DocTypes or persisted observed-state fields were
   added.
 
@@ -31,18 +36,33 @@ rollout context.
 
 - **Persisting logs/events/history.** This violates Kubeport's desired-state versus observed-state
   boundary and would make stale diagnostics look authoritative.
-- **Fetching logs from every pod in one request.** This is convenient but creates unbounded latency
-  and payload size for an interactive form click.
+- **Modal dialogs per action.** The first iteration used `frappe.ui.Dialog` per Logs/Events/Rollout
+  click; switching pods or actions repeatedly closed and reopened modals. A persistent in-form
+  panel keeps the readiness table and diagnostics visible together and survives panel-internal
+  refreshes.
+- **One log request per pod-picker switch.** Tried and reverted: the pre-refactor API returned
+  logs for a single `selected_pod` per call, so the form re-requested whenever the operator
+  changed pod. That added user-visible latency on every picker click. The API now returns logs
+  for every ownership-proven pod server-side in one call, so picker switches are instant and the
+  same per-pod tail/size caps apply.
 - **Adding streaming logs.** Useful later, but larger than the current diagnostic drilldown scope.
 
 ### Implementation details
 
-- `kubeport/api/observability.py`: new whitelisted read-only endpoints with release-scope
-  authorization and manifest membership validation.
-- `kubeport/utils/observability.py`: new Kubernetes helpers with request timeouts and payload caps.
-- `kubeport/kubeport/doctype/helm_release/helm_release.js`: readiness-row actions and dialogs.
-- `kubeport/tests/test_observability.py` and `kubeport/tests/test_api_observability.py`: utility and
-  API coverage for caps, authorization, selected-pod log reads, and malformed requests.
+- `kubeport/api/observability.py`: whitelisted read-only endpoints with release-scope
+  authorization and manifest membership validation. Events and rollout return `{rows, error}`;
+  logs return `{pods, selected_pod, logs_by_pod, errors_by_pod, error}`.
+- `kubeport/utils/observability.py`: Kubernetes helpers with request timeouts and per-pod payload
+  caps; `list_pods_for_resource` walks owner references for `Deployment` / `StatefulSet` /
+  `DaemonSet` / standalone `Pod`.
+- `kubeport/utils/release_health.py`: per-workload `pod_count` so the form knows whether to render
+  the pod picker.
+- `kubeport/kubeport/doctype/helm_release/helm_release.js`: readiness-row Logs / Events / Rollout
+  actions render into a persistent in-form observability panel that shares the existing realtime
+  refresh channel.
+- `kubeport/tests/test_observability.py` and `kubeport/tests/test_api_observability.py`: utility
+  and API coverage for caps, authorization, per-pod log fan-out, `{rows, error}` wrapping, and
+  malformed requests.
 
 ---
 

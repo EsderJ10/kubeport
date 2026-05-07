@@ -277,7 +277,7 @@ Scheduled drift detection running every 5 minutes:
 JavaScript form scripts in DocType folders follow an async-first pattern:
 
 - `Kubernetes Cluster` renders live discovery tables in the form via `frappe.xcall`.
-- `Helm Release` and `Service Bundle` listen for realtime status update events and refresh indicators. Helm Release health loads asynchronously as `{rows, error}` and unready rows expose selected-pod logs, scoped events, and rollout context without blocking document load.
+- `Helm Release` and `Service Bundle` listen for realtime status update events and refresh indicators. Helm Release health loads asynchronously as `{rows, error}` and unready rows open a persistent in-form observability panel exposing pod logs (with a pod picker when more than one pod backs the resource), scoped Kubernetes events, and rollout context without blocking document load.
 - `Frappe Site` displays status indicators, lifecycle triggers, backup rows, restore actions, and fetches Job logs asynchronously.
 - Namespace suggestions are fetched live from the selected cluster.
 - Forms never attempt to persist externally discovered state during document fetch.
