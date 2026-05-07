@@ -113,8 +113,6 @@ def get_pod_logs(
 			_request_timeout=LOG_TIMEOUT_SECONDS,
 		)
 	except ApiException as e:
-		if e.status == 400:
-			return ""
 		raise RuntimeError(f"Kubernetes API error while reading logs: {e.status} {e.reason or ''}".strip())
 	except Exception as e:
 		raise RuntimeError(f"Could not read logs for Pod/{pod}: {e}")

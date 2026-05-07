@@ -117,6 +117,17 @@ class UnitTestObservability(UnitTestCase):
 			get_pod_logs("cluster-a", "erp", "bench-web-1")
 
 	@patch("kubeport.utils.observability.client.CoreV1Api")
+	@patch("kubeport.utils.observability.get_k8s_api_client", return_value=object())
+	def test_get_pod_logs_surfaces_bad_request_errors(self, _mock_api_client, mock_core_api):
+		mock_core_api.return_value.read_namespaced_pod_log.side_effect = ApiException(
+			status=400,
+			reason="Bad Request",
+		)
+
+		with self.assertRaisesRegex(RuntimeError, "400 Bad Request"):
+			get_pod_logs("cluster-a", "erp", "bench-web-1", previous=True)
+
+	@patch("kubeport.utils.observability.client.CoreV1Api")
 	@patch("kubeport.utils.observability.client.EventsV1Api")
 	@patch("kubeport.utils.observability.get_k8s_api_client", return_value=object())
 	def test_list_resource_events_returns_empty_when_apis_have_no_events(

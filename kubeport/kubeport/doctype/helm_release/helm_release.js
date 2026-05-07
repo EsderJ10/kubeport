@@ -439,6 +439,12 @@ function kubeport_show_resource_logs(frm, row) {
                 default: '200'
             },
             {
+                fieldname: 'pod_name',
+                fieldtype: 'Select',
+                label: __('Pod'),
+                options: []
+            },
+            {
                 fieldname: 'container',
                 fieldtype: 'Data',
                 label: __('Container'),
@@ -474,22 +480,46 @@ function kubeport_fetch_resource_logs(frm, row, dialog, values) {
             kind: row.kind,
             name: row.name,
             namespace: row.namespace || null,
+            pod_name: values.pod_name || null,
             container: values.container || null,
             tail_lines: cint(values.tail_lines || 200),
             previous: cint(values.previous || 0) ? 1 : 0
         }
     }).then((r) => {
-        if (r.exc) return;
-        $target.html(kubeport_render_logs_payload(r.message || {}));
+        if (r.exc) {
+            $target.html(`<div class="text-muted small">${__('Could not fetch logs.')}</div>`);
+            return;
+        }
+        const payload = r.message || {};
+        kubeport_sync_log_pod_select(dialog, payload);
+        $target.html(kubeport_render_logs_payload(payload));
     }, () => {
         $target.html(`<div class="text-muted small">${__('Could not fetch logs.')}</div>`);
     });
+}
+
+function kubeport_sync_log_pod_select(dialog, payload) {
+    const field = dialog.fields_dict.pod_name;
+    if (!field) return;
+
+    const pods = payload.pods || [];
+    const options = pods
+        .map(pod => pod.name || '')
+        .filter(Boolean);
+    field.df.options = options.join('\n');
+    field.refresh();
+
+    const selected = payload.selected_pod || '';
+    if (selected && options.includes(selected) && field.get_value() !== selected) {
+        field.set_value(selected);
+    }
 }
 
 function kubeport_render_logs_payload(payload) {
     const pods = payload.pods || [];
     const logs_by_pod = payload.logs_by_pod || {};
     const errors_by_pod = payload.errors_by_pod || {};
+    const selected_pod = payload.selected_pod || (pods[0] && pods[0].name) || '';
     let html = '';
     if (payload.error) {
         html += `<div class="text-muted small" style="margin-bottom: 8px;">
@@ -500,28 +530,27 @@ function kubeport_render_logs_payload(payload) {
         return html || `<div class="text-muted small">${__('No pods were found for this resource.')}</div>`;
     }
 
-    pods.forEach((pod) => {
-        const pod_name = pod.name || '';
-        const containers = (pod.container_names || []).join(', ');
-        const status = `${pod.phase || __('Unknown')} · ${__('restarts')}: ${pod.restart_count || 0}`;
-        html += `
-            <div style="margin-bottom: 12px;">
-                <div style="display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
-                    <strong>${frappe.utils.escape_html(pod_name)}</strong>
-                    <span class="text-muted small">${frappe.utils.escape_html(status)}</span>
-                </div>
-                ${containers ? `<div class="text-muted small" style="margin-bottom: 4px;">
-                    ${__('Containers')}: ${frappe.utils.escape_html(containers)}
-                </div>` : ''}
-                ${errors_by_pod[pod_name] ? `<div class="text-muted small" style="margin-bottom: 4px;">
-                    ${frappe.utils.escape_html(errors_by_pod[pod_name])}
-                </div>` : ''}
-                <pre style="max-height: 420px; overflow: auto; white-space: pre-wrap;
-                            background: var(--fg-color); color: var(--text-color);
-                            border: 1px solid var(--border-color); border-radius: 4px;
-                            padding: 8px; font-size: 12px;">${frappe.utils.escape_html(logs_by_pod[pod_name] || '')}</pre>
-            </div>`;
-    });
+    const pod = pods.find(row => row.name === selected_pod) || pods[0];
+    const pod_name = pod.name || '';
+    const containers = (pod.container_names || []).join(', ');
+    const status = `${pod.phase || __('Unknown')} · ${__('restarts')}: ${pod.restart_count || 0}`;
+    html += `
+        <div style="margin-bottom: 12px;">
+            <div style="display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
+                <strong>${frappe.utils.escape_html(pod_name)}</strong>
+                <span class="text-muted small">${frappe.utils.escape_html(status)}</span>
+            </div>
+            ${containers ? `<div class="text-muted small" style="margin-bottom: 4px;">
+                ${__('Containers')}: ${frappe.utils.escape_html(containers)}
+            </div>` : ''}
+            ${errors_by_pod[pod_name] ? `<div class="text-muted small" style="margin-bottom: 4px;">
+                ${frappe.utils.escape_html(errors_by_pod[pod_name])}
+            </div>` : ''}
+            <pre style="max-height: 420px; overflow: auto; white-space: pre-wrap;
+                        background: var(--fg-color); color: var(--text-color);
+                        border: 1px solid var(--border-color); border-radius: 4px;
+                        padding: 8px; font-size: 12px;">${frappe.utils.escape_html(logs_by_pod[pod_name] || '')}</pre>
+        </div>`;
     return html;
 }
 

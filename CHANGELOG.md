@@ -6,6 +6,46 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-07 — Helm Release observability drilldown
+
+### Context
+
+Helm Release readiness already identified which rendered resource was failing, but operators still
+had to leave Kubeport for the next diagnostic step: pod logs, scoped Kubernetes events, or workload
+rollout context.
+
+### Decision
+
+- Added read-only Helm Release observability endpoints that resolve cluster identity from the
+  release row, enforce System Manager plus document read access, and validate the requested
+  resource against the live Helm manifest before returning diagnostic data.
+- Added Kubernetes observability helpers for selected-pod logs, resource-scoped events, and
+  Deployment / StatefulSet / DaemonSet rollout context. Log reads are bounded by tail line count,
+  response size, and one selected pod per request.
+- Extended the Helm Release readiness panel with actions on unready rows for Logs, Events, and
+  Rollout. Logs use a pod selector instead of fetching every matching pod at once.
+- Kept all observability data ephemeral. No new DocTypes or persisted observed-state fields were
+  added.
+
+### Rejected alternatives
+
+- **Persisting logs/events/history.** This violates Kubeport's desired-state versus observed-state
+  boundary and would make stale diagnostics look authoritative.
+- **Fetching logs from every pod in one request.** This is convenient but creates unbounded latency
+  and payload size for an interactive form click.
+- **Adding streaming logs.** Useful later, but larger than the current diagnostic drilldown scope.
+
+### Implementation details
+
+- `kubeport/api/observability.py`: new whitelisted read-only endpoints with release-scope
+  authorization and manifest membership validation.
+- `kubeport/utils/observability.py`: new Kubernetes helpers with request timeouts and payload caps.
+- `kubeport/kubeport/doctype/helm_release/helm_release.js`: readiness-row actions and dialogs.
+- `kubeport/tests/test_observability.py` and `kubeport/tests/test_api_observability.py`: utility and
+  API coverage for caps, authorization, selected-pod log reads, and malformed requests.
+
+---
+
 ## 2026-05-04 — Backup ground truth, cancel cascade, and Kubernetes Command hardening
 
 ### Context
