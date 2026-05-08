@@ -6,7 +6,7 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
-## 2026-05-07 — Helm Release observability drilldown
+## 2026-05-08 — Helm Release observability drilldown
 
 ### Context
 
@@ -57,7 +57,7 @@ rollout context.
   the pod picker.
 - `kubeport/kubeport/doctype/helm_release/helm_release.js`: readiness-row Logs / Events / Rollout
   actions render into a persistent in-form observability panel that shares the existing realtime
-  refresh channel.
+  refresh channel and ignores stale async responses after operators switch resources, views, or pods.
 - `kubeport/tests/test_observability.py` and `kubeport/tests/test_api_observability.py`: utility
   and API coverage for caps, authorization, selected-pod log fetching, `{rows, error}` wrapping,
   and malformed requests.

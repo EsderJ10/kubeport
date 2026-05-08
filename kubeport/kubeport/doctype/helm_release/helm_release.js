@@ -448,7 +448,9 @@ function kubeport_show_resource_rollout(frm, row) {
 }
 
 function kubeport_open_observability_panel(frm, type, row) {
+    frm.__kubeport_observability_panel_id = cint(frm.__kubeport_observability_panel_id || 0) + 1;
     frm.__kubeport_observability_state = {
+        panel_id: frm.__kubeport_observability_panel_id,
         type,
         row,
         values: {
@@ -461,7 +463,8 @@ function kubeport_open_observability_panel(frm, type, row) {
         },
         rows: [],
         error: '',
-        log_payload: null
+        log_payload: null,
+        request_id: 0
     };
     kubeport_render_observability_shell(frm);
     kubeport_refresh_active_observability_panel(frm);
@@ -536,6 +539,34 @@ function kubeport_close_observability_panel(frm) {
     }
 }
 
+function kubeport_create_observability_request_token(frm) {
+    const state = frm.__kubeport_observability_state;
+    if (!state) return null;
+
+    state.request_id = cint(state.request_id || 0) + 1;
+    return {
+        panel_id: state.panel_id,
+        request_id: state.request_id,
+        type: state.type || '',
+        kind: (state.row && state.row.kind) || '',
+        name: (state.row && state.row.name) || '',
+        namespace: (state.row && state.row.namespace) || ''
+    };
+}
+
+function kubeport_observability_request_is_active(frm, token) {
+    const state = frm.__kubeport_observability_state;
+    if (!state || !token) return false;
+
+    const row = state.row || {};
+    return cint(state.panel_id || 0) === cint(token.panel_id || 0)
+        && cint(state.request_id || 0) === cint(token.request_id || 0)
+        && (state.type || '') === token.type
+        && (row.kind || '') === token.kind
+        && (row.name || '') === token.name
+        && (row.namespace || '') === token.namespace;
+}
+
 function kubeport_render_logs_panel(frm) {
     const state = frm.__kubeport_observability_state;
     const $body = kubeport_get_observability_body(frm);
@@ -593,6 +624,7 @@ function kubeport_fetch_resource_logs(frm) {
     kubeport_read_log_values(frm);
     const values = state.values;
     const $target = $body.find('.kubeport-log-result');
+    const token = kubeport_create_observability_request_token(frm);
     $target.html(`<div class="text-muted small">${__('Loading logs…')}</div>`);
     frappe.call({
         method: 'kubeport.api.observability.get_release_resource_logs',
@@ -607,6 +639,7 @@ function kubeport_fetch_resource_logs(frm) {
             previous: cint(values.previous || 0) ? 1 : 0
         }
     }).then((r) => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
         if (r.exc) {
             $target.html(`<div class="text-muted small">${__('Could not fetch logs.')}</div>`);
             return;
@@ -616,6 +649,7 @@ function kubeport_fetch_resource_logs(frm) {
         kubeport_sync_log_pod_select(frm, payload);
         $target.html(kubeport_render_logs_payload(payload));
     }, () => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
         $target.html(`<div class="text-muted small">${__('Could not fetch logs.')}</div>`);
     });
 }
@@ -702,6 +736,7 @@ function kubeport_fetch_resource_events(frm) {
     `);
     $body.find('.kubeport-events-refresh').on('click', () => kubeport_fetch_resource_events(frm));
     const $target = $body.find('.kubeport-events-result');
+    const token = kubeport_create_observability_request_token(frm);
     $target.html(`<div class="text-muted small">${__('Loading events…')}</div>`);
     frappe.call({
         method: 'kubeport.api.observability.get_release_resource_events',
@@ -713,6 +748,7 @@ function kubeport_fetch_resource_events(frm) {
             limit: 20
         }
     }).then((r) => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
         if (r.exc) {
             $target.html(kubeport_render_panel_error(__('Could not fetch events.')));
             return;
@@ -722,6 +758,7 @@ function kubeport_fetch_resource_events(frm) {
         state.error = payload.error;
         kubeport_render_events_result(frm);
     }, () => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
         $target.html(kubeport_render_panel_error(__('Could not fetch events.')));
     });
 }
@@ -792,6 +829,7 @@ function kubeport_fetch_resource_rollout(frm) {
     `);
     $body.find('.kubeport-rollout-refresh').on('click', () => kubeport_fetch_resource_rollout(frm));
     const $target = $body.find('.kubeport-rollout-result');
+    const token = kubeport_create_observability_request_token(frm);
     $target.html(`<div class="text-muted small">${__('Loading rollout context…')}</div>`);
     frappe.call({
         method: 'kubeport.api.observability.get_release_resource_rollout',
@@ -803,6 +841,7 @@ function kubeport_fetch_resource_rollout(frm) {
             limit: 10
         }
     }).then((r) => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
         if (r.exc) {
             $target.html(kubeport_render_panel_error(__('Could not fetch rollout context.')));
             return;
@@ -810,6 +849,7 @@ function kubeport_fetch_resource_rollout(frm) {
         const payload = kubeport_normalize_observability_rows(r.message);
         $target.html(kubeport_render_rollout(payload.rows, payload.error));
     }, () => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
         $target.html(kubeport_render_panel_error(__('Could not fetch rollout context.')));
     });
 }
