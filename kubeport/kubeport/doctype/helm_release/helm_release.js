@@ -1,5 +1,6 @@
 frappe.ui.form.on('Helm Release', {
     refresh: function(frm) {
+        kubeport_close_observability_panel(frm);
         const status_map = {
             'Deployed': 'green',
             'Failed': 'red',
@@ -17,7 +18,12 @@ frappe.ui.form.on('Helm Release', {
             frm.__helm_release_status_listener_bound = true;
             frappe.realtime.on('helm_release_status_update', (data) => {
                 if (data.release_docname === frm.doc.name) {
-                    frm.reload_doc();
+                    if (frm.__kubeport_observability_state) {
+                        kubeport_render_release_health(frm);
+                        kubeport_refresh_active_observability_panel(frm);
+                    } else {
+                        frm.reload_doc();
+                    }
                 }
             });
         }
@@ -192,13 +198,15 @@ function kubeport_show_release_history(frm) {
         freeze_message: __('Loading release history...'),
         callback: function(r) {
             if (r.exc) return;
-            const rows = r.message || [];
+            const payload = r.message || {};
+            const rows = payload.rows || [];
+            const error = payload.error || '';
             const dialog = new frappe.ui.Dialog({
                 title: __('Release History'),
                 fields: [{
                     fieldname: 'history_html',
                     fieldtype: 'HTML',
-                    options: kubeport_render_history_table(rows)
+                    options: kubeport_render_history_table(rows, error)
                 }]
             });
             dialog.show();
@@ -225,7 +233,13 @@ function kubeport_show_release_history(frm) {
     });
 }
 
-function kubeport_render_history_table(rows) {
+function kubeport_render_history_table(rows, error) {
+    if (error) {
+        return `<div class="text-muted small">${__('Could not load release history:')}
+            ${frappe.utils.escape_html(error)}
+        </div>`;
+    }
+
     if (!rows.length) {
         return `<div class="text-muted small">${__('No release history was returned by Helm.')}</div>`;
     }
@@ -284,7 +298,7 @@ function kubeport_render_release_health(frm) {
         if (request_id !== frm.__helm_release_health_request_id) return;
         if (r && !r.exc) {
             const payload = r.message || {};
-            kubeport_paint_health_rows($wrapper, payload.rows || [], payload.error || '');
+            kubeport_paint_health_rows(frm, $wrapper, payload.rows || [], payload.error || '');
         } else {
             $wrapper.html(
                 `<div class="text-muted small">${__('Could not fetch workload readiness.')}</div>`
@@ -328,7 +342,7 @@ function kubeport_get_health_wrapper(frm) {
     return $panel.find('.kubeport-release-health-body');
 }
 
-function kubeport_paint_health_rows($body, rows, error) {
+function kubeport_paint_health_rows(frm, $body, rows, error) {
     const error_html = error
         ? `<div class="text-muted small" style="margin-bottom: 8px;">
                 ${__('Readiness check error:')} ${frappe.utils.escape_html(error)}
@@ -350,9 +364,10 @@ function kubeport_paint_health_rows($body, rows, error) {
         const reason = row.ready
             ? (row.message || __('ready'))
             : `${row.reason}${row.message ? ' - ' + row.message : ''}`;
+        const actions = row.ready ? '' : kubeport_render_health_actions(row);
         return `
             <div style="display: grid;
-                        grid-template-columns: 16px 110px 1fr 1.4fr;
+                        grid-template-columns: 16px 110px 1fr 1.4fr 190px;
                         gap: 8px; padding: 4px 0;
                         border-bottom: 1px solid var(--border-color);
                         font-size: 12px;">
@@ -362,10 +377,554 @@ function kubeport_paint_health_rows($body, rows, error) {
                     ${frappe.utils.escape_html(row.name)}
                 </div>
                 <div class="text-muted">${frappe.utils.escape_html(reason)}</div>
+                <div>${actions}</div>
             </div>
         `;
     }).join('');
     $body.html(`${error_html}${lines}`);
+    $body.find('.kubeport-health-action').on('click', function() {
+        const $button = $(this);
+        const row = {
+            kind: $button.attr('data-kind') || '',
+            name: $button.attr('data-name') || '',
+            namespace: $button.attr('data-namespace') || '',
+            pod_count: cint($button.attr('data-pod-count') || 0),
+        };
+        const action = $button.attr('data-action');
+        if (action === 'logs') {
+            kubeport_show_resource_logs(frm, row);
+        } else if (action === 'events') {
+            kubeport_show_resource_events(frm, row);
+        } else if (action === 'rollout') {
+            kubeport_show_resource_rollout(frm, row);
+        }
+    });
+}
+
+function kubeport_render_health_actions(row) {
+    const kind = frappe.utils.escape_html(row.kind || '');
+    const name = frappe.utils.escape_html(row.name || '');
+    const namespace = frappe.utils.escape_html(row.namespace || '');
+    const pod_count = cint(row.pod_count || 0);
+    const log_kinds = ['Deployment', 'StatefulSet', 'DaemonSet', 'Pod'];
+    const rollout_kinds = ['Deployment', 'StatefulSet', 'DaemonSet'];
+    let html = '<div style="display: flex; gap: 4px; flex-wrap: wrap;">';
+    if (log_kinds.includes(row.kind)) {
+        html += `
+            <button class="btn btn-xs btn-default kubeport-health-action"
+                    data-action="logs" data-kind="${kind}" data-name="${name}"
+                    data-namespace="${namespace}" data-pod-count="${pod_count}">
+                ${__('Logs')}
+            </button>`;
+    }
+    html += `
+        <button class="btn btn-xs btn-default kubeport-health-action"
+                data-action="events" data-kind="${kind}" data-name="${name}"
+                data-namespace="${namespace}" data-pod-count="${pod_count}">
+            ${__('Events')}
+        </button>`;
+    if (rollout_kinds.includes(row.kind)) {
+        html += `
+            <button class="btn btn-xs btn-default kubeport-health-action"
+                    data-action="rollout" data-kind="${kind}" data-name="${name}"
+                    data-namespace="${namespace}" data-pod-count="${pod_count}">
+                ${__('Rollout')}
+            </button>`;
+    }
+    html += '</div>';
+    return html;
+}
+
+function kubeport_show_resource_logs(frm, row) {
+    kubeport_open_observability_panel(frm, 'logs', row);
+}
+
+function kubeport_show_resource_events(frm, row) {
+    kubeport_open_observability_panel(frm, 'events', row);
+}
+
+function kubeport_show_resource_rollout(frm, row) {
+    kubeport_open_observability_panel(frm, 'rollout', row);
+}
+
+function kubeport_open_observability_panel(frm, type, row) {
+    frm.__kubeport_observability_panel_id = cint(frm.__kubeport_observability_panel_id || 0) + 1;
+    frm.__kubeport_observability_state = {
+        panel_id: frm.__kubeport_observability_panel_id,
+        type,
+        row,
+        values: {
+            tail_lines: '200',
+            pod_name: '',
+            container: '',
+            previous: 0,
+            sort_key: 'last_seen',
+            sort_dir: 'desc'
+        },
+        rows: [],
+        error: '',
+        log_payload: null,
+        request_id: 0
+    };
+    kubeport_render_observability_shell(frm);
+    kubeport_refresh_active_observability_panel(frm);
+}
+
+function kubeport_refresh_active_observability_panel(frm) {
+    const state = frm.__kubeport_observability_state;
+    if (!state) return;
+
+    if (state.type === 'logs') {
+        kubeport_read_log_values(frm);
+        kubeport_render_logs_panel(frm);
+    } else if (state.type === 'events') {
+        kubeport_fetch_resource_events(frm);
+    } else if (state.type === 'rollout') {
+        kubeport_fetch_resource_rollout(frm);
+    }
+}
+
+function kubeport_render_observability_shell(frm) {
+    const state = frm.__kubeport_observability_state;
+    if (!state) return;
+
+    const $panel = kubeport_get_observability_panel(frm);
+    if (!$panel) return;
+
+    const title_map = {
+        logs: __('Logs'),
+        events: __('Events'),
+        rollout: __('Rollout')
+    };
+    const title = `${title_map[state.type] || ''}: ${state.row.kind}/${state.row.name}`;
+    $panel.html(`
+        <div class="kubeport-observability-header"
+             style="display: flex; justify-content: space-between; gap: 8px;
+                    align-items: center; margin-bottom: 8px;">
+            <strong>${frappe.utils.escape_html(title)}</strong>
+            <button class="btn btn-xs btn-default kubeport-observability-close">
+                ${__('Close')}
+            </button>
+        </div>
+        <div class="kubeport-observability-body"></div>
+    `);
+    $panel.find('.kubeport-observability-close').on('click', () => {
+        kubeport_close_observability_panel(frm);
+    });
+}
+
+function kubeport_get_observability_panel(frm) {
+    const detail_field = frm.fields_dict.helm_status_detail;
+    if (!detail_field || !detail_field.$wrapper) return null;
+
+    let $panel = detail_field.$wrapper.find('.kubeport-observability-panel');
+    if (!$panel.length) {
+        $panel = $(`
+            <div class="kubeport-observability-panel"
+                 style="margin-top: 12px; padding: 8px;
+                        border: 1px solid var(--border-color);
+                        border-radius: 4px;">
+            </div>
+        `);
+        detail_field.$wrapper.append($panel);
+    }
+    return $panel;
+}
+
+function kubeport_close_observability_panel(frm) {
+    frm.__kubeport_observability_state = null;
+    const detail_field = frm.fields_dict && frm.fields_dict.helm_status_detail;
+    if (detail_field && detail_field.$wrapper) {
+        detail_field.$wrapper.find('.kubeport-observability-panel').remove();
+    }
+}
+
+function kubeport_create_observability_request_token(frm) {
+    const state = frm.__kubeport_observability_state;
+    if (!state) return null;
+
+    state.request_id = cint(state.request_id || 0) + 1;
+    return {
+        panel_id: state.panel_id,
+        request_id: state.request_id,
+        type: state.type || '',
+        kind: (state.row && state.row.kind) || '',
+        name: (state.row && state.row.name) || '',
+        namespace: (state.row && state.row.namespace) || ''
+    };
+}
+
+function kubeport_observability_request_is_active(frm, token) {
+    const state = frm.__kubeport_observability_state;
+    if (!state || !token) return false;
+
+    const row = state.row || {};
+    return cint(state.panel_id || 0) === cint(token.panel_id || 0)
+        && cint(state.request_id || 0) === cint(token.request_id || 0)
+        && (state.type || '') === token.type
+        && (row.kind || '') === token.kind
+        && (row.name || '') === token.name
+        && (row.namespace || '') === token.namespace;
+}
+
+function kubeport_render_logs_panel(frm) {
+    const state = frm.__kubeport_observability_state;
+    const $body = kubeport_get_observability_body(frm);
+    if (!state || !$body) return;
+
+    const values = state.values;
+    $body.html(`
+        <div class="kubeport-log-controls"
+             style="display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end;
+                    margin-bottom: 8px;">
+            <label class="control-label" style="margin-bottom: 0;">
+                ${__('Tail Lines')}
+                <select class="form-control input-xs kubeport-log-tail" style="width: 92px;">
+                    ${['50', '200', '500', '2000'].map((option) => `
+                        <option value="${option}" ${values.tail_lines === option ? 'selected' : ''}>${option}</option>
+                    `).join('')}
+                </select>
+            </label>
+            <label class="control-label kubeport-log-pod-control" style="margin-bottom: 0; display: none;">
+                ${__('Pod')}
+                <select class="form-control input-xs kubeport-log-pod" style="min-width: 220px;"></select>
+            </label>
+            <label class="control-label" style="margin-bottom: 0;">
+                ${__('Container')}
+                <input class="form-control input-xs kubeport-log-container"
+                       style="width: 180px;" value="${frappe.utils.escape_html(values.container || '')}">
+            </label>
+            <label class="checkbox" style="margin: 0;">
+                <input type="checkbox" class="kubeport-log-previous" ${values.previous ? 'checked' : ''}>
+                ${__('Previous container')}
+            </label>
+            <button class="btn btn-xs btn-default kubeport-log-refresh">${__('Refresh')}</button>
+        </div>
+        <div class="kubeport-log-result"></div>
+    `);
+    $body.find('.kubeport-log-refresh').on('click', () => kubeport_fetch_resource_logs(frm));
+    $body.find('.kubeport-log-tail, .kubeport-log-previous').on('change', () => {
+        kubeport_fetch_resource_logs(frm);
+    });
+    $body.find('.kubeport-log-pod').on('change', () => {
+        kubeport_read_log_values(frm);
+        kubeport_fetch_resource_logs(frm);
+    });
+    $body.find('.kubeport-log-container').on('keydown', (event) => {
+        if (event.key === 'Enter') kubeport_fetch_resource_logs(frm);
+    });
+    kubeport_fetch_resource_logs(frm);
+}
+
+function kubeport_fetch_resource_logs(frm) {
+    const state = frm.__kubeport_observability_state;
+    const $body = kubeport_get_observability_body(frm);
+    if (!state || !$body) return;
+
+    kubeport_read_log_values(frm);
+    const values = state.values;
+    const $target = $body.find('.kubeport-log-result');
+    const token = kubeport_create_observability_request_token(frm);
+    $target.html(`<div class="text-muted small">${__('Loading logs…')}</div>`);
+    frappe.call({
+        method: 'kubeport.api.observability.get_release_resource_logs',
+        args: {
+            release_docname: frm.doc.name,
+            kind: state.row.kind,
+            name: state.row.name,
+            namespace: state.row.namespace || null,
+            pod_name: values.pod_name || null,
+            container: values.container || null,
+            tail_lines: cint(values.tail_lines || 200),
+            previous: cint(values.previous || 0) ? 1 : 0
+        }
+    }).then((r) => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
+        if (r.exc) {
+            $target.html(`<div class="text-muted small">${__('Could not fetch logs.')}</div>`);
+            return;
+        }
+        const payload = r.message || {};
+        state.log_payload = payload;
+        kubeport_sync_log_pod_select(frm, payload);
+        $target.html(kubeport_render_logs_payload(payload));
+    }, () => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
+        $target.html(`<div class="text-muted small">${__('Could not fetch logs.')}</div>`);
+    });
+}
+
+function kubeport_read_log_values(frm) {
+    const state = frm.__kubeport_observability_state;
+    const $body = kubeport_get_observability_body(frm);
+    if (!state || !$body) return;
+
+    state.values.tail_lines = String($body.find('.kubeport-log-tail').val() || state.values.tail_lines || '200');
+    state.values.pod_name = String($body.find('.kubeport-log-pod').val() || state.values.pod_name || '');
+    state.values.container = String($body.find('.kubeport-log-container').val() || '');
+    state.values.previous = $body.find('.kubeport-log-previous').is(':checked') ? 1 : 0;
+}
+
+function kubeport_sync_log_pod_select(frm, payload) {
+    const state = frm.__kubeport_observability_state;
+    const $body = kubeport_get_observability_body(frm);
+    if (!state || !$body) return;
+
+    const pods = payload.pods || [];
+    const options = pods
+        .map(pod => pod.name || '')
+        .filter(Boolean);
+    const $select = $body.find('.kubeport-log-pod');
+    $select.html(options.map((option) => {
+        const selected = option === payload.selected_pod ? 'selected' : '';
+        return `<option value="${frappe.utils.escape_html(option)}" ${selected}>
+            ${frappe.utils.escape_html(option)}
+        </option>`;
+    }).join(''));
+    $body.find('.kubeport-log-pod-control').toggle(options.length > 1);
+
+    const selected = payload.selected_pod || '';
+    if (selected && options.includes(selected)) {
+        state.values.pod_name = selected;
+    }
+}
+
+function kubeport_render_logs_payload(payload) {
+    const pods = payload.pods || [];
+    const logs_by_pod = payload.logs_by_pod || {};
+    const errors_by_pod = payload.errors_by_pod || {};
+    const selected_pod = payload.selected_pod || (pods[0] && pods[0].name) || '';
+    let html = kubeport_render_panel_error(payload.error || '');
+    if (!pods.length) {
+        return html || `<div class="text-muted small">${__('No pods were found for this resource.')}</div>`;
+    }
+
+    const pod = pods.find(row => row.name === selected_pod) || pods[0];
+    const pod_name = pod.name || '';
+    const containers = (pod.container_names || []).join(', ');
+    const status = `${pod.phase || __('Unknown')} · ${__('restarts')}: ${pod.restart_count || 0}`;
+    html += `
+        <div style="margin-bottom: 12px;">
+            <div style="display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
+                <strong>${frappe.utils.escape_html(pod_name)}</strong>
+                <span class="text-muted small">${frappe.utils.escape_html(status)}</span>
+            </div>
+            ${containers ? `<div class="text-muted small" style="margin-bottom: 4px;">
+                ${__('Containers')}: ${frappe.utils.escape_html(containers)}
+            </div>` : ''}
+            ${errors_by_pod[pod_name] ? `<div class="text-muted small" style="margin-bottom: 4px;">
+                ${frappe.utils.escape_html(errors_by_pod[pod_name])}
+            </div>` : ''}
+            <pre style="max-height: 420px; overflow: auto; white-space: pre-wrap;
+                        background: var(--fg-color); color: var(--text-color);
+                        border: 1px solid var(--border-color); border-radius: 4px;
+                        padding: 8px; font-size: 12px;">${frappe.utils.escape_html(logs_by_pod[pod_name] || '')}</pre>
+        </div>`;
+    return html;
+}
+
+function kubeport_fetch_resource_events(frm) {
+    const state = frm.__kubeport_observability_state;
+    const $body = kubeport_get_observability_body(frm);
+    if (!state || !$body) return;
+
+    $body.html(`
+        <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+            <button class="btn btn-xs btn-default kubeport-events-refresh">${__('Refresh')}</button>
+        </div>
+        <div class="kubeport-events-result"></div>
+    `);
+    $body.find('.kubeport-events-refresh').on('click', () => kubeport_fetch_resource_events(frm));
+    const $target = $body.find('.kubeport-events-result');
+    const token = kubeport_create_observability_request_token(frm);
+    $target.html(`<div class="text-muted small">${__('Loading events…')}</div>`);
+    frappe.call({
+        method: 'kubeport.api.observability.get_release_resource_events',
+        args: {
+            release_docname: frm.doc.name,
+            kind: state.row.kind,
+            name: state.row.name,
+            namespace: state.row.namespace || null,
+            limit: 20
+        }
+    }).then((r) => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
+        if (r.exc) {
+            $target.html(kubeport_render_panel_error(__('Could not fetch events.')));
+            return;
+        }
+        const payload = kubeport_normalize_observability_rows(r.message);
+        state.rows = payload.rows;
+        state.error = payload.error;
+        kubeport_render_events_result(frm);
+    }, () => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
+        $target.html(kubeport_render_panel_error(__('Could not fetch events.')));
+    });
+}
+
+function kubeport_render_events_result(frm) {
+    const state = frm.__kubeport_observability_state;
+    const $body = kubeport_get_observability_body(frm);
+    if (!state || !$body) return;
+
+    const $target = $body.find('.kubeport-events-result');
+    $target.html(kubeport_render_events(state.rows || [], state.values, state.error || ''));
+    $target.find('.kubeport-events-sort').on('click', function() {
+        const key = $(this).attr('data-sort-key') || 'last_seen';
+        if (state.values.sort_key === key) {
+            state.values.sort_dir = state.values.sort_dir === 'asc' ? 'desc' : 'asc';
+        } else {
+            state.values.sort_key = key;
+            state.values.sort_dir = 'desc';
+        }
+        kubeport_render_events_result(frm);
+    });
+}
+
+function kubeport_render_events(rows, values, error) {
+    if (!rows.length) {
+        return kubeport_render_panel_error(error)
+            || `<div class="text-muted small">${__('No scoped events were returned for this resource.')}</div>`;
+    }
+    rows = kubeport_sort_rows(rows, values.sort_key || 'last_seen', values.sort_dir || 'desc');
+    let html = kubeport_render_panel_error(error);
+    html += '<div class="table-responsive"><table class="table table-bordered" style="margin-bottom: 0;">';
+    html += `<thead><tr>
+        <th><button class="btn btn-xs btn-link kubeport-events-sort" data-sort-key="type">${__('Type')}</button></th>
+        <th><button class="btn btn-xs btn-link kubeport-events-sort" data-sort-key="reason">${__('Reason')}</button></th>
+        <th><button class="btn btn-xs btn-link kubeport-events-sort" data-sort-key="count">${__('Count')}</button></th>
+        <th><button class="btn btn-xs btn-link kubeport-events-sort" data-sort-key="last_seen">${__('Age')}</button></th>
+        <th>${__('Message')}</th>
+    </tr></thead><tbody>`;
+    rows.forEach((row) => {
+        const message = row.message || '';
+        const timestamp = row.last_seen || row.first_seen || '';
+        html += `<tr>
+            <td>${frappe.utils.escape_html(row.type || '')}</td>
+            <td>${frappe.utils.escape_html(row.reason || '')}</td>
+            <td>${frappe.utils.escape_html(String(row.count || 0))}</td>
+            <td title="${frappe.utils.escape_html(timestamp)}">
+                ${frappe.utils.escape_html(kubeport_format_age(timestamp))}
+            </td>
+            <td style="word-break: break-word;" title="${frappe.utils.escape_html(message)}">
+                ${frappe.utils.escape_html(message)}
+            </td>
+        </tr>`;
+    });
+    html += '</tbody></table></div>';
+    return html;
+}
+
+function kubeport_fetch_resource_rollout(frm) {
+    const state = frm.__kubeport_observability_state;
+    const $body = kubeport_get_observability_body(frm);
+    if (!state || !$body) return;
+
+    $body.html(`
+        <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+            <button class="btn btn-xs btn-default kubeport-rollout-refresh">${__('Refresh')}</button>
+        </div>
+        <div class="kubeport-rollout-result"></div>
+    `);
+    $body.find('.kubeport-rollout-refresh').on('click', () => kubeport_fetch_resource_rollout(frm));
+    const $target = $body.find('.kubeport-rollout-result');
+    const token = kubeport_create_observability_request_token(frm);
+    $target.html(`<div class="text-muted small">${__('Loading rollout context…')}</div>`);
+    frappe.call({
+        method: 'kubeport.api.observability.get_release_resource_rollout',
+        args: {
+            release_docname: frm.doc.name,
+            kind: state.row.kind,
+            name: state.row.name,
+            namespace: state.row.namespace || null,
+            limit: 10
+        }
+    }).then((r) => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
+        if (r.exc) {
+            $target.html(kubeport_render_panel_error(__('Could not fetch rollout context.')));
+            return;
+        }
+        const payload = kubeport_normalize_observability_rows(r.message);
+        $target.html(kubeport_render_rollout(payload.rows, payload.error));
+    }, () => {
+        if (!kubeport_observability_request_is_active(frm, token)) return;
+        $target.html(kubeport_render_panel_error(__('Could not fetch rollout context.')));
+    });
+}
+
+function kubeport_render_rollout(rows, error) {
+    if (!rows.length) {
+        return kubeport_render_panel_error(error)
+            || `<div class="text-muted small">${__('No rollout context was returned for this resource.')}</div>`;
+    }
+    let html = kubeport_render_panel_error(error);
+    html += '<div class="table-responsive"><table class="table table-bordered" style="margin-bottom: 0;">';
+    html += `<thead><tr>
+        <th>${__('Revision')}</th><th>${__('State')}</th><th>${__('Created')}</th>
+        <th>${__('Change Cause')}</th><th>${__('Images')}</th>
+    </tr></thead><tbody>`;
+    rows.forEach((row) => {
+        const revision_state = row.current ? __('Current') : (row.update ? __('Update') : '');
+        html += `<tr>
+            <td>${frappe.utils.escape_html(String(row.revision || ''))}</td>
+            <td>${frappe.utils.escape_html(revision_state)}</td>
+            <td>${frappe.utils.escape_html(row.created_at || '')}</td>
+            <td style="word-break: break-word;">${frappe.utils.escape_html(row.change_cause || '')}</td>
+            <td style="word-break: break-all;">${frappe.utils.escape_html(row.image_summary || '')}</td>
+        </tr>`;
+    });
+    html += '</tbody></table></div>';
+    return html;
+}
+
+function kubeport_get_observability_body(frm) {
+    const detail_field = frm.fields_dict.helm_status_detail;
+    if (!detail_field || !detail_field.$wrapper) return null;
+    const $body = detail_field.$wrapper.find('.kubeport-observability-body');
+    return $body.length ? $body : null;
+}
+
+function kubeport_normalize_observability_rows(message) {
+    if (Array.isArray(message)) {
+        return { rows: message, error: '' };
+    }
+    message = message || {};
+    return {
+        rows: message.rows || [],
+        error: message.error || ''
+    };
+}
+
+function kubeport_render_panel_error(error) {
+    if (!error) return '';
+    return `<div class="text-danger small" style="margin-bottom: 8px;">
+        ${frappe.utils.escape_html(error)}
+    </div>`;
+}
+
+function kubeport_sort_rows(rows, key, direction) {
+    const sorted = [...rows];
+    sorted.sort((a, b) => {
+        const left = a[key] || '';
+        const right = b[key] || '';
+        if (key === 'count') {
+            return cint(left) - cint(right);
+        }
+        return String(left).localeCompare(String(right));
+    });
+    if (direction === 'desc') sorted.reverse();
+    return sorted;
+}
+
+function kubeport_format_age(timestamp) {
+    if (!timestamp) return '';
+    if (typeof moment === 'function') {
+        const parsed = moment(timestamp);
+        if (parsed.isValid()) return parsed.fromNow();
+    }
+    return timestamp;
 }
 
 // Namespace autocomplete — fetches live namespaces from the selected cluster

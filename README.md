@@ -10,7 +10,7 @@ Kubeport bridges the Frappe framework with Kubernetes by following a clear archi
 
 - **Cluster Connectivity** — connect to Kubernetes clusters via kubeconfig, bearer token, or in-cluster service account. Browser-side kubeconfig import with automatic endpoint normalization for containerized development.
 - **Helm Chart Catalog** — register Helm repositories and sync chart metadata (versions, default values) into the Frappe database with daily background refresh.
-- **Helm Release Management** — declare desired Helm releases (chart, version, namespace, values), deploy/upgrade/rollback/uninstall them through background jobs, track pending desired changes, and recover stale operations through reconciliation.
+- **Helm Release Management** — declare desired Helm releases (chart, version, namespace, values), deploy/upgrade/rollback/uninstall them through background jobs, inspect live readiness/logs/events/rollout context, track pending desired changes, and recover stale operations through reconciliation.
 - **Raw Manifest Deployment** — define raw Kubernetes manifests in Service Bundles and apply or delete them via server-side apply, with a fixed allowlist of supported resource kinds.
 - **Frappe Site Lifecycle** — create, drop, migrate, back up, and restore Frappe sites on running ERPNext benches by submitting Kubernetes Jobs that run `bench new-site`, `bench drop-site`, `bench migrate`, `bench backup`, or `bench restore`. Status is verified through ground-truth bench probes where needed, and the `Frappe Site` row is auto-removed once the bench confirms a successful drop.
 - **Live Discovery** — cluster-scoped, read-only discovery of Helm releases and Frappe sites. Discovery results are rendered client-side and never persisted unless an operator explicitly tracks a discovered Helm release.
@@ -108,7 +108,7 @@ When the full Bench environment is unavailable, use focused unit tests and synta
 1. Confirm the release is an official supported Frappe chart (currently `erpnext`).
 2. Check the target namespace for running workload pods — infra pods (MariaDB, Valkey) are not valid discovery targets.
 3. Verify the release has at least one **running** Frappe workload pod.
-4. Inspect pending pod events and PVC state if workloads are stuck.
+4. Inspect the Helm Release readiness drilldown for scoped logs, events, rollout context, and PVC state if workloads are stuck.
 5. Confirm site creation completed inside the workload before expecting discovery.
 
 ```bash

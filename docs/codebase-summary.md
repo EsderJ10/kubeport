@@ -158,6 +158,15 @@ Frappe Site form support:
 - `get_site_backup_job_logs(backup_docname)` — fetches stdout from backup/restore Jobs
 - Returns empty logs gracefully when the Job pod is not yet available or has been cleaned up by TTL
 
+### `kubeport.api.observability`
+
+Read-only Helm Release drilldown endpoints:
+
+- Resolves cluster identity from the `Helm Release` row after System Manager and document read checks.
+- Validates the requested resource against the live Helm manifest before reading logs, events, or rollout context.
+- Returns the ownership-proven pod list and bounded logs for one selected pod, plus release-scoped event and rollout payloads without persisting observed state.
+- Uses explicit `{rows, error}` wrappers for event and rollout lookup failures so the form can render panel-level degradation.
+
 ---
 
 ## Utility Layer
@@ -187,6 +196,14 @@ Read-only observed health for Helm Releases.
 - Converts missing/API-error resources into unready rows so the form can show partial results instead of failing the whole health read.
 - Provides the shared classifier used by deploy workers and reconciliation: `deployed` plus all workloads ready is `Deployed`; `deployed` plus unready/probe error is `Degraded`; pending or non-deployed Helm states are `Failed`.
 - Keeps observed per-resource rows ephemeral; only lifecycle/status metadata (`status`, `helm_revision`, short `helm_status_detail`, spec hashes, and operation markers) is persisted on the Helm Release row.
+
+### `observability.py`
+
+Read-only Kubernetes helpers for Helm Release diagnostics.
+
+- Resolves pods for `Deployment`, `StatefulSet`, `DaemonSet`, and standalone `Pod` resources using controller owner references and selectors.
+- Fetches one selected pod's logs per request with server-side tail limits and a response-size cap.
+- Normalizes scoped Kubernetes events and workload rollout context for form rendering.
 
 ### `discovery.py`
 
@@ -260,7 +277,7 @@ Scheduled drift detection running every 5 minutes:
 JavaScript form scripts in DocType folders follow an async-first pattern:
 
 - `Kubernetes Cluster` renders live discovery tables in the form via `frappe.xcall`.
-- `Helm Release` and `Service Bundle` listen for realtime status update events and refresh indicators. Helm Release health loads asynchronously as `{rows, error}` so backend read failures show in the panel without blocking document load.
+- `Helm Release` and `Service Bundle` listen for realtime status update events and refresh indicators. Helm Release health loads asynchronously as `{rows, error}` and unready rows open a persistent in-form observability panel exposing pod logs (with a pod picker when more than one pod backs the resource), scoped Kubernetes events, and rollout context without blocking document load. The observability panel guards async callbacks so stale responses cannot overwrite the active resource, view, or pod selection.
 - `Frappe Site` displays status indicators, lifecycle triggers, backup rows, restore actions, and fetches Job logs asynchronously.
 - Namespace suggestions are fetched live from the selected cluster.
 - Forms never attempt to persist externally discovered state during document fetch.

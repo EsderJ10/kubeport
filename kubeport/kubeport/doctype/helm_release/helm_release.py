@@ -286,7 +286,7 @@ class HelmRelease(Document):
 		return show_values(chart_ref, version=version)
 
 	@frappe.whitelist()
-	def get_release_history(self) -> list[dict[str, Any]]:
+	def get_release_history(self) -> dict[str, Any]:
 		"""Return live Helm revision history for this release."""
 		from kubeport.utils import helm
 
@@ -296,14 +296,20 @@ class HelmRelease(Document):
 				namespace=self.namespace or "default",
 				cluster_name=self.cluster,
 			)
-			return history if isinstance(history, list) else []
+			return {
+				"rows": history if isinstance(history, list) else [],
+				"error": "",
+			}
 		except Exception as e:
 			frappe.logger("kubeport").warning(
 				"Could not read Helm Release history for '%s': %s",
 				self.name,
 				e,
 			)
-			return []
+			return {
+				"rows": [],
+				"error": str(e),
+			}
 
 	def _resolve_chart_version(self) -> str:
 		if self.chart_version:

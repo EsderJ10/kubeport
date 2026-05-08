@@ -77,12 +77,14 @@ namespace from the row, never trusting the client to name a cluster.
 - `get_release_resource_logs(release_docname, kind, name, container=None, tail_lines=200,
   previous=False) -> dict` — wraps `get_pod_logs`. For workload kinds (`Deployment`,
   `StatefulSet`, `DaemonSet`), the endpoint resolves the workload's pods first and returns a
-  dict `{pods: [...], logs_by_pod: {<pod_name>: <log_text>}}` so the form can let the operator
-  pick which pod to view.
-- `get_release_resource_events(release_docname, kind, name, limit=20) -> list[dict]` — wraps
-  `list_resource_events`.
-- `get_release_resource_rollout(release_docname, kind, name, limit=10) -> list[dict]` — wraps
-  `get_rollout_history`.
+  dict `{pods: [...], selected_pod, logs_by_pod: {<pod_name>: <log_text>}, errors_by_pod: {...}}`
+  with logs for one selected ownership-proven pod per request so large workloads do not require
+  one web request to read every pod log.
+- `get_release_resource_events(release_docname, kind, name, limit=20) -> dict` — wraps
+  `list_resource_events` and returns `{rows: [...], error: ""}`. Lookup failures return
+  `{rows: [], error: "<message>"}` for panel-level graceful degradation.
+- `get_release_resource_rollout(release_docname, kind, name, limit=10) -> dict` — wraps
+  `get_rollout_history` and returns `{rows: [...], error: ""}` with the same failure wrapper.
 
 ### UI (`helm_release.js`)
 

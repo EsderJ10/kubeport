@@ -40,6 +40,7 @@ The current milestone is **robustness** — making discovery, background executi
 - Uninstall is dependency-aware: linked `Frappe Site` rows in active/in-flight states block normal uninstall, with a typed force-uninstall path for explicit operator override.
 - Post-deploy and reconciliation health combine Helm runtime state with a rendered-manifest readiness walk (`Deployment`, `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, `Ingress`). `deployed` plus all checked resources ready becomes `Deployed`; `deployed` plus unready resources or readiness probe failure becomes `Degraded`; pending/non-deployed Helm states become `Failed`.
 - The Helm Release form exposes workload-readiness drilldown as read-only observed state. Per-resource rows are not persisted.
+- Each unready readiness row opens an in-form observability panel with three sub-views: pod logs (resource-scoped pod list with one selected pod fetched per request, bounded by tail-line count and response size), scoped Kubernetes events, and Deployment / StatefulSet / DaemonSet rollout context. The panel is read-only, ephemeral, gated on System Manager plus document read access, and ignores stale async responses when operators switch resources, views, or pods.
 - The Helm Release form exposes live release history and queues rollback as a background operation. A successful rollback updates the desired values/chart version to the selected live revision.
 - Status lifecycle: `Draft` → `In Progress` → `Deployed` / `Degraded` / `Failed` → `Uninstalling` → `Draft`.
 - Realtime events trigger form refresh on status changes.
@@ -138,14 +139,18 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Discovery and Observability
 
-- Discovery is a UI payload, not a richer observed-state model. Helm Release health shows resource readiness, but there is still no full in-app drilldown for pod logs, Kubernetes event history, rollout timelines, or per-site health.
+- Discovery is a UI payload, not a richer observed-state model. Helm Release health shows resource
+  readiness and release-scoped drilldowns for pod logs, Kubernetes events, and workload rollout
+  context, but there is still no per-Frappe-Site health surface, no real-time log streaming, and
+  no cluster-wide event timeline.
 - Supported bench discovery is intentionally narrow: only official `erpnext` chart releases. Widening to other chart variants requires deliberate design.
 - Discovery data is not linked back to persisted `Helm Release` documents beyond matching names and namespaces.
 
 ### Health Depth
 
 - Helm release health covers built-in readiness for `Deployment`, `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, and `Ingress`, and surfaces partial per-resource rows in the form.
-- Helm health still does not inspect storage pressure beyond PVC binding, application-level HTTP health, or CRD-specific health.
+- Helm health still does not inspect stored log/event history, storage pressure beyond PVC binding,
+  application-level HTTP health, or CRD-specific health.
 - Service Bundle health only checks resource existence.
 
 ### Platform Coverage

@@ -132,13 +132,18 @@ def _reconcile_helm_releases():
 				)
 
 		except Exception as e:
+			if _is_helm_release_not_found_error(e):
+				detail = f"Helm release is missing from the cluster: {_truncate_status_detail(str(e))}"
+			else:
+				detail = f"Reconciliation error: {_truncate_status_detail(str(e))}"
+
 			# If helm status fails entirely, mark as degraded with the error
 			# (or skip if a concurrent operation has rotated the token).
 			_set_helm_reconciliation_state(
 				release_docname=release.name,
 				expected_token=release.operation_token,
 				next_status="Degraded",
-				detail=f"Reconciliation error: {_truncate_status_detail(str(e))}",
+				detail=detail,
 			)
 			frappe.log_error(
 				title=f"Helm Reconciliation Error: {release.name}",

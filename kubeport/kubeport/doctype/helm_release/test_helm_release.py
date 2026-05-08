@@ -329,6 +329,35 @@ class UnitTestHelmRelease(UnitTestCase):
 		self.assertEqual(result["rows"], [])
 		self.assertIn("helm get manifest failed", result["error"])
 
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.logger")
+	@patch("kubeport.utils.helm.history")
+	def test_get_release_history_returns_structured_rows(self, mock_history, _mock_logger):
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+		doc.release_name = "bench-a"
+		doc.namespace = "default"
+		doc.cluster = "cluster-a"
+		mock_history.return_value = [{"revision": 1, "status": "deployed"}]
+
+		result = doc.get_release_history()
+
+		self.assertEqual(result["error"], "")
+		self.assertEqual(result["rows"][0]["status"], "deployed")
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.logger")
+	@patch("kubeport.utils.helm.history", side_effect=RuntimeError("helm history failed"))
+	def test_get_release_history_returns_structured_error(self, _mock_history, _mock_logger):
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+		doc.release_name = "bench-a"
+		doc.namespace = "default"
+		doc.cluster = "cluster-a"
+
+		result = doc.get_release_history()
+
+		self.assertEqual(result["rows"], [])
+		self.assertIn("helm history failed", result["error"])
+
 
 # On IntegrationTestCase, the doctype test records and all
 # link-field test record dependencies are recursively loaded
