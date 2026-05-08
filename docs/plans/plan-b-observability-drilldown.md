@@ -78,8 +78,8 @@ namespace from the row, never trusting the client to name a cluster.
   previous=False) -> dict` — wraps `get_pod_logs`. For workload kinds (`Deployment`,
   `StatefulSet`, `DaemonSet`), the endpoint resolves the workload's pods first and returns a
   dict `{pods: [...], selected_pod, logs_by_pod: {<pod_name>: <log_text>}, errors_by_pod: {...}}`
-  for all ownership-proven pods so the form can let the operator pick which pod to view without
-  another round trip.
+  with logs for one selected ownership-proven pod per request so large workloads do not require
+  one web request to read every pod log.
 - `get_release_resource_events(release_docname, kind, name, limit=20) -> dict` — wraps
   `list_resource_events` and returns `{rows: [...], error: ""}`. Lookup failures return
   `{rows: [], error: "<message>"}` for panel-level graceful degradation.

@@ -20,13 +20,13 @@ rollout context.
   release row, enforce System Manager plus document read access, and validate the requested
   resource against the live Helm manifest before returning diagnostic data.
 - Added Kubernetes observability helpers for resource-scoped pod logs, events, and
-  Deployment / StatefulSet / DaemonSet rollout context. Per-pod log reads are bounded by tail line
-  count and response size; the API resolves every ownership-proven pod for the resource and
-  returns logs keyed by pod name plus a default `selected_pod` for the UI.
+  Deployment / StatefulSet / DaemonSet rollout context. Log reads are bounded by tail line count
+  and response size; the API resolves ownership-proven pods for the resource and returns logs only
+  for the selected pod, plus the pod list and default `selected_pod` for the UI.
 - Extended the Helm Release readiness panel into an in-form persistent observability panel. Each
   unready row exposes Logs, Events, and Rollout actions; the Logs view ships a pod picker that
-  switches between pods without a round trip, while Events and Rollout return uniform
-  `{rows, error}` payloads so the panel can degrade per-section.
+  fetches the selected pod on each switch, while Events and Rollout return uniform `{rows, error}`
+  payloads so the panel can degrade per-section.
 - Added a `pod_count` field to the workload readiness rows so the form can hide the pod picker
   when only one pod backs a resource.
 - Kept all observability data ephemeral. No new DocTypes or persisted observed-state fields were
@@ -40,11 +40,9 @@ rollout context.
   click; switching pods or actions repeatedly closed and reopened modals. A persistent in-form
   panel keeps the readiness table and diagnostics visible together and survives panel-internal
   refreshes.
-- **One log request per pod-picker switch.** Tried and reverted: the pre-refactor API returned
-  logs for a single `selected_pod` per call, so the form re-requested whenever the operator
-  changed pod. That added user-visible latency on every picker click. The API now returns logs
-  for every ownership-proven pod server-side in one call, so picker switches are instant and the
-  same per-pod tail/size caps apply.
+- **Fetching every pod log in one request.** This made a single form request scale with workload
+  pod count and could stall the web thread on large or unhealthy releases. The API now fetches one
+  selected pod per request while still returning the pod list for picker navigation.
 - **Adding streaming logs.** Useful later, but larger than the current diagnostic drilldown scope.
 
 ### Implementation details
@@ -61,8 +59,8 @@ rollout context.
   actions render into a persistent in-form observability panel that shares the existing realtime
   refresh channel.
 - `kubeport/tests/test_observability.py` and `kubeport/tests/test_api_observability.py`: utility
-  and API coverage for caps, authorization, per-pod log fan-out, `{rows, error}` wrapping, and
-  malformed requests.
+  and API coverage for caps, authorization, selected-pod log fetching, `{rows, error}` wrapping,
+  and malformed requests.
 
 ---
 

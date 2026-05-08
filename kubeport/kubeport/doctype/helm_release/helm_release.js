@@ -577,12 +577,7 @@ function kubeport_render_logs_panel(frm) {
     });
     $body.find('.kubeport-log-pod').on('change', () => {
         kubeport_read_log_values(frm);
-        if (state.log_payload) {
-            state.log_payload.selected_pod = state.values.pod_name || state.log_payload.selected_pod || '';
-            $body.find('.kubeport-log-result').html(kubeport_render_logs_payload(state.log_payload));
-        } else {
-            kubeport_fetch_resource_logs(frm);
-        }
+        kubeport_fetch_resource_logs(frm);
     });
     $body.find('.kubeport-log-container').on('keydown', (event) => {
         if (event.key === 'Enter') kubeport_fetch_resource_logs(frm);
@@ -718,13 +713,16 @@ function kubeport_fetch_resource_events(frm) {
             limit: 20
         }
     }).then((r) => {
-        if (r.exc) return;
+        if (r.exc) {
+            $target.html(kubeport_render_panel_error(__('Could not fetch events.')));
+            return;
+        }
         const payload = kubeport_normalize_observability_rows(r.message);
         state.rows = payload.rows;
         state.error = payload.error;
         kubeport_render_events_result(frm);
     }, () => {
-        $target.html(`<div class="text-muted small">${__('Could not fetch events.')}</div>`);
+        $target.html(kubeport_render_panel_error(__('Could not fetch events.')));
     });
 }
 
@@ -805,11 +803,14 @@ function kubeport_fetch_resource_rollout(frm) {
             limit: 10
         }
     }).then((r) => {
-        if (r.exc) return;
+        if (r.exc) {
+            $target.html(kubeport_render_panel_error(__('Could not fetch rollout context.')));
+            return;
+        }
         const payload = kubeport_normalize_observability_rows(r.message);
         $target.html(kubeport_render_rollout(payload.rows, payload.error));
     }, () => {
-        $target.html(`<div class="text-muted small">${__('Could not fetch rollout context.')}</div>`);
+        $target.html(kubeport_render_panel_error(__('Could not fetch rollout context.')));
     });
 }
 

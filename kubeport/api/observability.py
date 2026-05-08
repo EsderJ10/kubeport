@@ -36,7 +36,7 @@ def get_release_resource_logs(
 	previous: bool = False,
 	namespace: str | None = None,
 ) -> dict[str, Any]:
-	"""Return capped logs for pods backing one Helm Release resource."""
+	"""Return capped logs for one selected pod backing a Helm Release resource."""
 	release = _get_release_scope(release_docname)
 	cluster = str(release["cluster"])
 	resource_namespace = str(namespace or release.get("namespace") or "default")
@@ -67,22 +67,19 @@ def get_release_resource_logs(
 
 	logs_by_pod: dict[str, str] = {}
 	errors_by_pod: dict[str, str] = {}
-	for pod in pods:
-		pod_name_value = str(pod.get("name") or "")
-		if not pod_name_value:
-			continue
+	if selected_pod:
 		try:
-			logs_by_pod[pod_name_value] = get_pod_logs(
+			logs_by_pod[selected_pod] = get_pod_logs(
 				cluster=cluster,
 				namespace=resource_namespace,
-				pod=pod_name_value,
+				pod=selected_pod,
 				container=container,
 				tail_lines=tail_lines,
 				previous=previous,
 			)
 		except Exception as e:
-			logs_by_pod[pod_name_value] = ""
-			errors_by_pod[pod_name_value] = str(e)
+			logs_by_pod[selected_pod] = ""
+			errors_by_pod[selected_pod] = str(e)
 
 	return {
 		"kind": kind,

@@ -2,7 +2,7 @@
 # See license.txt
 
 import inspect
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from frappe.tests import UnitTestCase
 
@@ -229,27 +229,21 @@ class UnitTestObservabilityAPI(UnitTestCase):
 				name="bench-web",
 			)
 
-	@patch("kubeport.api.observability.get_pod_logs")
+	@patch("kubeport.api.observability.get_pod_logs", return_value="bench-web-2 logs")
 	@patch("kubeport.api.observability.list_pods_for_resource")
 	@patch("kubeport.api.observability.helm.get_manifest")
 	@patch("kubeport.api.observability.frappe.get_doc")
-	def test_logs_endpoint_reads_all_resolved_pods(
+	def test_logs_endpoint_reads_selected_pod_only(
 		self,
 		mock_get_doc,
 		mock_get_manifest,
 		mock_list_pods,
 		mock_get_logs,
 	):
-		def log_side_effect(**kwargs):
-			if kwargs["pod"] == "bench-web-2":
-				raise RuntimeError("pod failed")
-			return f"{kwargs['pod']} logs"
-
 		mock_get_doc.return_value = _release_doc()
 		mock_get_manifest.return_value = [
 			{"kind": "Deployment", "metadata": {"name": "bench-web"}},
 		]
-		mock_get_logs.side_effect = log_side_effect
 		mock_list_pods.return_value = [
 			{"name": "bench-web-1", "container_names": ["web"]},
 			{"name": "bench-web-2", "container_names": ["web"]},
@@ -263,27 +257,93 @@ class UnitTestObservabilityAPI(UnitTestCase):
 		)
 
 		self.assertEqual(result["selected_pod"], "bench-web-2")
-		self.assertEqual(result["logs_by_pod"]["bench-web-1"], "bench-web-1 logs")
-		self.assertEqual(result["logs_by_pod"]["bench-web-2"], "")
-		self.assertEqual(result["errors_by_pod"]["bench-web-2"], "pod failed")
-		self.assertEqual(mock_get_logs.call_args_list, [
-			call(
-				cluster="server-cluster",
-				namespace="erp",
-				pod="bench-web-1",
-				container=None,
-				tail_lines=200,
-				previous=False,
-			),
-			call(
-				cluster="server-cluster",
-				namespace="erp",
-				pod="bench-web-2",
-				container=None,
-				tail_lines=200,
-				previous=False,
-			),
-		])
+		self.assertEqual(result["logs_by_pod"], {"bench-web-2": "bench-web-2 logs"})
+		self.assertEqual(result["errors_by_pod"], {})
+		mock_get_logs.assert_called_once_with(
+			cluster="server-cluster",
+			namespace="erp",
+			pod="bench-web-2",
+			container=None,
+			tail_lines=200,
+			previous=False,
+		)
+
+	@patch("kubeport.api.observability.get_pod_logs", return_value="bench-web-1 logs")
+	@patch("kubeport.api.observability.list_pods_for_resource")
+	@patch("kubeport.api.observability.helm.get_manifest")
+	@patch("kubeport.api.observability.frappe.get_doc")
+	def test_logs_endpoint_defaults_to_first_resolved_pod(
+		self,
+		mock_get_doc,
+		mock_get_manifest,
+		mock_list_pods,
+		mock_get_logs,
+	):
+		mock_get_doc.return_value = _release_doc()
+		mock_get_manifest.return_value = [
+			{"kind": "Deployment", "metadata": {"name": "bench-web"}},
+		]
+		mock_list_pods.return_value = [
+			{"name": "bench-web-1", "container_names": ["web"]},
+			{"name": "bench-web-2", "container_names": ["web"]},
+		]
+
+		result = observability.get_release_resource_logs(
+			release_docname="cluster-a/erp/bench",
+			kind="Deployment",
+			name="bench-web",
+		)
+
+		self.assertEqual(result["selected_pod"], "bench-web-1")
+		self.assertEqual(result["logs_by_pod"], {"bench-web-1": "bench-web-1 logs"})
+		self.assertEqual(result["errors_by_pod"], {})
+		mock_get_logs.assert_called_once_with(
+			cluster="server-cluster",
+			namespace="erp",
+			pod="bench-web-1",
+			container=None,
+			tail_lines=200,
+			previous=False,
+		)
+
+	@patch("kubeport.api.observability.get_pod_logs", side_effect=RuntimeError("pod failed"))
+	@patch("kubeport.api.observability.list_pods_for_resource")
+	@patch("kubeport.api.observability.helm.get_manifest")
+	@patch("kubeport.api.observability.frappe.get_doc")
+	def test_logs_endpoint_returns_selected_pod_failure_payload(
+		self,
+		mock_get_doc,
+		mock_get_manifest,
+		mock_list_pods,
+		mock_get_logs,
+	):
+		mock_get_doc.return_value = _release_doc()
+		mock_get_manifest.return_value = [
+			{"kind": "Deployment", "metadata": {"name": "bench-web"}},
+		]
+		mock_list_pods.return_value = [
+			{"name": "bench-web-1", "container_names": ["web"]},
+			{"name": "bench-web-2", "container_names": ["web"]},
+		]
+
+		result = observability.get_release_resource_logs(
+			release_docname="cluster-a/erp/bench",
+			kind="Deployment",
+			name="bench-web",
+			pod_name="bench-web-2",
+		)
+
+		self.assertEqual(result["selected_pod"], "bench-web-2")
+		self.assertEqual(result["logs_by_pod"], {"bench-web-2": ""})
+		self.assertEqual(result["errors_by_pod"], {"bench-web-2": "pod failed"})
+		mock_get_logs.assert_called_once_with(
+			cluster="server-cluster",
+			namespace="erp",
+			pod="bench-web-2",
+			container=None,
+			tail_lines=200,
+			previous=False,
+		)
 
 	@patch("kubeport.api.observability.list_resource_events", side_effect=RuntimeError("events failed"))
 	@patch("kubeport.api.observability.helm.get_manifest")
