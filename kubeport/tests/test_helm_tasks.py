@@ -242,7 +242,7 @@ class UnitTestHelmTasks(UnitTestCase):
 				"chart_version": "8.0.41",
 				"namespace": "tfg",
 				"cluster": "cluster-a",
-				"values": "workers:\n  replicaCount: 2\n",
+				"values": "workers:\n  replicaCount: 2\npersistence:\n  worker:\n    storageClass: fast-ssd\n",
 				"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			},
 			{
@@ -280,7 +280,7 @@ class UnitTestHelmTasks(UnitTestCase):
 			chart_version="8.0.41",
 			namespace="tfg",
 			release_name="bench-a",
-			values_yaml="workers:\n  replicaCount: 2\n",
+			values_yaml="workers:\n  replicaCount: 2\npersistence:\n  worker:\n    storageClass: fast-ssd\n",
 			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			site_image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		)

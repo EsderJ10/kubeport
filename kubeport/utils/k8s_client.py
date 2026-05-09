@@ -108,7 +108,7 @@ def _client_from_bearer_token(cluster_doc) -> client.ApiClient:
 			"'Skip TLS Verification (Development Only)' is enabled."
 		)
 
-	return client.ApiClient(configuration=configuration)
+	return client.ApiClient(configuration)
 
 
 # Well-known paths for in-cluster service account credentials.

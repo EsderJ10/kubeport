@@ -1025,6 +1025,10 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
 			patch("kubernetes.client.CoreV1Api"),
 			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True),
+			patch(
+				"kubeport.tasks.reconciliation._probe_backup_archive_on_pvc",
+				return_value=(SITE_PROBE_EXISTS, 42),
+			),
 		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_site_backups()

@@ -1279,6 +1279,7 @@ class UnitTestOnTrashCleanup(UnitTestCase):
 
 		# Build a stub doc that mimics the surface on_trash uses.
 		doc = MagicMock(spec=FrappeSite)
+		doc.name = overrides.get("name", "rel-a/demo")
 		doc.status = overrides.get("status", "Failed")
 		doc.operation_job_name = overrides.get("operation_job_name", "ks-demo-abc123abc123")
 		doc.cluster = overrides.get("cluster", "cluster-a")
