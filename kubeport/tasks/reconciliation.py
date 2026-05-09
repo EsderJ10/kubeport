@@ -17,12 +17,12 @@ from typing import Any
 
 import frappe
 
+from kubeport.utils.constants import STALE_OPERATION_THRESHOLD_MINUTES
 from kubeport.utils.k8s_resources import check_resources_exist
 
 _HEALTHY_RELEASE_STATUSES = ["Deployed", "Degraded"]
 _IN_FLIGHT_RELEASE_STATUSES = ["In Progress", "Uninstalling"]
 _HELM_STATUS_DETAIL_LIMIT = 500
-_HELM_OPERATION_STALE_MINUTES = 30
 
 # Three-state result from the bench ground-truth probe.  "unknown" means the
 # probe could not reach the bench pod or exec failed transiently — the caller
@@ -269,7 +269,7 @@ def _reconcile_stale_uninstall(release) -> None:
 				"status": "Failed",
 				"helm_status_detail": _truncate_status_detail(
 					"Stale uninstall: Helm still reports release status "
-					f"'{runtime_status}' after {_HELM_OPERATION_STALE_MINUTES} minutes."
+					f"'{runtime_status}' after {STALE_OPERATION_THRESHOLD_MINUTES} minutes."
 				),
 				"operation_type": "",
 				"operation_started_at": None,
@@ -1831,7 +1831,7 @@ def _helm_operation_is_stale(release) -> bool:
 		started = frappe.utils.get_datetime(started_at)
 		cutoff = frappe.utils.add_to_date(
 			frappe.utils.now_datetime(),
-			minutes=-_HELM_OPERATION_STALE_MINUTES,
+			minutes=-STALE_OPERATION_THRESHOLD_MINUTES,
 		)
 		return started <= cutoff
 	except Exception:
