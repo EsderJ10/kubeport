@@ -412,7 +412,7 @@ def render_site_image_values(
 	image_values = dict(rendered.get("image") or {})
 	image_values.update({
 		"repository": site_image_doc["image_repository"],
-		"tag": site_image_doc["image_tag"],
+		"tag": _image_tag_with_digest(site_image_doc["image_tag"], site_image_doc.get("image_digest")),
 		"pullPolicy": "IfNotPresent",
 	})
 	rendered["image"] = image_values
@@ -462,6 +462,16 @@ def _get_site_image_digest_for_hash(site_image: str | None) -> str:
 	return str(frappe.db.get_value("Kubeport Site Image", site_image, "image_digest") or "")
 
 
+def _image_tag_with_digest(image_tag: str | None, image_digest: str | None) -> str:
+	tag = str(image_tag or "").strip()
+	digest = str(image_digest or "").strip().lower()
+	if not digest:
+		return tag
+	if "@" in tag:
+		return tag
+	return f"{tag}@{digest}"
+
+
 def _get_site_image_for_release(site_image: str | None) -> dict[str, str] | None:
 	if not site_image:
 		return None
@@ -498,7 +508,6 @@ def _validate_site_image_value_conflicts(
 
 	expected = {
 		"repository": site_image_doc.get("image_repository") or "",
-		"tag": site_image_doc.get("image_tag") or "",
 		"pullPolicy": "IfNotPresent",
 	}
 	for fieldname, selected_value in expected.items():
@@ -508,6 +517,15 @@ def _validate_site_image_value_conflicts(
 		frappe.throw(
 			"Invalid Helm values: selected Kubeport Site Image controls "
 			f"image.{fieldname}; remove the manual value '{manual_value}' or clear Site Image."
+		)
+
+	base_tag = str(site_image_doc.get("image_tag") or "")
+	pinned_tag = _image_tag_with_digest(base_tag, site_image_doc.get("image_digest"))
+	manual_tag = manual_image.get("tag")
+	if manual_tag not in (None, "") and str(manual_tag) not in (base_tag, pinned_tag):
+		frappe.throw(
+			"Invalid Helm values: selected Kubeport Site Image controls "
+			f"image.tag; remove the manual value '{manual_tag}' or clear Site Image."
 		)
 
 

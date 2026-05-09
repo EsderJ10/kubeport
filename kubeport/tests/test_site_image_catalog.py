@@ -18,6 +18,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 				"image_title": "Kubeport ERPNext",
 				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
+				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				"frappe_major": 16,
 				"is_default": True,
 				"apps": [{
@@ -46,10 +47,12 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 				{
 					"image_repository": "ghcr.io/esderj10/kubeport-site",
 					"image_tag": "v1.0.0-frappe16",
+					"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				},
 				{
 					"image_repository": "ghcr.io/esderj10/kubeport-site",
 					"image_tag": "v1.0.0-frappe16",
+					"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				},
 			],
 		})
@@ -79,6 +82,23 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		finally:
 			path.unlink()
 
+	@patch("kubeport.site_images.catalog.frappe.throw")
+	def test_load_catalog_rejects_active_curated_image_without_digest(self, mock_throw):
+		path = _write_catalog({
+			"images": [{
+				"image_repository": "ghcr.io/esderj10/kubeport-site",
+				"image_tag": "v1.0.0-frappe16",
+				"status": "Active",
+			}],
+		})
+		mock_throw.side_effect = RuntimeError("must record the pushed GHCR image digest")
+
+		try:
+			with self.assertRaisesRegex(RuntimeError, "digest"):
+				load_catalog(path)
+		finally:
+			path.unlink()
+
 	@patch("kubeport.site_images.catalog.frappe.db.get_value")
 	@patch("kubeport.site_images.catalog.frappe.get_doc")
 	@patch("kubeport.site_images.catalog.frappe.db.exists")
@@ -88,10 +108,10 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 				"image_title": "Kubeport ERPNext",
 				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
-				"image_digest": "sha256:aaa",
+				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				"frappe_major": 16,
 				"erpnext_version": "16.17.0",
-				"apps_json_hash": "sha256:bbb",
+				"apps_json_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 				"source_revision": "abc123",
 				"status": "Active",
 				"is_default": True,
@@ -111,7 +131,10 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 			path.unlink()
 
 		self.assertEqual(docnames, ["ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16"])
-		self.assertEqual(doc.image_digest, "sha256:aaa")
+		self.assertEqual(
+			doc.image_digest,
+			"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		)
 		self.assertEqual(doc.erpnext_version, "16.17.0")
 		self.assertEqual(doc.is_curated, 1)
 		doc.set.assert_called_once_with("apps", [{"app_name": "erpnext", "source_url": "", "ref": ""}])
@@ -129,6 +152,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 				"image_title": "Kubeport ERPNext",
 				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
+				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				"frappe_major": 16,
 				"status": "Active",
 				"is_default": True,
@@ -155,6 +179,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 				"image_title": "Kubeport ERPNext",
 				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
+				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				"frappe_major": 16,
 				"status": "Active",
 				"is_default": True,

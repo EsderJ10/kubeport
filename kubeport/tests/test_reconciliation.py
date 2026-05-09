@@ -431,7 +431,7 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_helm_status.return_value = {"info": {"status": "deployed"}}
 		mock_walk.return_value = []
 		mock_get_value.side_effect = [
-			"sha256:aaa",
+			"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			{
 				"operation_token": "tok-1",
 				"status": "In Progress",
@@ -449,7 +449,7 @@ class UnitTestReconciliation(UnitTestCase):
 			release_name="bench-a",
 			values_yaml="workers:\n  replicaCount: 2\n",
 			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-			site_image_digest="sha256:aaa",
+			site_image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		)
 		self.assertEqual(fields["desired_spec_hash"], expected_hash)
 		self.assertEqual(fields["last_applied_spec_hash"], expected_hash)

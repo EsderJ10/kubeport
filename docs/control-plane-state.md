@@ -31,21 +31,23 @@ The current milestone is **robustness** — making discovery, background executi
 ### Site Image Catalog
 
 - Kubeport ships a DB-backed `Kubeport Site Image` catalog seeded from `kubeport/site_images/catalog.json`.
-- Catalog rows are desired/product metadata, not observed cluster state: repository, immutable tag, digest, Frappe major, ERPNext version, apps hash, source revision, default/deprecated status, and display-only included apps.
+- Catalog rows are desired/product metadata, not observed cluster state: repository, release tag, digest, Frappe major, ERPNext version, apps hash, source revision, default/deprecated status, and display-only included apps.
 - Each row carries an `is_curated` flag. Curated rows (`1`) are owned by the daily catalog sync; user-registered rows (`0`) persist independently. Sync only writes curated rows and skips entries that collide with a user-registered repository:tag (logging a warning), so user-registered images are never overwritten.
 - Defaults (`is_default=1`) are reserved for curated rows; user rows can be selected on Helm Release but cannot be marked default.
+- Curated active rows must record the pushed GHCR digest. The shipped `0.0.1-frappe16` row is deprecated until a real public GHCR image exists and its digest is recorded.
 - The Frappe-native `owner` field records who created each row; no parallel "origin/user" field is maintained.
 - Deletion is blocked when a Kubeport Site Image is linked to a Helm Release, and curated rows cannot be deleted at all (mark them `Deprecated` instead).
 - Catalog sync runs through a long-queue task on install/migrate and the daily scheduler.
-- Public GHCR images are the v1 default; no imagePullSecret management is exposed in the UI. Frappe v16 is the v1 supported major. Helm value injection assumes ERPNext-style charts (`image.repository`, `image.tag`, `image.pullPolicy`).
+- Public GHCR images are the v1 registry scope; no imagePullSecret management is exposed in the UI. Frappe v16 is the v1 supported major. Helm value injection assumes ERPNext-style charts (`image.repository`, `image.tag`, `image.pullPolicy`).
+- Kubeport does not run Docker builds or store GHCR PATs. The site image is built and pushed by GitHub Actions using `GITHUB_TOKEN`, SBOM/provenance settings, and registry attestations.
 
 ### Helm Release Management
 
 - Desired release state scoped to `cluster/namespace/release_name`.
-- Optional `site_image` links an ERPNext/Frappe bench release to a Kubeport-owned runtime image. Deploy workers render the selected catalog row into Helm values as `image.repository`, `image.tag`, and `image.pullPolicy=IfNotPresent`.
+- Optional `site_image` links an ERPNext/Frappe bench release to a runtime image. Deploy workers render the selected catalog row into Helm values as `image.repository`, `image.tag`, and `image.pullPolicy=IfNotPresent`; when `image_digest` is recorded, `image.tag` is rendered as `tag@sha256:...` so Kubernetes pulls the exact pushed image digest through the chart's existing `repository:tag` template.
 - Manual YAML remains available, but conflicting `values.image.repository`, `values.image.tag`, or `values.image.pullPolicy` entries are rejected while `site_image` is set.
 - When `site_image` is set and the user's values do not specify `persistence.worker.storageClass`, the deploy worker discovers the cluster's default StorageClass (the one annotated `storageclass.kubernetes.io/is-default-class: "true"`) and injects it. User-supplied storage classes always win. When the discovered class is `local-path` (or another known RWO-only provisioner) and the user has not set `accessModes`, `accessModes: ["ReadWriteOnce"]` is also injected so the chart's RWX default can still schedule on k3s/local-path setups. Discovery is read-only — the result is not persisted to MariaDB. If no default-class annotation exists and the user has not set the key, the deploy fails fast with an actionable message instead of bubbling up the ERPNext chart's `required` template error.
-- Pending-change hashes include the selected Site Image and digest, even though the current ERPNext Helm chart still deploys by immutable tag (`repository:tag`) rather than digest pinning.
+- Pending-change hashes include the selected Site Image and digest, so digest changes are treated as deployable desired-state changes.
 - Idempotent deploy via `helm upgrade --install` in background jobs.
 - Uninstall via `helm uninstall` in background jobs.
 - Release rows track desired spec hash vs. last-applied spec hash so operators can see saved pending changes before the next install/upgrade.

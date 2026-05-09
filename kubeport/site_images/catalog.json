@@ -7,11 +7,11 @@
       "image_digest": "",
       "frappe_major": 16,
       "erpnext_version": "16",
-      "apps_json_hash": "",
+      "apps_json_hash": "sha256:5820a3b5084fe5ef2e3baa761b7a5553fae7540d15c81c0f2fedc3b5547194fc",
       "source_revision": "",
-      "status": "Active",
-      "is_default": true,
-      "description": "Default public Kubeport-owned Frappe/ERPNext runtime image for v16 benches.",
+      "status": "Deprecated",
+      "is_default": false,
+      "description": "Placeholder for the first public Kubeport-owned Frappe/ERPNext runtime image. Publish a GHCR image and record its digest before marking it Active.",
       "apps": [
         {
           "app_name": "frappe",

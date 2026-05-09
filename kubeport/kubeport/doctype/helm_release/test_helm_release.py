@@ -48,7 +48,7 @@ class UnitTestHelmRelease(UnitTestCase):
 			release_name="bench-a",
 			values_yaml="workers:\n  replicaCount: 2\n",
 			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-			site_image_digest="sha256:aaa",
+			site_image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		)
 		hash_b = calculate_release_spec_hash(
 			chart="repo/erpnext",
@@ -57,7 +57,7 @@ class UnitTestHelmRelease(UnitTestCase):
 			release_name="bench-a",
 			values_yaml="workers:\n  replicaCount: 2\n",
 			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-			site_image_digest="sha256:bbb",
+			site_image_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		)
 
 		self.assertNotEqual(hash_a, hash_b)
@@ -67,7 +67,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value.return_value = {
 			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
-			"image_digest": "sha256:aaa",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"status": "Active",
 		}
 
@@ -77,9 +77,29 @@ class UnitTestHelmRelease(UnitTestCase):
 		)
 
 		self.assertIn("repository: ghcr.io/esderj10/kubeport-site", values_yaml)
-		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
+		self.assertIn(
+			"tag: v1.0.0-frappe16@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			values_yaml,
+		)
 		self.assertIn("pullPolicy: IfNotPresent", values_yaml)
 		self.assertIn("replicaCount: 2", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_keeps_plain_tag_when_digest_missing(self, mock_get_value):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			"",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+		)
+
+		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
+		self.assertNotIn("@sha256:", values_yaml)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
@@ -91,7 +111,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value.return_value = {
 			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
-			"image_digest": "sha256:aaa",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"status": "Active",
 		}
 		mock_throw.side_effect = RuntimeError("selected Kubeport Site Image controls image.tag")
@@ -110,7 +130,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value.return_value = {
 			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
-			"image_digest": "sha256:aaa",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"status": "Active",
 		}
 
@@ -135,7 +155,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value.return_value = {
 			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
-			"image_digest": "sha256:aaa",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"status": "Active",
 		}
 
@@ -158,7 +178,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value.return_value = {
 			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
-			"image_digest": "sha256:aaa",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"status": "Active",
 		}
 
@@ -180,7 +200,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value.return_value = {
 			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
-			"image_digest": "sha256:aaa",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"status": "Active",
 		}
 
@@ -201,7 +221,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value.return_value = {
 			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
-			"image_digest": "sha256:aaa",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"status": "Active",
 		}
 
@@ -222,7 +242,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value.return_value = {
 			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
-			"image_digest": "sha256:aaa",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"status": "Active",
 		}
 

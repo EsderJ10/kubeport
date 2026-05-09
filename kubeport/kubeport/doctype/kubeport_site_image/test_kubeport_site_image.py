@@ -39,12 +39,36 @@ class UnitTestKubeportSiteImage(UnitTestCase):
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.db.get_value")
 	def test_validate_allows_is_default_on_curated_row(self, mock_get_value):
 		mock_get_value.return_value = None
-		doc = _make_doc(is_default=1, is_curated=1)
+		doc = _make_doc(
+			image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			is_default=1,
+			is_curated=1,
+		)
 
 		doc.validate()
 
 		self.assertEqual(doc.is_curated, 1)
 		self.assertEqual(doc.is_default, 1)
+
+	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.db.get_value")
+	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.throw")
+	def test_validate_rejects_active_curated_row_without_digest(self, mock_throw, mock_get_value):
+		mock_get_value.return_value = None
+		mock_throw.side_effect = RuntimeError("must record the pushed GHCR image digest")
+		doc = _make_doc(is_curated=1, image_digest="")
+
+		with self.assertRaisesRegex(RuntimeError, "digest"):
+			doc.validate()
+
+	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.db.get_value")
+	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.throw")
+	def test_validate_rejects_non_ghcr_repository(self, mock_throw, mock_get_value):
+		mock_get_value.return_value = None
+		mock_throw.side_effect = RuntimeError("must use a public GHCR repository")
+		doc = _make_doc(image_repository="docker.io/example/site")
+
+		with self.assertRaisesRegex(RuntimeError, "GHCR"):
+			doc.validate()
 
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.db.get_value")
 	def test_validate_accepts_unspecified_is_curated_as_user_row(self, mock_get_value):

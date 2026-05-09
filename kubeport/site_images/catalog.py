@@ -11,7 +11,10 @@ from typing import Any
 
 import frappe
 
-from kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image import build_site_image_docname
+from kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image import (
+	build_site_image_docname,
+	validate_site_image_reference,
+)
 
 CATALOG_PATH = Path(__file__).with_name("catalog.json")
 _CATALOG_FIELDS = (
@@ -66,6 +69,17 @@ def load_catalog(path: Path | None = None) -> list[dict[str, Any]]:
 			if status == "Deprecated":
 				frappe.throw(f"Deprecated site image '{repository}:{tag}' cannot be the default.")
 
+		digest = str(image.get("image_digest") or "").strip().lower()
+		validate_site_image_reference(
+			image_repository=repository,
+			image_tag=tag,
+			image_digest=digest,
+			status=status,
+			is_curated=True,
+			is_default=is_default,
+			label=f"{repository}:{tag}",
+		)
+
 		apps = image.get("apps") or []
 		if not isinstance(apps, list):
 			frappe.throw(f"Site image '{repository}:{tag}' apps must be a list.")
@@ -74,7 +88,7 @@ def load_catalog(path: Path | None = None) -> list[dict[str, Any]]:
 			"image_title": str(image.get("image_title") or f"{repository}:{tag}").strip(),
 			"image_repository": repository,
 			"image_tag": tag,
-			"image_digest": str(image.get("image_digest") or "").strip(),
+			"image_digest": digest,
 			"frappe_major": int(image.get("frappe_major") or 16),
 			"erpnext_version": str(image.get("erpnext_version") or "").strip(),
 			"apps_json_hash": str(image.get("apps_json_hash") or "").strip(),

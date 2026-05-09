@@ -55,7 +55,7 @@
    "fieldname": "image_digest",
    "fieldtype": "Data",
    "label": "Digest",
-   "read_only": 1
+   "read_only_depends_on": "eval:doc.is_curated"
   },
   {
    "fieldname": "column_break_image",

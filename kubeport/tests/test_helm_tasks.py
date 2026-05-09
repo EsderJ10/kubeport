@@ -248,11 +248,11 @@ class UnitTestHelmTasks(UnitTestCase):
 			{
 				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
-				"image_digest": "sha256:aaa",
+				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 				"status": "Active",
 			},
 			{"operation_token": "tok-1", "status": "In Progress"},
-			"sha256:aaa",
+			"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		]
 		mock_get_doc.return_value = SimpleNamespace(
 			latest_version="8.0.41",
@@ -267,7 +267,10 @@ class UnitTestHelmTasks(UnitTestCase):
 
 		values_yaml = mock_install_or_upgrade.call_args.kwargs["values_yaml"]
 		self.assertIn("repository: ghcr.io/esderj10/kubeport-site", values_yaml)
-		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
+		self.assertIn(
+			"tag: v1.0.0-frappe16@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			values_yaml,
+		)
 		self.assertIn("pullPolicy: IfNotPresent", values_yaml)
 		self.assertIn("replicaCount: 2", values_yaml)
 		mock_set_helm_release_fields.assert_called_once()
@@ -279,7 +282,7 @@ class UnitTestHelmTasks(UnitTestCase):
 			release_name="bench-a",
 			values_yaml="workers:\n  replicaCount: 2\n",
 			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-			site_image_digest="sha256:aaa",
+			site_image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		)
 		self.assertEqual(fields["desired_spec_hash"], expected_hash)
 		self.assertEqual(fields["last_applied_spec_hash"], expected_hash)

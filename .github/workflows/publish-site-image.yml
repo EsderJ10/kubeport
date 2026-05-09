@@ -5,6 +5,9 @@ on:
     paths:
       - ".github/workflows/publish-site-image.yml"
       - "images/site/**"
+      - "kubeport/**"
+      - "pyproject.toml"
+      - "license.txt"
   push:
     branches:
       - dev/jose
@@ -14,6 +17,9 @@ on:
     paths:
       - ".github/workflows/publish-site-image.yml"
       - "images/site/**"
+      - "kubeport/**"
+      - "pyproject.toml"
+      - "license.txt"
   workflow_dispatch:
 
 env:
@@ -22,10 +28,11 @@ env:
   FRAPPE_DOCKER_REF: d24093469de24cb889d6db31c481ef49c02e4a26
 
 permissions:
-  contents: read
-  packages: write
   attestations: write
+  artifact-metadata: write
+  contents: read
   id-token: write
+  packages: write
 
 jobs:
   build:
@@ -76,6 +83,8 @@ jobs:
             org.opencontainers.image.title=Kubeport Site
             org.opencontainers.image.description=Kubeport-owned Frappe/ERPNext runtime image
             org.opencontainers.image.vendor=Los Favs
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Build and publish
         id: build
@@ -94,9 +103,18 @@ jobs:
           sbom: true
           provenance: mode=max
 
+      - name: Verify pushed digest
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref_protected) && steps.build.outputs.digest != ''
+        run: |
+          docker buildx imagetools inspect "${IMAGE_NAME}@${{ steps.build.outputs.digest }}"
+          docker run --rm "${IMAGE_NAME}@${{ steps.build.outputs.digest }}" bash -lc \
+            'test -d /home/frappe/frappe-bench/apps/frappe &&
+             test -d /home/frappe/frappe-bench/apps/erpnext &&
+             test -d /home/frappe/frappe-bench/apps/kubeport'
+
       - name: Attest image
-        if: github.event_name != 'pull_request' && steps.build.outputs.digest != ''
-        uses: actions/attest-build-provenance@v2
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref_protected) && steps.build.outputs.digest != ''
+        uses: actions/attest@v4
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
