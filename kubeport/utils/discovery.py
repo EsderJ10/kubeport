@@ -12,6 +12,7 @@ from typing import Any
 
 from kubernetes import client
 from kubernetes.client import ApiClient
+from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
 
 
@@ -81,6 +82,42 @@ def discover_release_sites(
 		"source": "pod_exec",
 		"pod_name": pod.metadata.name if pod.metadata else "",
 	} for site_name in sites]
+
+
+_DEFAULT_STORAGE_CLASS_ANNOTATIONS = (
+	"storageclass.kubernetes.io/is-default-class",
+	"storageclass.beta.kubernetes.io/is-default-class",
+)
+
+
+def discover_default_storage_class(cluster_name: str) -> str | None:
+	"""Return the name of the cluster's default StorageClass, if any.
+
+	A StorageClass is considered default when it carries the
+	``storageclass.kubernetes.io/is-default-class: "true"`` annotation
+	(the legacy ``storageclass.beta.kubernetes.io/...`` form is also
+	accepted for older clusters).  Returns ``None`` when no default is
+	annotated; callers decide how to surface that to the user.
+	"""
+	from kubeport.utils.k8s_client import get_k8s_api_client
+
+	api_client = get_k8s_api_client(cluster_name)
+	storage_v1 = client.StorageV1Api(api_client=api_client)
+
+	try:
+		storage_classes = storage_v1.list_storage_class(_request_timeout=10).items
+	except ApiException as exc:
+		raise RuntimeError(
+			f"Could not list StorageClasses on cluster '{cluster_name}': {exc.reason or exc}"
+		) from exc
+
+	for sc in storage_classes:
+		annotations = (sc.metadata.annotations if sc.metadata else None) or {}
+		for key in _DEFAULT_STORAGE_CLASS_ANNOTATIONS:
+			if str(annotations.get(key, "")).lower() == "true":
+				return sc.metadata.name
+
+	return None
 
 
 def _normalize_release_row(release: dict[str, Any]) -> dict[str, Any]:

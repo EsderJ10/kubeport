@@ -195,7 +195,12 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 	try:
 		chart_ref = chart_doc.get_chart_reference()
 		version = release["chart_version"] or chart_doc.latest_version
-		values_yaml = render_site_image_values(release.get("values"), release.get("site_image"))
+		default_storage_class = _resolve_default_storage_class(release)
+		values_yaml = render_site_image_values(
+			release.get("values"),
+			release.get("site_image"),
+			default_storage_class=default_storage_class,
+		)
 
 		result = helm.install_or_upgrade(
 			release_name=release["release_name"],
@@ -469,6 +474,50 @@ def uninstall_release(release_name: str, operation_token: str):
 def _set_helm_release_fields(release_name: str, values: dict[str, object]) -> None:
 	for fieldname, value in values.items():
 		frappe.db.set_value("Helm Release", release_name, fieldname, value)
+
+
+def _resolve_default_storage_class(release: dict) -> str | None:
+	"""Discover the cluster's default StorageClass for a Site-Image deploy.
+
+	Returns ``None`` for releases without a Site Image (non-bench charts
+	keep the existing behavior).  When a Site Image is selected, the
+	ERPNext chart enforces ``persistence.worker.storageClass``; if the
+	cluster has no default-class annotation and the user has not
+	supplied the key in their values, the deploy is aborted here with
+	an actionable message instead of failing later inside helm.
+	"""
+	if not release.get("site_image"):
+		return None
+
+	from kubeport.utils.discovery import discover_default_storage_class
+
+	cluster_name = release.get("cluster") or ""
+	default = discover_default_storage_class(cluster_name)
+	if default:
+		return default
+
+	if _user_values_have_worker_storage_class(release.get("values")):
+		return None
+
+	raise RuntimeError(
+		f"Cluster '{cluster_name}' has no default StorageClass annotated. "
+		"Either annotate one with "
+		"'storageclass.kubernetes.io/is-default-class: \"true\"', or set "
+		"'persistence.worker.storageClass' in the Helm Release values."
+	)
+
+
+def _user_values_have_worker_storage_class(values_yaml: str | None) -> bool:
+	if not values_yaml:
+		return False
+	try:
+		parsed = yaml.safe_load(values_yaml)
+	except yaml.YAMLError:
+		return False
+	if not isinstance(parsed, dict):
+		return False
+	worker = (parsed.get("persistence") or {}).get("worker") or {}
+	return bool(worker.get("storageClass"))
 
 
 def _safe_walk(release_name: str) -> tuple[list[ResourceHealth], str | None]:

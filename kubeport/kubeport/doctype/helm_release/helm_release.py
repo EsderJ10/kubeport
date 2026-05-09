@@ -25,6 +25,12 @@ _DELETE_ALLOWED_STATUS = "Draft"
 _BLOCKING_SITE_STATUSES = {"Active", "In Progress", "Deleting", "Migrating"}
 _FORCE_UNINSTALL_PREFIX = "UNINSTALL "
 
+# StorageClasses whose provisioners only support ``ReadWriteOnce``.  Used
+# to align injected ``persistence.worker.accessModes`` with what the
+# discovered class can actually schedule — kept in sync with
+# ``_validate_storage_access_modes``.
+_RWO_ONLY_STORAGE_CLASSES = frozenset({"local-path"})
+
 
 class HelmRelease(Document):
 	# begin: auto-generated types
@@ -381,8 +387,18 @@ def calculate_release_spec_hash(
 	return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def render_site_image_values(values_yaml: str | None, site_image: str | None) -> str | None:
-	"""Return Helm values YAML with the selected catalog image applied."""
+def render_site_image_values(
+	values_yaml: str | None,
+	site_image: str | None,
+	default_storage_class: str | None = None,
+) -> str | None:
+	"""Return Helm values YAML with the selected catalog image applied.
+
+	When ``default_storage_class`` is provided and the user's values do
+	not already specify ``persistence.worker.storageClass``, that key is
+	filled in.  This unblocks the ERPNext chart's required-field check
+	without overriding any user-supplied storage class.
+	"""
 	site_image_doc = _get_site_image_for_release(site_image)
 	if not site_image_doc:
 		return values_yaml
@@ -400,6 +416,26 @@ def render_site_image_values(values_yaml: str | None, site_image: str | None) ->
 		"pullPolicy": "IfNotPresent",
 	})
 	rendered["image"] = image_values
+
+	if default_storage_class:
+		persistence = dict(rendered.get("persistence") or {})
+		worker = dict(persistence.get("worker") or {})
+		if not worker.get("storageClass"):
+			worker["storageClass"] = default_storage_class
+			# The ERPNext chart defaults ``accessModes: [ReadWriteMany]`` for
+			# the worker PVC.  On local-path-style provisioners that mode
+			# can't schedule, so when we inject a known-RWO-only class we
+			# also downgrade accessModes — but only when the user hasn't
+			# specified them, to preserve operator intent on real RWX
+			# storage backends.
+			if (
+				default_storage_class in _RWO_ONLY_STORAGE_CLASSES
+				and "accessModes" not in worker
+			):
+				worker["accessModes"] = ["ReadWriteOnce"]
+			persistence["worker"] = worker
+			rendered["persistence"] = persistence
+
 	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
 
 
