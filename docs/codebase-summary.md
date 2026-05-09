@@ -138,10 +138,10 @@ Stores metadata for backup archives created from a Frappe Site.
 Stores Frappe/ERPNext runtime images available for Helm Release selection — both Kubeport-owned defaults and user-registered images.
 
 - Catalog rows are product metadata in MariaDB. Curated rows are seeded from `kubeport/site_images/catalog.json`; user-registered rows are created in the UI.
-- Tracks repository, immutable tag, digest, Frappe major, ERPNext version, source revision, apps.json hash, status, default selection, and `origin` (`Kubeport` for curated rows, `User` for user-registered rows).
-- Includes display-only child rows for bundled apps.
-- Sync runs as a long-queue background job on install/migrate and daily scheduler. The sync only writes `origin=Kubeport` rows and skips repository:tag collisions with user rows (logged as a warning) so user data is never overwritten.
-- `is_default` is reserved for `origin=Kubeport` rows. Deletion is blocked when a Helm Release links to the row, and curated rows cannot be deleted (use `Deprecated`).
+- Tracks repository, immutable tag, digest, Frappe major, ERPNext version, source revision, apps.json hash, status, default selection, and an `is_curated` flag (`1` for curated rows owned by the catalog sync, `0` for user-registered rows). Frappe's built-in `owner` field records who created each row.
+- Includes child rows for bundled apps; the grid is editable on user rows and read-only on curated rows.
+- Sync runs as a long-queue background job on install/migrate and daily scheduler. The sync only writes `is_curated=1` rows and skips repository:tag collisions with user rows (logged as a warning) so user data is never overwritten.
+- `is_default` is reserved for curated rows. Deletion is blocked when a Helm Release links to the row, and curated rows cannot be deleted (use `Deprecated`).
 
 ---
 

@@ -100,7 +100,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 			}],
 		})
 		mock_exists.return_value = True
-		mock_get_value.return_value = "Kubeport"
+		mock_get_value.return_value = 1
 		doc = MagicMock()
 		doc.name = "ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16"
 		mock_get_doc.return_value = doc
@@ -113,7 +113,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		self.assertEqual(docnames, ["ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16"])
 		self.assertEqual(doc.image_digest, "sha256:aaa")
 		self.assertEqual(doc.erpnext_version, "16.17.0")
-		self.assertEqual(doc.origin, "Kubeport")
+		self.assertEqual(doc.is_curated, 1)
 		doc.set.assert_called_once_with("apps", [{"app_name": "erpnext", "source_url": "", "ref": ""}])
 		doc.save.assert_called_once_with(ignore_permissions=True)
 
@@ -121,7 +121,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 	@patch("kubeport.site_images.catalog.frappe.db.get_value")
 	@patch("kubeport.site_images.catalog.frappe.get_doc")
 	@patch("kubeport.site_images.catalog.frappe.db.exists")
-	def test_sync_catalog_preserves_user_origin_row_on_collision(
+	def test_sync_catalog_preserves_user_row_on_collision(
 		self, mock_exists, mock_get_doc, mock_get_value, mock_logger
 	):
 		path = _write_catalog({
@@ -136,7 +136,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 			}],
 		})
 		mock_exists.return_value = True
-		mock_get_value.return_value = "User"
+		mock_get_value.return_value = 0
 
 		try:
 			docnames = sync_catalog(path)
@@ -149,7 +149,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 
 	@patch("kubeport.site_images.catalog.frappe.get_doc")
 	@patch("kubeport.site_images.catalog.frappe.db.exists")
-	def test_sync_catalog_inserts_curated_origin_for_new_rows(self, mock_exists, mock_get_doc):
+	def test_sync_catalog_inserts_curated_flag_for_new_rows(self, mock_exists, mock_get_doc):
 		path = _write_catalog({
 			"images": [{
 				"image_title": "Kubeport ERPNext",
@@ -173,7 +173,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 
 		payload = mock_get_doc.call_args[0][0]
 		self.assertEqual(payload["doctype"], "Kubeport Site Image")
-		self.assertEqual(payload["origin"], "Kubeport")
+		self.assertEqual(payload["is_curated"], 1)
 		new_doc.insert.assert_called_once_with(ignore_permissions=True)
 
 

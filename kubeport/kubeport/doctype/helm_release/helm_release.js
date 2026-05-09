@@ -211,16 +211,16 @@ function kubeport_site_image_detail_html(row) {
     }).join(' ');
     const digest = row.image_digest || __('not recorded');
     const status_color = row.status === 'Deprecated' ? 'orange' : 'green';
-    const origin = row.origin === 'Kubeport' ? 'Curated' : 'Custom';
-    const origin_color = row.origin === 'Kubeport' ? 'blue' : 'gray';
+    const curation_label = row.is_curated ? 'Curated' : 'Custom';
+    const curation_color = row.is_curated ? 'blue' : 'gray';
     return `
         <div style="margin-top: 8px; padding: 8px;
                     border: 1px solid var(--border-color); border-radius: 4px;">
             <div style="display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
                 <strong>${frappe.utils.escape_html(row.image_title || row.name)}</strong>
                 <div style="display: flex; gap: 6px;">
-                    <span class="indicator-pill ${origin_color}">
-                        ${__(origin)}
+                    <span class="indicator-pill ${curation_color}">
+                        ${__(curation_label)}
                     </span>
                     <span class="indicator-pill ${status_color}">
                         ${frappe.utils.escape_html(row.status || '')}

@@ -13,7 +13,7 @@
   "image_digest",
   "column_break_image",
   "status",
-  "origin",
+  "is_curated",
   "is_default",
   "frappe_major",
   "erpnext_version",
@@ -71,14 +71,13 @@
    "reqd": 1
   },
   {
-   "default": "User",
-   "fieldname": "origin",
-   "fieldtype": "Select",
+   "default": "0",
+   "fieldname": "is_curated",
+   "fieldtype": "Check",
    "in_list_view": 1,
-   "label": "Origin",
-   "options": "Kubeport\nUser",
-   "read_only": 1,
-   "reqd": 1
+   "label": "Curated",
+   "no_copy": 1,
+   "read_only": 1
   },
   {
    "default": "0",
@@ -131,7 +130,7 @@
    "fieldtype": "Table",
    "label": "Apps",
    "options": "Kubeport Site Image App",
-   "read_only_depends_on": "eval:doc.origin === 'Kubeport'"
+   "read_only_depends_on": "eval:doc.is_curated"
   }
  ],
  "grid_page_length": 50,

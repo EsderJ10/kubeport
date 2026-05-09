@@ -28,8 +28,8 @@ class KubeportSiteImage(Document):
 		image_repository: DF.Data
 		image_tag: DF.Data
 		image_title: DF.Data
+		is_curated: DF.Check
 		is_default: DF.Check
-		origin: DF.Literal["Kubeport", "User"]
 		source_revision: DF.Data | None
 		status: DF.Literal["Active", "Deprecated"]
 	# end: auto-generated types
@@ -42,7 +42,6 @@ class KubeportSiteImage(Document):
 		self.image_tag = str(self.image_tag or "").strip()
 		self.image_digest = str(self.image_digest or "").strip()
 		self.status = self.status or "Active"
-		self.origin = self.origin or "User"
 
 		if not self.image_repository:
 			frappe.throw("Image repository is required.")
@@ -50,8 +49,6 @@ class KubeportSiteImage(Document):
 			frappe.throw("Image tag is required.")
 		if self.status not in ("Active", "Deprecated"):
 			frappe.throw("Status must be Active or Deprecated.")
-		if self.origin not in ("Kubeport", "User"):
-			frappe.throw("Origin must be Kubeport or User.")
 
 		duplicate = frappe.db.get_value(
 			"Kubeport Site Image",
@@ -70,15 +67,15 @@ class KubeportSiteImage(Document):
 
 		if self.is_default and self.status == "Deprecated":
 			frappe.throw("A deprecated image cannot be the default.")
-		if self.is_default and self.origin == "User":
+		if self.is_default and not self.is_curated:
 			frappe.throw("Defaults are reserved for curated Kubeport images.")
 
 	def on_update(self) -> None:
-		if self.is_default and self.status == "Active" and self.origin == "Kubeport":
+		if self.is_default and self.status == "Active" and self.is_curated:
 			_clear_other_defaults(self.name)
 
 	def on_trash(self) -> None:
-		if self.origin == "Kubeport":
+		if self.is_curated:
 			frappe.throw(
 				f"Curated Kubeport Site Image '{self.name}' cannot be deleted; "
 				"mark it Deprecated instead."

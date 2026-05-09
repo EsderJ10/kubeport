@@ -34,11 +34,11 @@ def list_site_images(include_deprecated: bool = False) -> list[dict[str, Any]]:
 			"apps_json_hash",
 			"source_revision",
 			"status",
-			"origin",
+			"is_curated",
 			"is_default",
 			"description",
 		],
-		order_by="is_default desc, origin asc, status asc, image_title asc",
+		order_by="is_default desc, is_curated desc, status asc, image_title asc",
 	)
 
 	return [_with_apps(_as_dict(row)) for row in rows]

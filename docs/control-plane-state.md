@@ -32,8 +32,9 @@ The current milestone is **robustness** — making discovery, background executi
 
 - Kubeport ships a DB-backed `Kubeport Site Image` catalog seeded from `kubeport/site_images/catalog.json`.
 - Catalog rows are desired/product metadata, not observed cluster state: repository, immutable tag, digest, Frappe major, ERPNext version, apps hash, source revision, default/deprecated status, and display-only included apps.
-- Each row is tagged with an `origin` of `Kubeport` (curated, owned by the shipped catalog sync) or `User` (registered manually in the UI). Sync only writes curated rows and skips entries that collide with a user-registered repository:tag (logging a warning), so user-registered images are never overwritten.
-- Defaults (`is_default=1`) are reserved for `origin=Kubeport` rows; user rows can be selected on Helm Release but cannot be marked default.
+- Each row carries an `is_curated` flag. Curated rows (`1`) are owned by the daily catalog sync; user-registered rows (`0`) persist independently. Sync only writes curated rows and skips entries that collide with a user-registered repository:tag (logging a warning), so user-registered images are never overwritten.
+- Defaults (`is_default=1`) are reserved for curated rows; user rows can be selected on Helm Release but cannot be marked default.
+- The Frappe-native `owner` field records who created each row; no parallel "origin/user" field is maintained.
 - Deletion is blocked when a Kubeport Site Image is linked to a Helm Release, and curated rows cannot be deleted at all (mark them `Deprecated` instead).
 - Catalog sync runs through a long-queue task on install/migrate and the daily scheduler.
 - Public GHCR images are the v1 default; no imagePullSecret management is exposed in the UI. Frappe v16 is the v1 supported major. Helm value injection assumes ERPNext-style charts (`image.repository`, `image.tag`, `image.pullPolicy`).

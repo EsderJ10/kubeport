@@ -17,7 +17,7 @@ def _make_doc(**overrides) -> KubeportSiteImage:
 	doc.image_tag = "v1.0.0"
 	doc.image_digest = ""
 	doc.status = "Active"
-	doc.origin = "User"
+	doc.is_curated = 0
 	doc.is_default = 0
 	doc.name = build_site_image_docname(doc.image_repository, doc.image_tag)
 	for key, value in overrides.items():
@@ -28,48 +28,59 @@ def _make_doc(**overrides) -> KubeportSiteImage:
 class UnitTestKubeportSiteImage(UnitTestCase):
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.db.get_value")
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.throw")
-	def test_validate_rejects_is_default_on_user_origin_row(self, mock_throw, mock_get_value):
+	def test_validate_rejects_is_default_on_user_row(self, mock_throw, mock_get_value):
 		mock_get_value.return_value = None
 		mock_throw.side_effect = RuntimeError("Defaults are reserved for curated Kubeport images.")
-		doc = _make_doc(is_default=1, origin="User")
+		doc = _make_doc(is_default=1, is_curated=0)
 
 		with self.assertRaisesRegex(RuntimeError, "curated Kubeport images"):
 			doc.validate()
 
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.db.get_value")
-	def test_validate_allows_is_default_on_kubeport_origin_row(self, mock_get_value):
+	def test_validate_allows_is_default_on_curated_row(self, mock_get_value):
 		mock_get_value.return_value = None
-		doc = _make_doc(is_default=1, origin="Kubeport")
+		doc = _make_doc(is_default=1, is_curated=1)
 
 		doc.validate()
 
-		self.assertEqual(doc.origin, "Kubeport")
+		self.assertEqual(doc.is_curated, 1)
 		self.assertEqual(doc.is_default, 1)
 
+	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.db.get_value")
+	def test_validate_accepts_unspecified_is_curated_as_user_row(self, mock_get_value):
+		"""A bare new() doc (is_curated=0, no enum to fail) saves cleanly."""
+		mock_get_value.return_value = None
+		doc = _make_doc()  # is_curated=0, is_default=0 from helper defaults
+
+		doc.validate()
+
+		self.assertEqual(doc.is_curated, 0)
+		self.assertEqual(doc.status, "Active")
+
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.throw")
-	def test_on_trash_blocks_curated_origin_deletion(self, mock_throw):
+	def test_on_trash_blocks_curated_row_deletion(self, mock_throw):
 		mock_throw.side_effect = RuntimeError("mark it Deprecated instead")
-		doc = _make_doc(origin="Kubeport")
+		doc = _make_doc(is_curated=1)
 
 		with self.assertRaisesRegex(RuntimeError, "mark it Deprecated instead"):
 			doc.on_trash()
 
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.get_all")
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.throw")
-	def test_on_trash_blocks_user_origin_deletion_when_helm_release_links(
+	def test_on_trash_blocks_user_row_deletion_when_helm_release_links(
 		self, mock_throw, mock_get_all
 	):
 		mock_get_all.return_value = [{"name": "cluster-a/default/bench-a"}]
 		mock_throw.side_effect = RuntimeError("linked to Helm Release")
-		doc = _make_doc(origin="User")
+		doc = _make_doc(is_curated=0)
 
 		with self.assertRaisesRegex(RuntimeError, "linked to Helm Release"):
 			doc.on_trash()
 
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.get_all")
-	def test_on_trash_allows_user_origin_deletion_when_unused(self, mock_get_all):
+	def test_on_trash_allows_user_row_deletion_when_unused(self, mock_get_all):
 		mock_get_all.return_value = []
-		doc = _make_doc(origin="User")
+		doc = _make_doc(is_curated=0)
 
 		doc.on_trash()
 

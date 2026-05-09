@@ -94,14 +94,17 @@ def load_catalog(path: Path | None = None) -> list[dict[str, Any]]:
 def sync_catalog(path: Path | None = None) -> list[str]:
 	"""Upsert curated catalog rows into MariaDB and return the touched docnames.
 
-	User-origin rows that collide on (repository, tag) are preserved untouched.
+	User-registered rows (is_curated=0) that collide on (repository, tag) are
+	preserved untouched.
 	"""
 	docnames: list[str] = []
 	for image in load_catalog(path):
 		docname = build_site_image_docname(image["image_repository"], image["image_tag"])
 		if frappe.db.exists("Kubeport Site Image", docname):
-			existing_origin = frappe.db.get_value("Kubeport Site Image", docname, "origin")
-			if existing_origin == "User":
+			existing_is_curated = frappe.db.get_value(
+				"Kubeport Site Image", docname, "is_curated"
+			)
+			if not existing_is_curated:
 				frappe.logger("kubeport").warning(
 					"Skipping curated catalog upsert for '%s'; "
 					"a user-registered image already owns this repository:tag.",
@@ -111,13 +114,13 @@ def sync_catalog(path: Path | None = None) -> list[str]:
 			doc = frappe.get_doc("Kubeport Site Image", docname)
 			for fieldname in _CATALOG_FIELDS:
 				setattr(doc, fieldname, image[fieldname])
-			doc.origin = "Kubeport"
+			doc.is_curated = 1
 			doc.set("apps", image["apps"])
 			doc.save(ignore_permissions=True)
 		else:
 			doc = frappe.get_doc({
 				"doctype": "Kubeport Site Image",
-				"origin": "Kubeport",
+				"is_curated": 1,
 				**{fieldname: image[fieldname] for fieldname in _CATALOG_FIELDS},
 				"apps": image["apps"],
 			})
