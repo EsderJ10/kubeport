@@ -23,6 +23,7 @@ import frappe
 import yaml
 
 from kubeport.kubeport.doctype.helm_release.helm_release import (
+	_get_site_image_digest_for_hash,
 	calculate_release_spec_hash,
 	render_site_image_values,
 )
@@ -249,6 +250,7 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 				release_name=release["release_name"],
 				values_yaml=release.get("values"),
 				site_image=release.get("site_image"),
+				site_image_digest=_get_site_image_digest_for_hash(release.get("site_image")),
 			)
 			fields.update({
 				"last_applied_chart_version": version,
@@ -489,15 +491,15 @@ def _resolve_default_storage_class(release: dict) -> str | None:
 	if not release.get("site_image"):
 		return None
 
+	if _user_values_have_worker_storage_class(release.get("values")):
+		return None
+
 	from kubeport.utils.discovery import discover_default_storage_class
 
 	cluster_name = release.get("cluster") or ""
 	default = discover_default_storage_class(cluster_name)
 	if default:
 		return default
-
-	if _user_values_have_worker_storage_class(release.get("values")):
-		return None
 
 	raise RuntimeError(
 		f"Cluster '{cluster_name}' has no default StorageClass annotated. "

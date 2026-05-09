@@ -456,6 +456,12 @@ def _get_site_image_digest(site_image: str | None) -> str:
 	return str(site_image_doc.get("image_digest") or "")
 
 
+def _get_site_image_digest_for_hash(site_image: str | None) -> str:
+	if not site_image:
+		return ""
+	return str(frappe.db.get_value("Kubeport Site Image", site_image, "image_digest") or "")
+
+
 def _get_site_image_for_release(site_image: str | None) -> dict[str, str] | None:
 	if not site_image:
 		return None

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, call, patch
 
 from frappe.tests import UnitTestCase
 
+from kubeport.kubeport.doctype.helm_release.helm_release import calculate_release_spec_hash
 from kubeport.tasks.reconciliation import (
 	SITE_PROBE_EXISTS,
 	SITE_PROBE_MISSING,
@@ -393,6 +394,65 @@ class UnitTestReconciliation(UnitTestCase):
 		self.assertEqual(fields["pending_changes"], 0)
 		self.assertEqual(fields["operation_type"], "")
 		mock_publish.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.tasks.reconciliation._helm_operation_is_stale", return_value=True)
+	@patch("kubeport.utils.release_health.walk")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_stale_helm_operation_hash_includes_site_image_digest(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_helm_status,
+		mock_walk,
+		_mock_is_stale,
+		mock_get_value,
+		_mock_publish,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="cluster-a/default/bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				chart="repo/erpnext",
+				chart_version="8.0.41",
+				values="workers:\n  replicaCount: 2\n",
+				site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+				status="In Progress",
+				operation_token="tok-1",
+				operation_started_at="2026-04-12 10:00:00",
+				modified="2026-04-12 10:00:00",
+			),
+		]
+		mock_helm_status.return_value = {"info": {"status": "deployed"}}
+		mock_walk.return_value = []
+		mock_get_value.side_effect = [
+			"sha256:aaa",
+			{
+				"operation_token": "tok-1",
+				"status": "In Progress",
+			},
+		]
+
+		_reconcile_stale_helm_operations()
+
+		mock_set_value.assert_called_once()
+		_, _, fields = mock_set_value.call_args.args
+		expected_hash = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="default",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 2\n",
+			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			site_image_digest="sha256:aaa",
+		)
+		self.assertEqual(fields["desired_spec_hash"], expected_hash)
+		self.assertEqual(fields["last_applied_spec_hash"], expected_hash)
 
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")

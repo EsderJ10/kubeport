@@ -153,7 +153,10 @@ def _reconcile_helm_releases():
 
 def _reconcile_stale_helm_operations():
 	"""Recover Helm Release rows whose worker-owned state has gone stale."""
-	from kubeport.kubeport.doctype.helm_release.helm_release import calculate_release_spec_hash
+	from kubeport.kubeport.doctype.helm_release.helm_release import (
+		_get_site_image_digest_for_hash,
+		calculate_release_spec_hash,
+	)
 	from kubeport.utils import helm
 	from kubeport.utils.release_health import classify_release_from_cluster, walk
 
@@ -212,7 +215,8 @@ def _reconcile_stale_helm_operations():
 					namespace=release.namespace,
 					release_name=release.release_name,
 					values_yaml=release.values,
-					site_image=release.site_image,
+					site_image=getattr(release, "site_image", None),
+					site_image_digest=_get_site_image_digest_for_hash(getattr(release, "site_image", None)),
 				)
 				fields.update({
 					"last_applied_chart_version": release.chart_version or "",
