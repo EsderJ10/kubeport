@@ -91,6 +91,8 @@ Declared in `hooks.py`:
 - Daily → `kubeport.tasks.helm_tasks.sync_all_repos` (chart catalog refresh)
 - Daily → `kubeport.tasks.site_image_tasks.sync_site_image_catalog` (re-imports `kubeport/site_images/catalog.json` into the `Kubeport Site Image` doctype, marking curated rows and reconciling drift against the shipped manifest)
 
+The catalog itself is refreshed by CI: a `v*` tag push to `.github/workflows/publish-site-image.yml` runs `scripts/update_site_catalog.py` after digest verification, which rewrites the matched curated row's `image_tag`, `image_digest`, `source_revision`, and `apps_json_hash`. The workflow does not commit or open a PR — it uploads the rewritten file as the `site-image-catalog-<tag>` artifact and surfaces the diff in the run's step summary; the operator commits the bump through the normal review flow.
+
 ---
 
 ## Design Invariants

@@ -6,6 +6,62 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-09 — Automate curated site image catalog bumps on tag publish
+
+### Context
+
+The publish-site-image workflow already builds and pushes Kubeport's curated GHCR image with a
+verified digest, but `kubeport/site_images/catalog.json` was still updated by hand after each
+release (commit `ec2a398` was the manual prototype). The manifest of "what we ship" drifts away
+from "what was actually published" between releases, and a wrong-by-one-character paste re-enters
+the doctype on the next daily catalog sync.
+
+### Decision
+
+- Added `scripts/update_site_catalog.py`: a standalone, frappe-free Python script that mirrors the
+  doctype's GHCR repository, image-tag, and sha256 digest regexes, locates the curated row by
+  `(image_repository, frappe_major)`, and rewrites only its `image_tag`, `image_digest`,
+  `source_revision`, and `apps_json_hash`. The script aborts non-zero on any validation failure
+  or ambiguous match.
+- Wired the script into `.github/workflows/publish-site-image.yml` so a `v*` tag push runs the
+  bump after the existing digest verification, writes the diff and the new values to the run's
+  step summary, and uploads the rewritten `catalog.json` as a build artifact named
+  `site-image-catalog-<tag>`.
+- Kept the operator in the loop for the commit and PR: the workflow does not push, commit, or
+  open a PR. The operator downloads the artifact (or copies the values from the step summary),
+  commits to a topic branch, and opens the bump PR through whatever review flow they prefer.
+- Catalog mutation is gated on `startsWith(github.ref, 'refs/tags/v')`, so push-to-main and PR
+  builds skip it entirely. The daily `sync_site_image_catalog` task continues to reconcile the
+  shipped catalog into MariaDB without change.
+
+### Rejected alternatives
+
+- **Auto-open a PR with `peter-evans/create-pull-request@v6`.** Would require bumping the
+  workflow's `contents` permission to `write` and adds another moving piece in CI. The operator
+  preferred to keep the commit/PR step manual; the artifact + step-summary path delivers the
+  computed values without that escalation.
+- **Push the bump directly to `main`.** Loses the review trail and bypasses the protected-branch
+  flow used everywhere else in this repo.
+- **Hold the script inside `kubeport/site_images/`.** A future edit could pull `frappe` into the
+  import graph and break the publish runner, which has no Frappe install. `scripts/` keeps the
+  helper unambiguously CI-side.
+
+### Implementation details
+
+- Catalog rewriter: `scripts/update_site_catalog.py`. Regexes are copy-pasted verbatim from
+  `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py:11-13`.
+- Workflow steps: `Bump curated catalog row`, `Summarize catalog bump`, `Upload rewritten catalog`
+  in `.github/workflows/publish-site-image.yml`. Step summary includes the four before/after
+  fields plus a `git diff` of the rewritten file.
+- Drift guard: `kubeport/tests/test_publish_automation.py::UnitTestRegexDriftFromDoctype` loads
+  the script via `importlib.util` and asserts its regex `pattern` strings equal the doctype's, so
+  the test suite fails immediately if either side changes without the other.
+- Rewrite tests: same module's `UnitTestSiteCatalogRewrite` covers the happy path, end-to-end
+  validity through `kubeport.site_images.catalog.load_catalog`, and every validation/match
+  abort path.
+
+---
+
 ## 2026-05-09 — Curated Site Image catalog and digest-pinned bench deploys
 
 ### Context
