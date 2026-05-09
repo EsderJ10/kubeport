@@ -1,0 +1,115 @@
+{
+ "category": "Modules",
+ "charts": [],
+ "content": "[{\"id\":\"fleet-health-header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Fleet Health</b></span>\",\"col\":12}},{\"id\":\"degraded-helm-releases\",\"type\":\"card\",\"data\":{\"card_name\":\"Degraded Helm Releases\",\"col\":3}},{\"id\":\"failed-frappe-sites\",\"type\":\"card\",\"data\":{\"card_name\":\"Failed Frappe Sites\",\"col\":3}},{\"id\":\"failed-frappe-site-backups\",\"type\":\"card\",\"data\":{\"card_name\":\"Failed Frappe Site Backups\",\"col\":3}},{\"id\":\"stale-operations\",\"type\":\"card\",\"data\":{\"card_name\":\"Stale Operations\",\"col\":3}},{\"id\":\"quick-access-spacer\",\"type\":\"spacer\",\"data\":{\"col\":12}},{\"id\":\"quick-access-header\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Quick Access</b></span>\",\"col\":12}},{\"id\":\"shortcut-helm-releases\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Helm Releases\",\"col\":3}},{\"id\":\"shortcut-frappe-sites\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Frappe Sites\",\"col\":3}},{\"id\":\"shortcut-service-bundles\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Service Bundles\",\"col\":3}},{\"id\":\"shortcut-site-images\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Kubeport Site Images\",\"col\":3}},{\"id\":\"shortcut-clusters\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Kubernetes Clusters\",\"col\":3}},{\"id\":\"shortcut-helm-repos\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Helm Repositories\",\"col\":3}},{\"id\":\"shortcut-k8s-cmd\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Kubernetes Commands\",\"col\":3}},{\"id\":\"shortcut-audit\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Kubernetes Command Audit Log\",\"col\":3}}]",
+ "creation": "2026-05-09 00:00:00",
+ "custom_blocks": [],
+ "doctype": "Workspace",
+ "for_user": "",
+ "hide_custom": 0,
+ "icon": "service",
+ "idx": 0,
+ "is_hidden": 0,
+ "label": "Kubeport Operations",
+ "links": [],
+ "modified": "2026-05-09 00:00:00",
+ "module": "Kubeport",
+ "name": "Kubeport Operations",
+ "number_cards": [
+  {
+   "label": "Degraded Helm Releases",
+   "number_card_name": "Degraded Helm Releases",
+   "type": "Number Card"
+  },
+  {
+   "label": "Failed Frappe Sites",
+   "number_card_name": "Failed Frappe Sites",
+   "type": "Number Card"
+  },
+  {
+   "label": "Failed Frappe Site Backups",
+   "number_card_name": "Failed Frappe Site Backups",
+   "type": "Number Card"
+  },
+  {
+   "label": "Stale Operations",
+   "number_card_name": "Stale Operations",
+   "type": "Number Card"
+  }
+ ],
+ "owner": "Administrator",
+ "parent_page": "",
+ "public": 1,
+ "quick_lists": [],
+ "restrict_to_domain": "",
+ "roles": [
+  {
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 100,
+ "shortcuts": [
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "format": "{} Open",
+   "label": "Helm Releases",
+   "link_to": "Helm Release",
+   "stats_filter": "{\"status\":[\"in\",[\"Deployed\",\"Degraded\"]]}",
+   "type": "DocType"
+  },
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "format": "{} Active",
+   "label": "Frappe Sites",
+   "link_to": "Frappe Site",
+   "stats_filter": "{\"status\":[\"=\",\"Active\"]}",
+   "type": "DocType"
+  },
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "label": "Service Bundles",
+   "link_to": "Service Bundle",
+   "type": "DocType"
+  },
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "label": "Kubeport Site Images",
+   "link_to": "Kubeport Site Image",
+   "type": "DocType"
+  },
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "label": "Kubernetes Clusters",
+   "link_to": "Kubernetes Cluster",
+   "type": "DocType"
+  },
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "label": "Helm Repositories",
+   "link_to": "Helm Repository",
+   "type": "DocType"
+  },
+  {
+   "color": "Blue",
+   "doc_view": "List",
+   "label": "Kubernetes Commands",
+   "link_to": "Kubernetes Command",
+   "type": "DocType"
+  },
+  {
+   "color": "Grey",
+   "doc_view": "List",
+   "label": "Kubernetes Command Audit Log",
+   "link_to": "Kubernetes Command Audit Log",
+   "type": "DocType"
+  }
+ ],
+ "title": "Kubeport Operations",
+ "type": "Workspace"
+}
