@@ -156,6 +156,7 @@ def _client_from_incluster() -> client.ApiClient:
 # Private Utilities
 # ---------------------------------------------------------------------------
 
+
 def _write_ca_tempfile(ca_pem: str) -> str:
 	"""Write a PEM string to a temp file and register cleanup on exit.
 

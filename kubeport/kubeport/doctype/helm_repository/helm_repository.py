@@ -36,17 +36,14 @@ class HelmRepository(Document):
 	def validate(self):
 		"""Validate the repository URL format."""
 		if self.repo_url and not self.repo_url.startswith(("https://", "http://", "oci://")):
-			frappe.throw(
-				"Repository URL must start with https://, http://, or oci://."
-			)
+			frappe.throw("Repository URL must start with https://, http://, or oci://.")
 
 	def after_insert(self):
 		"""Auto-register repo in Helm and trigger first sync."""
 		self._enqueue_sync_job(
 			task_path="kubeport.tasks.helm_tasks.add_and_sync_repo",
 			message=(
-				f"Repository '{self.repo_name}' is being registered. "
-				"Charts will be synced automatically."
+				f"Repository '{self.repo_name}' is being registered. Charts will be synced automatically."
 			),
 		)
 

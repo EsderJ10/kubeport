@@ -52,10 +52,7 @@ def compute_apps_json_hash(path: Path) -> str:
 
 def validate_repository(label: str, repository: str) -> None:
 	if not _GHCR_REPOSITORY_RE.fullmatch(repository):
-		_fail(
-			f"Site image '{label}' must use a public GHCR repository such as "
-			"'ghcr.io/owner/image'."
-		)
+		_fail(f"Site image '{label}' must use a public GHCR repository such as 'ghcr.io/owner/image'.")
 	if ":" in repository or "@" in repository:
 		_fail(
 			f"Site image '{label}' repository must not include a tag or digest; "
@@ -90,8 +87,7 @@ def find_catalog_row(payload: dict, image_repository: str, frappe_major: int) ->
 	]
 	if not matches:
 		_fail(
-			f"No catalog row matches image_repository='{image_repository}' "
-			f"and frappe_major={frappe_major}."
+			f"No catalog row matches image_repository='{image_repository}' and frappe_major={frappe_major}."
 		)
 	if len(matches) > 1:
 		_fail(
@@ -190,15 +186,17 @@ def main(argv: list[str] | None = None) -> int:
 	print(f"  source_revision: {result['before_source_revision']} -> {result['source_revision']}")
 	print(f"  apps_json_hash:  {result['before_apps_json_hash']} -> {result['apps_json_hash']}")
 
-	emit_outputs({
-		"matched_repository": result["matched_repository"],
-		"frappe_major": result["frappe_major"],
-		"image_tag": result["image_tag"],
-		"image_digest": result["image_digest"],
-		"short_digest": result["short_digest"],
-		"source_revision": result["source_revision"],
-		"apps_json_hash": result["apps_json_hash"],
-	})
+	emit_outputs(
+		{
+			"matched_repository": result["matched_repository"],
+			"frappe_major": result["frappe_major"],
+			"image_tag": result["image_tag"],
+			"image_digest": result["image_digest"],
+			"short_digest": result["short_digest"],
+			"source_revision": result["source_revision"],
+			"apps_json_hash": result["apps_json_hash"],
+		}
+	)
 	return 0
 
 

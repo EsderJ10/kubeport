@@ -84,20 +84,22 @@ def load_catalog(path: Path | None = None) -> list[dict[str, Any]]:
 		if not isinstance(apps, list):
 			frappe.throw(f"Site image '{repository}:{tag}' apps must be a list.")
 
-		normalized.append({
-			"image_title": str(image.get("image_title") or f"{repository}:{tag}").strip(),
-			"image_repository": repository,
-			"image_tag": tag,
-			"image_digest": digest,
-			"frappe_major": int(image.get("frappe_major") or 16),
-			"erpnext_version": str(image.get("erpnext_version") or "").strip(),
-			"apps_json_hash": str(image.get("apps_json_hash") or "").strip(),
-			"source_revision": str(image.get("source_revision") or "").strip(),
-			"status": status,
-			"is_default": int(is_default),
-			"description": str(image.get("description") or "").strip(),
-			"apps": [_normalize_app_row(app) for app in apps],
-		})
+		normalized.append(
+			{
+				"image_title": str(image.get("image_title") or f"{repository}:{tag}").strip(),
+				"image_repository": repository,
+				"image_tag": tag,
+				"image_digest": digest,
+				"frappe_major": int(image.get("frappe_major") or 16),
+				"erpnext_version": str(image.get("erpnext_version") or "").strip(),
+				"apps_json_hash": str(image.get("apps_json_hash") or "").strip(),
+				"source_revision": str(image.get("source_revision") or "").strip(),
+				"status": status,
+				"is_default": int(is_default),
+				"description": str(image.get("description") or "").strip(),
+				"apps": [_normalize_app_row(app) for app in apps],
+			}
+		)
 
 	if default_count > 1:
 		frappe.throw("Only one site image catalog entry can be the default.")
@@ -115,9 +117,7 @@ def sync_catalog(path: Path | None = None) -> list[str]:
 	for image in load_catalog(path):
 		docname = build_site_image_docname(image["image_repository"], image["image_tag"])
 		if frappe.db.exists("Kubeport Site Image", docname):
-			existing_is_curated = frappe.db.get_value(
-				"Kubeport Site Image", docname, "is_curated"
-			)
+			existing_is_curated = frappe.db.get_value("Kubeport Site Image", docname, "is_curated")
 			if not existing_is_curated:
 				frappe.logger("kubeport").warning(
 					"Skipping curated catalog upsert for '%s'; "
@@ -132,12 +132,14 @@ def sync_catalog(path: Path | None = None) -> list[str]:
 			doc.set("apps", image["apps"])
 			doc.save(ignore_permissions=True)
 		else:
-			doc = frappe.get_doc({
-				"doctype": "Kubeport Site Image",
-				"is_curated": 1,
-				**{fieldname: image[fieldname] for fieldname in _CATALOG_FIELDS},
-				"apps": image["apps"],
-			})
+			doc = frappe.get_doc(
+				{
+					"doctype": "Kubeport Site Image",
+					"is_curated": 1,
+					**{fieldname: image[fieldname] for fieldname in _CATALOG_FIELDS},
+					"apps": image["apps"],
+				}
+			)
 			doc.insert(ignore_permissions=True)
 		docnames.append(doc.name)
 

@@ -55,8 +55,7 @@ class ServiceBundle(Document):
 			task_path="kubeport.tasks.service_bundle_tasks.apply_bundle_task",
 			status="In Progress",
 			message=(
-				f"Deployment of '{self.bundle_name}' has been queued. "
-				"Status will update automatically."
+				f"Deployment of '{self.bundle_name}' has been queued. Status will update automatically."
 			),
 		)
 

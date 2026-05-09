@@ -31,14 +31,16 @@ class UnitTestCleanupPatches(UnitTestCase):
 
 		def get_all_side_effect(doctype, **kwargs):
 			if doctype == "Kubernetes Manifest":
-				return [{
-					"name": "legacy-a",
-					"manifest_name": "bundle-a",
-					"cluster": "cluster-a",
-					"namespace": "",
-					"content": "apiVersion: v1",
-					"status": "Applied",
-				}]
+				return [
+					{
+						"name": "legacy-a",
+						"manifest_name": "bundle-a",
+						"cluster": "cluster-a",
+						"namespace": "",
+						"content": "apiVersion: v1",
+						"status": "Applied",
+					}
+				]
 			if doctype == "Service Bundle":
 				return []
 			return []
@@ -47,14 +49,16 @@ class UnitTestCleanupPatches(UnitTestCase):
 
 		execute()
 
-		mock_get_doc.assert_called_once_with({
-			"doctype": "Service Bundle",
-			"bundle_name": "bundle-a",
-			"cluster": "cluster-a",
-			"namespace": "default",
-			"content": "apiVersion: v1",
-			"status": "Deployed",
-		})
+		mock_get_doc.assert_called_once_with(
+			{
+				"doctype": "Service Bundle",
+				"bundle_name": "bundle-a",
+				"cluster": "cluster-a",
+				"namespace": "default",
+				"content": "apiVersion: v1",
+				"status": "Deployed",
+			}
+		)
 		mock_doc.insert.assert_called_once_with(ignore_permissions=True)
 		mock_db.commit.assert_called_once()
 		mock_logger.return_value.info.assert_called_once()

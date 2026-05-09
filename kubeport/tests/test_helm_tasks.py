@@ -13,8 +13,8 @@ from kubeport.tasks.helm_tasks import (
 	_sync_charts,
 	install_or_upgrade_release,
 	rollback_release,
-	sync_repo_charts,
 	sync_all_repos,
+	sync_repo_charts,
 	uninstall_release,
 )
 
@@ -292,11 +292,13 @@ class UnitTestHelmTasks(UnitTestCase):
 		self,
 		mock_discover_default_storage_class,
 	):
-		default_storage_class = _resolve_default_storage_class({
-			"cluster": "cluster-a",
-			"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-			"values": "persistence:\n  worker:\n    storageClass: fast-ssd\n",
-		})
+		default_storage_class = _resolve_default_storage_class(
+			{
+				"cluster": "cluster-a",
+				"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+				"values": "persistence:\n  worker:\n    storageClass: fast-ssd\n",
+			}
+		)
 
 		self.assertIsNone(default_storage_class)
 		mock_discover_default_storage_class.assert_not_called()
@@ -307,11 +309,13 @@ class UnitTestHelmTasks(UnitTestCase):
 		mock_discover_default_storage_class,
 	):
 		with self.assertRaisesRegex(RuntimeError, "no default StorageClass"):
-			_resolve_default_storage_class({
-				"cluster": "cluster-a",
-				"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-				"values": "",
-			})
+			_resolve_default_storage_class(
+				{
+					"cluster": "cluster-a",
+					"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+					"values": "",
+				}
+			)
 
 		mock_discover_default_storage_class.assert_called_once_with("cluster-a")
 
@@ -753,10 +757,13 @@ class UnitTestHelmTasks(UnitTestCase):
 			all_versions=True,
 			timeout=600,
 		)
-		chart_doc.set.assert_called_once_with("versions", [
-			{"version": "18.2.4", "app_version": "1.2.0", "description": "newest"},
-			{"version": "18.1.0", "app_version": "1.1.0", "description": "older"},
-		])
+		chart_doc.set.assert_called_once_with(
+			"versions",
+			[
+				{"version": "18.2.4", "app_version": "1.2.0", "description": "newest"},
+				{"version": "18.1.0", "app_version": "1.1.0", "description": "older"},
+			],
+		)
 		self.assertEqual(chart_doc.latest_version, "18.2.4")
 		self.assertEqual(chart_doc.latest_app_version, "1.2.0")
 		self.assertEqual(chart_doc.description, "newest")

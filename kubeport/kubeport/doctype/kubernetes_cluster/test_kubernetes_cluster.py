@@ -8,7 +8,6 @@ from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from kubeport.kubeport.doctype.kubernetes_cluster.kubernetes_cluster import KubernetesCluster
 
-
 # On IntegrationTestCase, the doctype test records and all
 # link-field test record dependencies are recursively loaded
 # Use these module variables to add/remove to/from that list

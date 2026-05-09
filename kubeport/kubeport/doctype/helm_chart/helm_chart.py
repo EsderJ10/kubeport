@@ -23,6 +23,7 @@ class HelmChart(Document):
 
 	if TYPE_CHECKING:
 		from frappe.types import DF
+
 		from kubeport.kubeport.doctype.helm_chart_version.helm_chart_version import HelmChartVersion
 
 		chart_name: DF.Data

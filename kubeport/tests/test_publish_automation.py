@@ -13,10 +13,13 @@ from frappe.tests import UnitTestCase
 
 from kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image import (
 	_GHCR_REPOSITORY_RE as DOCTYPE_GHCR_RE,
+)
+from kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image import (
 	_IMAGE_TAG_RE as DOCTYPE_TAG_RE,
+)
+from kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image import (
 	_SHA256_DIGEST_RE as DOCTYPE_DIGEST_RE,
 )
-
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "update_site_catalog.py"
 _VALID_DIGEST = "sha256:" + ("a" * 64)
@@ -44,24 +47,28 @@ class UnitTestSiteCatalogRewrite(UnitTestCase):
 		self.script = _load_script()
 		self.apps_json = _write_tempfile(b'[{"url":"https://x","branch":"main"}]\n')
 		self.catalog = _write_tempfile(
-			json.dumps({
-				"images": [{
-					"image_title": "Kubeport ERPNext v16",
-					"image_repository": "ghcr.io/owner/kubeport-site",
-					"image_tag": "0.0.1-frappe16",
-					"image_digest": _OTHER_DIGEST,
-					"frappe_major": 16,
-					"erpnext_version": "16",
-					"apps_json_hash": "sha256:" + ("c" * 64),
-					"source_revision": "abc123",
-					"status": "Active",
-					"is_default": True,
-					"description": "Default Kubeport runtime image.",
-					"apps": [
-						{"app_name": "erpnext", "source_url": "https://x", "ref": "version-16"},
+			json.dumps(
+				{
+					"images": [
+						{
+							"image_title": "Kubeport ERPNext v16",
+							"image_repository": "ghcr.io/owner/kubeport-site",
+							"image_tag": "0.0.1-frappe16",
+							"image_digest": _OTHER_DIGEST,
+							"frappe_major": 16,
+							"erpnext_version": "16",
+							"apps_json_hash": "sha256:" + ("c" * 64),
+							"source_revision": "abc123",
+							"status": "Active",
+							"is_default": True,
+							"description": "Default Kubeport runtime image.",
+							"apps": [
+								{"app_name": "erpnext", "source_url": "https://x", "ref": "version-16"},
+							],
+						}
 					],
-				}],
-			}).encode("utf-8"),
+				}
+			).encode("utf-8"),
 		)
 
 	def tearDown(self):

@@ -7,10 +7,10 @@ parsing kubeconfig files uploaded from the browser.
 
 from __future__ import annotations
 
-from copy import deepcopy
 import ipaddress
 import socket
 import struct
+from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -60,6 +60,7 @@ def get_cluster_namespaces(cluster_name: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Kubeconfig Upload & Context Import
 # ---------------------------------------------------------------------------
+
 
 @frappe.whitelist()
 def parse_kubeconfig_contexts(kubeconfig_content: str) -> list[dict[str, Any]]:
@@ -112,16 +113,18 @@ def parse_kubeconfig_contexts(kubeconfig_content: str) -> list[dict[str, Any]]:
 		user_ref = ctx_data.get("user", "")
 		server_info = _normalize_kubeconfig_server(cluster_servers.get(cluster_ref, ""))
 
-		result.append({
-			"context_name": ctx_name,
-			"cluster_name": cluster_ref,
-			"server": server_info["server"],
-			"original_server": server_info["original_server"],
-			"server_was_normalized": server_info["server_was_normalized"],
-			"normalization_reason": server_info["normalization_reason"],
-			"user": user_ref,
-			"is_current": ctx_name == current_context,
-		})
+		result.append(
+			{
+				"context_name": ctx_name,
+				"cluster_name": cluster_ref,
+				"server": server_info["server"],
+				"original_server": server_info["original_server"],
+				"server_was_normalized": server_info["server_was_normalized"],
+				"normalization_reason": server_info["normalization_reason"],
+				"user": user_ref,
+				"is_current": ctx_name == current_context,
+			}
+		)
 
 	return result
 
@@ -185,9 +188,7 @@ def extract_kubeconfig_context(kubeconfig_content: str, context_name: str) -> di
 		frappe.throw(f"User '{user_ref}' referenced by context '{context_name}' not found.")
 
 	selected_cluster_entry = deepcopy(cluster_entry)
-	server_info = _normalize_kubeconfig_server(
-		selected_cluster_entry.get("cluster", {}).get("server", "")
-	)
+	server_info = _normalize_kubeconfig_server(selected_cluster_entry.get("cluster", {}).get("server", ""))
 	selected_cluster_entry.setdefault("cluster", {})["server"] = server_info["server"]
 
 	# Build the minimal kubeconfig

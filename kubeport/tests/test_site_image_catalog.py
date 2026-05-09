@@ -13,21 +13,27 @@ from kubeport.site_images.catalog import load_catalog, sync_catalog
 
 class UnitTestSiteImageCatalog(UnitTestCase):
 	def test_load_catalog_normalizes_image_entries(self):
-		path = _write_catalog({
-			"images": [{
-				"image_title": "Kubeport ERPNext",
-				"image_repository": "ghcr.io/esderj10/kubeport-site",
-				"image_tag": "v1.0.0-frappe16",
-				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				"frappe_major": 16,
-				"is_default": True,
-				"apps": [{
-					"app_name": "erpnext",
-					"source_url": "https://github.com/frappe/erpnext",
-					"ref": "version-16",
-				}],
-			}],
-		})
+		path = _write_catalog(
+			{
+				"images": [
+					{
+						"image_title": "Kubeport ERPNext",
+						"image_repository": "ghcr.io/esderj10/kubeport-site",
+						"image_tag": "v1.0.0-frappe16",
+						"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						"frappe_major": 16,
+						"is_default": True,
+						"apps": [
+							{
+								"app_name": "erpnext",
+								"source_url": "https://github.com/frappe/erpnext",
+								"ref": "version-16",
+							}
+						],
+					}
+				],
+			}
+		)
 
 		try:
 			rows = load_catalog(path)
@@ -42,20 +48,22 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 
 	@patch("kubeport.site_images.catalog.frappe.throw")
 	def test_load_catalog_rejects_duplicate_repository_tag_pairs(self, mock_throw):
-		path = _write_catalog({
-			"images": [
-				{
-					"image_repository": "ghcr.io/esderj10/kubeport-site",
-					"image_tag": "v1.0.0-frappe16",
-					"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				},
-				{
-					"image_repository": "ghcr.io/esderj10/kubeport-site",
-					"image_tag": "v1.0.0-frappe16",
-					"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				},
-			],
-		})
+		path = _write_catalog(
+			{
+				"images": [
+					{
+						"image_repository": "ghcr.io/esderj10/kubeport-site",
+						"image_tag": "v1.0.0-frappe16",
+						"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					},
+					{
+						"image_repository": "ghcr.io/esderj10/kubeport-site",
+						"image_tag": "v1.0.0-frappe16",
+						"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					},
+				],
+			}
+		)
 		mock_throw.side_effect = RuntimeError("Duplicate site image catalog entry")
 
 		try:
@@ -66,14 +74,18 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 
 	@patch("kubeport.site_images.catalog.frappe.throw")
 	def test_load_catalog_rejects_deprecated_default(self, mock_throw):
-		path = _write_catalog({
-			"images": [{
-				"image_repository": "ghcr.io/esderj10/kubeport-site",
-				"image_tag": "v1.0.0-frappe16",
-				"status": "Deprecated",
-				"is_default": True,
-			}],
-		})
+		path = _write_catalog(
+			{
+				"images": [
+					{
+						"image_repository": "ghcr.io/esderj10/kubeport-site",
+						"image_tag": "v1.0.0-frappe16",
+						"status": "Deprecated",
+						"is_default": True,
+					}
+				],
+			}
+		)
 		mock_throw.side_effect = RuntimeError("cannot be the default")
 
 		try:
@@ -84,13 +96,17 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 
 	@patch("kubeport.site_images.catalog.frappe.throw")
 	def test_load_catalog_rejects_active_curated_image_without_digest(self, mock_throw):
-		path = _write_catalog({
-			"images": [{
-				"image_repository": "ghcr.io/esderj10/kubeport-site",
-				"image_tag": "v1.0.0-frappe16",
-				"status": "Active",
-			}],
-		})
+		path = _write_catalog(
+			{
+				"images": [
+					{
+						"image_repository": "ghcr.io/esderj10/kubeport-site",
+						"image_tag": "v1.0.0-frappe16",
+						"status": "Active",
+					}
+				],
+			}
+		)
 		mock_throw.side_effect = RuntimeError("must record the pushed GHCR image digest")
 
 		try:
@@ -103,22 +119,26 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 	@patch("kubeport.site_images.catalog.frappe.get_doc")
 	@patch("kubeport.site_images.catalog.frappe.db.exists")
 	def test_sync_catalog_upserts_existing_rows(self, mock_exists, mock_get_doc, mock_get_value):
-		path = _write_catalog({
-			"images": [{
-				"image_title": "Kubeport ERPNext",
-				"image_repository": "ghcr.io/esderj10/kubeport-site",
-				"image_tag": "v1.0.0-frappe16",
-				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				"frappe_major": 16,
-				"erpnext_version": "16.17.0",
-				"apps_json_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-				"source_revision": "abc123",
-				"status": "Active",
-				"is_default": True,
-				"description": "Runtime",
-				"apps": [{"app_name": "erpnext"}],
-			}],
-		})
+		path = _write_catalog(
+			{
+				"images": [
+					{
+						"image_title": "Kubeport ERPNext",
+						"image_repository": "ghcr.io/esderj10/kubeport-site",
+						"image_tag": "v1.0.0-frappe16",
+						"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						"frappe_major": 16,
+						"erpnext_version": "16.17.0",
+						"apps_json_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+						"source_revision": "abc123",
+						"status": "Active",
+						"is_default": True,
+						"description": "Runtime",
+						"apps": [{"app_name": "erpnext"}],
+					}
+				],
+			}
+		)
 		mock_exists.return_value = True
 		mock_get_value.return_value = 1
 		doc = MagicMock()
@@ -147,18 +167,22 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 	def test_sync_catalog_preserves_user_row_on_collision(
 		self, mock_exists, mock_get_doc, mock_get_value, mock_logger
 	):
-		path = _write_catalog({
-			"images": [{
-				"image_title": "Kubeport ERPNext",
-				"image_repository": "ghcr.io/esderj10/kubeport-site",
-				"image_tag": "v1.0.0-frappe16",
-				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				"frappe_major": 16,
-				"status": "Active",
-				"is_default": True,
-				"apps": [{"app_name": "erpnext"}],
-			}],
-		})
+		path = _write_catalog(
+			{
+				"images": [
+					{
+						"image_title": "Kubeport ERPNext",
+						"image_repository": "ghcr.io/esderj10/kubeport-site",
+						"image_tag": "v1.0.0-frappe16",
+						"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						"frappe_major": 16,
+						"status": "Active",
+						"is_default": True,
+						"apps": [{"app_name": "erpnext"}],
+					}
+				],
+			}
+		)
 		mock_exists.return_value = True
 		mock_get_value.return_value = 0
 
@@ -174,18 +198,22 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 	@patch("kubeport.site_images.catalog.frappe.get_doc")
 	@patch("kubeport.site_images.catalog.frappe.db.exists")
 	def test_sync_catalog_inserts_curated_flag_for_new_rows(self, mock_exists, mock_get_doc):
-		path = _write_catalog({
-			"images": [{
-				"image_title": "Kubeport ERPNext",
-				"image_repository": "ghcr.io/esderj10/kubeport-site",
-				"image_tag": "v1.0.0-frappe16",
-				"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				"frappe_major": 16,
-				"status": "Active",
-				"is_default": True,
-				"apps": [{"app_name": "erpnext"}],
-			}],
-		})
+		path = _write_catalog(
+			{
+				"images": [
+					{
+						"image_title": "Kubeport ERPNext",
+						"image_repository": "ghcr.io/esderj10/kubeport-site",
+						"image_tag": "v1.0.0-frappe16",
+						"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+						"frappe_major": 16,
+						"status": "Active",
+						"is_default": True,
+						"apps": [{"app_name": "erpnext"}],
+					}
+				],
+			}
+		)
 		mock_exists.return_value = False
 		new_doc = MagicMock()
 		new_doc.name = "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16"

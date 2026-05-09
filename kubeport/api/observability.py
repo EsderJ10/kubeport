@@ -183,11 +183,7 @@ def _get_release_scope(release_docname: str) -> dict[str, Any]:
 
 
 def _select_pod_name(pods: list[dict[str, Any]], pod_name: str | None) -> str:
-	available_names = [
-		str(pod.get("name") or "")
-		for pod in pods
-		if pod.get("name")
-	]
+	available_names = [str(pod.get("name") or "") for pod in pods if pod.get("name")]
 	if not available_names:
 		return ""
 
@@ -222,11 +218,7 @@ def _assert_release_resource_member(
 		resource_kind = str(resource.get("kind") or "")
 		resource_name = str(metadata.get("name") or "")
 		resource_namespace = str(metadata.get("namespace") or release_namespace)
-		if (
-			resource_kind == kind
-			and resource_name == name
-			and resource_namespace == namespace
-		):
+		if resource_kind == kind and resource_name == name and resource_namespace == namespace:
 			return
 
 	raise ValueError("Resource is not part of this Helm Release.")

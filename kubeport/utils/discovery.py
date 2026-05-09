@@ -15,7 +15,6 @@ from kubernetes.client import ApiClient
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
 
-
 FRAPPE_BENCH_SITES_PATH = "/home/frappe/frappe-bench/sites"
 SITE_DISCOVERY_EXCLUDED_DIRS = {"assets"}
 _POD_LIST_TIMEOUT_SECONDS = 15.0
@@ -75,13 +74,16 @@ def discover_release_sites(
 		pod=pod,
 	)
 
-	return [{
-		"site_name": site_name,
-		"bench_release": release.get("release_name", ""),
-		"namespace": release.get("namespace", "default"),
-		"source": "pod_exec",
-		"pod_name": pod.metadata.name if pod.metadata else "",
-	} for site_name in sites]
+	return [
+		{
+			"site_name": site_name,
+			"bench_release": release.get("release_name", ""),
+			"namespace": release.get("namespace", "default"),
+			"source": "pod_exec",
+			"pod_name": pod.metadata.name if pod.metadata else "",
+		}
+		for site_name in sites
+	]
 
 
 _DEFAULT_STORAGE_CLASS_ANNOTATIONS = (
@@ -170,9 +172,7 @@ def _select_site_discovery_pod(
 		release_name=release_name,
 	)
 	if not release_pods:
-		raise RuntimeError(
-			f"No pods found for Helm release '{release_name}' in namespace '{namespace}'."
-		)
+		raise RuntimeError(f"No pods found for Helm release '{release_name}' in namespace '{namespace}'.")
 
 	workload_pods = [pod for pod in release_pods if _is_frappe_workload_pod(pod)]
 	if not workload_pods:
@@ -215,9 +215,7 @@ def _list_release_pods(
 		namespace=namespace,
 		_request_timeout=_POD_LIST_TIMEOUT_SECONDS,
 	)
-	fallback_matches = [
-		pod for pod in namespace_pods.items if _pod_matches_release(pod, release_name)
-	]
+	fallback_matches = [pod for pod in namespace_pods.items if _pod_matches_release(pod, release_name)]
 	return _merge_unique_pods(release_pods, fallback_matches)
 
 
@@ -243,11 +241,13 @@ def _pod_matches_release(pod: client.V1Pod, release_name: str) -> bool:
 	labels = metadata.labels if metadata and metadata.labels else {}
 	name = str(metadata.name if metadata and metadata.name else "")
 
-	return any((
-		str(labels.get("app.kubernetes.io/instance") or "") == release_name,
-		str(labels.get("release") or "") == release_name,
-		name.startswith(f"{release_name}-"),
-	))
+	return any(
+		(
+			str(labels.get("app.kubernetes.io/instance") or "") == release_name,
+			str(labels.get("release") or "") == release_name,
+			name.startswith(f"{release_name}-"),
+		)
+	)
 
 
 def _is_frappe_workload_pod(pod: client.V1Pod) -> bool:

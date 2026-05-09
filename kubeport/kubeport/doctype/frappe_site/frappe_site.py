@@ -135,9 +135,7 @@ class FrappeSite(Document):
 		if self.status == "In Progress":
 			frappe.throw("Site creation is already in progress.")
 		if self.status == "Active" and not self.force_create:
-			frappe.throw(
-				"This site already exists. Enable Force Create to recreate it."
-			)
+			frappe.throw("This site already exists. Enable Force Create to recreate it.")
 
 		operation_token = secrets.token_hex(16)
 		self.db_set("status", "In Progress")
@@ -247,28 +245,28 @@ class FrappeSite(Document):
 	def backup_site(self) -> dict:
 		"""Queue a backup Job for this Active site."""
 		if self.status != "Active":
-			frappe.throw(
-				f"Backup is only available for Active sites (current status: '{self.status}')."
-			)
+			frappe.throw(f"Backup is only available for Active sites (current status: '{self.status}').")
 		if self._has_in_flight_backup():
 			frappe.throw("A backup or restore operation is already in progress for this site.")
 
 		release = frappe.get_doc("Helm Release", self.bench_release)
 		operation_token = secrets.token_hex(16)
-		backup_doc = frappe.get_doc({
-			"doctype": "Frappe Site Backup",
-			"frappe_site": self.name,
-			"site_name": self.site_name,
-			"backup_name": make_backup_name(self.site_name),
-			"source_bench_release": self.bench_release,
-			"source_release_name": release.release_name,
-			"cluster": self.cluster or release.cluster,
-			"namespace": self.namespace or release.namespace or "default",
-			"status": "Pending",
-			"storage_backend": "pvc",
-			"operation_token": operation_token,
-			"triggered_by": frappe.session.user,
-		})
+		backup_doc = frappe.get_doc(
+			{
+				"doctype": "Frappe Site Backup",
+				"frappe_site": self.name,
+				"site_name": self.site_name,
+				"backup_name": make_backup_name(self.site_name),
+				"source_bench_release": self.bench_release,
+				"source_release_name": release.release_name,
+				"cluster": self.cluster or release.cluster,
+				"namespace": self.namespace or release.namespace or "default",
+				"status": "Pending",
+				"storage_backend": "pvc",
+				"operation_token": operation_token,
+				"triggered_by": frappe.session.user,
+			}
+		)
 		backup_doc.insert(ignore_permissions=True)
 
 		self.db_set("status", "In Progress")
@@ -302,9 +300,7 @@ class FrappeSite(Document):
 				title="Destructive restore required",
 			)
 		if self.status != "Active":
-			frappe.throw(
-				f"Restore is only available for Active sites (current status: '{self.status}')."
-			)
+			frappe.throw(f"Restore is only available for Active sites (current status: '{self.status}').")
 		if self._has_in_flight_backup():
 			frappe.throw("A backup or restore operation is already in progress for this site.")
 
@@ -357,15 +353,17 @@ class FrappeSite(Document):
 			},
 		):
 			return True
-		return bool(frappe.db.exists(
-			"Frappe Site Backup",
-			{
-				"cluster": self.cluster,
-				"namespace": self.namespace or "default",
-				"site_name": self.site_name,
-				"status": status_filter,
-			},
-		))
+		return bool(
+			frappe.db.exists(
+				"Frappe Site Backup",
+				{
+					"cluster": self.cluster,
+					"namespace": self.namespace or "default",
+					"site_name": self.site_name,
+					"status": status_filter,
+				},
+			)
+		)
 
 	@frappe.whitelist()
 	def cancel_site(self, confirm_destructive: bool = False):

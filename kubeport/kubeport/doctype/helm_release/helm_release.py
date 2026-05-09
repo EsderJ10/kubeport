@@ -78,9 +78,7 @@ class HelmRelease(Document):
 			try:
 				parsed = yaml.safe_load(self.values)
 				if parsed is not None and not isinstance(parsed, dict):
-					frappe.throw(
-						"Values must be a YAML mapping (key-value pairs), not a list or scalar."
-					)
+					frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
 				_validate_storage_access_modes(parsed)
 				_validate_site_image_value_conflicts(parsed, _get_site_image_for_release(site_image))
 			except yaml.YAMLError as e:
@@ -97,10 +95,9 @@ class HelmRelease(Document):
 			site_image=site_image,
 			site_image_digest=_get_site_image_digest(site_image),
 		)
-		self.pending_changes = int(bool(
-			self.last_applied_spec_hash
-			and self.desired_spec_hash != self.last_applied_spec_hash
-		))
+		self.pending_changes = int(
+			bool(self.last_applied_spec_hash and self.desired_spec_hash != self.last_applied_spec_hash)
+		)
 
 	def autoname(self) -> None:
 		self.name = build_release_docname(
@@ -157,8 +154,7 @@ class HelmRelease(Document):
 		)
 
 		frappe.msgprint(
-			f"Deployment of '{self.release_name}' has been queued. "
-			"Status will update automatically.",
+			f"Deployment of '{self.release_name}' has been queued. Status will update automatically.",
 			alert=True,
 			indicator="blue",
 		)
@@ -170,9 +166,7 @@ class HelmRelease(Document):
 			force = force.lower() in ("1", "true", "yes")
 
 		if self.status not in ["Deployed", "Degraded", "Failed"]:
-			frappe.throw(
-				"Only deployed, degraded, or failed releases can be uninstalled."
-			)
+			frappe.throw("Only deployed, degraded, or failed releases can be uninstalled.")
 
 		blocking_sites = _get_uninstall_blocking_sites(self.name)
 		if blocking_sites:
@@ -183,10 +177,7 @@ class HelmRelease(Document):
 				)
 			expected_confirmation = f"{_FORCE_UNINSTALL_PREFIX}{self.release_name}"
 			if confirmation != expected_confirmation:
-				frappe.throw(
-					"Force uninstall requires typed confirmation "
-					f"'{expected_confirmation}'."
-				)
+				frappe.throw(f"Force uninstall requires typed confirmation '{expected_confirmation}'.")
 
 		operation_token = secrets.token_hex(16)
 		self.db_set("operation_token", operation_token)
@@ -357,11 +348,13 @@ def _validate_storage_access_modes(values: dict | None) -> None:
 
 
 def build_release_docname(cluster: str | None, namespace: str | None, release_name: str | None) -> str:
-	return "/".join([
-		str(cluster or "").strip(),
-		str(namespace or "default").strip() or "default",
-		str(release_name or "").strip(),
-	])
+	return "/".join(
+		[
+			str(cluster or "").strip(),
+			str(namespace or "default").strip() or "default",
+			str(release_name or "").strip(),
+		]
+	)
 
 
 def calculate_release_spec_hash(
@@ -410,11 +403,13 @@ def render_site_image_values(
 	_validate_site_image_value_conflicts(values, site_image_doc)
 	rendered = dict(values)
 	image_values = dict(rendered.get("image") or {})
-	image_values.update({
-		"repository": site_image_doc["image_repository"],
-		"tag": _image_tag_with_digest(site_image_doc["image_tag"], site_image_doc.get("image_digest")),
-		"pullPolicy": "IfNotPresent",
-	})
+	image_values.update(
+		{
+			"repository": site_image_doc["image_repository"],
+			"tag": _image_tag_with_digest(site_image_doc["image_tag"], site_image_doc.get("image_digest")),
+			"pullPolicy": "IfNotPresent",
+		}
+	)
 	rendered["image"] = image_values
 
 	if default_storage_class:
@@ -428,10 +423,7 @@ def render_site_image_values(
 			# also downgrade accessModes — but only when the user hasn't
 			# specified them, to preserve operator intent on real RWX
 			# storage backends.
-			if (
-				default_storage_class in _RWO_ONLY_STORAGE_CLASSES
-				and "accessModes" not in worker
-			):
+			if default_storage_class in _RWO_ONLY_STORAGE_CLASSES and "accessModes" not in worker:
 				worker["accessModes"] = ["ReadWriteOnce"]
 			persistence["worker"] = worker
 			rendered["persistence"] = persistence
@@ -502,9 +494,7 @@ def _validate_site_image_value_conflicts(
 	if manual_image is None:
 		return
 	if not isinstance(manual_image, dict):
-		frappe.throw(
-			"Invalid Helm values: image must be a mapping when a Kubeport Site Image is selected."
-		)
+		frappe.throw("Invalid Helm values: image must be a mapping when a Kubeport Site Image is selected.")
 
 	expected = {
 		"repository": site_image_doc.get("image_repository") or "",
@@ -546,11 +536,13 @@ def _get_uninstall_blocking_sites(release_docname: str) -> list[dict[str, str]]:
 		status = str(_site_value(site, "status") or "")
 		operation_job_name = str(_site_value(site, "operation_job_name") or "")
 		if status in _BLOCKING_SITE_STATUSES or (status == "Failed" and operation_job_name):
-			blocking_sites.append({
-				"name": str(_site_value(site, "name") or ""),
-				"site_name": str(_site_value(site, "site_name") or ""),
-				"status": status,
-			})
+			blocking_sites.append(
+				{
+					"name": str(_site_value(site, "name") or ""),
+					"site_name": str(_site_value(site, "site_name") or ""),
+					"status": status,
+				}
+			)
 
 	return blocking_sites
 
@@ -562,10 +554,7 @@ def _site_value(site: Any, fieldname: str) -> Any:
 
 
 def _format_blocking_sites(sites: list[dict[str, str]]) -> str:
-	return ", ".join(
-		f"{site.get('site_name') or site.get('name')} ({site.get('status')})"
-		for site in sites
-	)
+	return ", ".join(f"{site.get('site_name') or site.get('name')} ({site.get('status')})" for site in sites)
 
 
 def _iter_storage_configs(

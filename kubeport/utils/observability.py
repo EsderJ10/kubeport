@@ -25,16 +25,18 @@ LIST_TIMEOUT_SECONDS = 15.0
 
 _LOG_KINDS = frozenset({"Deployment", "StatefulSet", "DaemonSet", "Pod"})
 _ROLLOUT_KINDS = frozenset({"Deployment", "StatefulSet", "DaemonSet"})
-_EVENT_KINDS = frozenset({
-	"Deployment",
-	"StatefulSet",
-	"DaemonSet",
-	"Pod",
-	"Job",
-	"PersistentVolumeClaim",
-	"Service",
-	"Ingress",
-})
+_EVENT_KINDS = frozenset(
+	{
+		"Deployment",
+		"StatefulSet",
+		"DaemonSet",
+		"Pod",
+		"Job",
+		"PersistentVolumeClaim",
+		"Service",
+		"Ingress",
+	}
+)
 _K8S_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,252}$")
 
 
@@ -178,7 +180,9 @@ def get_rollout_history(
 	except ApiException as e:
 		if e.status == 404:
 			return []
-		raise RuntimeError(f"Kubernetes API error while reading rollout context: {e.status} {e.reason or ''}".strip())
+		raise RuntimeError(
+			f"Kubernetes API error while reading rollout context: {e.status} {e.reason or ''}".strip()
+		)
 	except Exception as e:
 		raise RuntimeError(f"Could not read rollout context for {kind}/{name}: {e}")
 
@@ -214,7 +218,8 @@ def _list_deployment_pods(
 		_request_timeout=LIST_TIMEOUT_SECONDS,
 	)
 	matched = [
-		pod for pod in getattr(pods, "items", []) or []
+		pod
+		for pod in getattr(pods, "items", []) or []
 		if _has_any_owner(pod, "ReplicaSet", replica_set_names)
 	]
 	return [_pod_to_dict(pod) for pod in matched]
@@ -240,10 +245,7 @@ def _list_controller_pods(
 		label_selector=selector or None,
 		_request_timeout=LIST_TIMEOUT_SECONDS,
 	)
-	matched = [
-		pod for pod in getattr(pods, "items", []) or []
-		if _has_owner(pod, kind, name)
-	]
+	matched = [pod for pod in getattr(pods, "items", []) or [] if _has_owner(pod, kind, name)]
 	return [_pod_to_dict(pod) for pod in matched]
 
 
@@ -269,15 +271,19 @@ def _deployment_rollout_rows(
 		if not _has_owner(replica_set, "Deployment", name):
 			continue
 		revision = _annotation(replica_set, "deployment.kubernetes.io/revision")
-		rows.append({
-			"kind": "ReplicaSet",
-			"name": _meta_name(replica_set),
-			"revision": revision,
-			"created_at": _timestamp(replica_set),
-			"change_cause": _annotation(replica_set, "kubernetes.io/change-cause"),
-			"current": bool(current_revision and revision == current_revision),
-			"image_summary": _image_summary_from_template(getattr(getattr(replica_set, "spec", None), "template", None)),
-		})
+		rows.append(
+			{
+				"kind": "ReplicaSet",
+				"name": _meta_name(replica_set),
+				"revision": revision,
+				"created_at": _timestamp(replica_set),
+				"change_cause": _annotation(replica_set, "kubernetes.io/change-cause"),
+				"current": bool(current_revision and revision == current_revision),
+				"image_summary": _image_summary_from_template(
+					getattr(getattr(replica_set, "spec", None), "template", None)
+				),
+			}
+		)
 	return rows
 
 
@@ -302,16 +308,18 @@ def _controller_revision_rows(
 		if not _has_owner(revision, kind, name):
 			continue
 		revision_name = _meta_name(revision)
-		rows.append({
-			"kind": "ControllerRevision",
-			"name": revision_name,
-			"revision": getattr(revision, "revision", None) or "",
-			"created_at": _timestamp(revision),
-			"change_cause": _annotation(revision, "kubernetes.io/change-cause"),
-			"current": bool(revision_name and revision_name == current_revision_name),
-			"update": bool(revision_name and revision_name == update_revision_name),
-			"image_summary": _image_summary_from_controller_revision(revision),
-		})
+		rows.append(
+			{
+				"kind": "ControllerRevision",
+				"name": revision_name,
+				"revision": getattr(revision, "revision", None) or "",
+				"created_at": _timestamp(revision),
+				"change_cause": _annotation(revision, "kubernetes.io/change-cause"),
+				"current": bool(revision_name and revision_name == current_revision_name),
+				"update": bool(revision_name and revision_name == update_revision_name),
+				"image_summary": _image_summary_from_controller_revision(revision),
+			}
+		)
 	return rows
 
 
@@ -367,10 +375,7 @@ def _pod_to_dict(pod: Any) -> dict[str, Any]:
 			if getattr(container, "name", None)
 		],
 		"restart_count": sum(int(getattr(row, "restart_count", 0) or 0) for row in container_statuses),
-		"container_statuses": [
-			_container_status_to_dict(row)
-			for row in container_statuses + init_statuses
-		],
+		"container_statuses": [_container_status_to_dict(row) for row in container_statuses + init_statuses],
 	}
 
 
@@ -405,7 +410,9 @@ def _event_v1_to_dict(event: Any) -> dict[str, Any]:
 		"message": str(getattr(event, "note", "") or ""),
 		"count": int(getattr(event, "deprecated_count", 0) or 0),
 		"first_seen": _stringify_time(getattr(event, "deprecated_first_timestamp", None)),
-		"last_seen": _stringify_time(getattr(event, "event_time", None) or getattr(event, "deprecated_last_timestamp", None)),
+		"last_seen": _stringify_time(
+			getattr(event, "event_time", None) or getattr(event, "deprecated_last_timestamp", None)
+		),
 		"source": str(getattr(event, "reporting_controller", "") or ""),
 	}
 

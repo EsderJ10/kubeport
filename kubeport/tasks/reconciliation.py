@@ -12,10 +12,11 @@ Covers four DocTypes:
 - **Frappe Site Backup** — polls backup/restore Jobs and finalizes backup rows
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import frappe
+from kubernetes import client
 
 from kubeport.utils.k8s_resources import check_resources_exist
 
@@ -33,7 +34,7 @@ SITE_PROBE_UNKNOWN = "unknown"
 
 # Maximum time the synchronous archive probe Job is allowed to take from
 # submission to readable logs.  busybox is small (~1MB) so cold-pull + start
-# is typically <10s; on a cluster with the image cached it is 2–3s.  This
+# is typically <10s; on a cluster with the image cached it is 2-3s.  This
 # bounds reconciliation tick latency added by gone-Job recovery.
 _BACKUP_PROBE_TIMEOUT_SECONDS = 15
 _BACKUP_PROBE_IMAGE = "busybox:1.36"
@@ -202,9 +203,7 @@ def _reconcile_stale_helm_operations():
 
 			fields: dict[str, object] = {
 				"status": next_status,
-				"helm_status_detail": _truncate_status_detail(
-					f"Recovered stale operation: {detail}"
-				),
+				"helm_status_detail": _truncate_status_detail(f"Recovered stale operation: {detail}"),
 				"operation_type": "",
 				"operation_started_at": None,
 			}
@@ -218,12 +217,14 @@ def _reconcile_stale_helm_operations():
 					site_image=getattr(release, "site_image", None),
 					site_image_digest=_get_site_image_digest_for_hash(getattr(release, "site_image", None)),
 				)
-				fields.update({
-					"last_applied_chart_version": release.chart_version or "",
-					"desired_spec_hash": spec_hash,
-					"last_applied_spec_hash": spec_hash,
-					"pending_changes": 0,
-				})
+				fields.update(
+					{
+						"last_applied_chart_version": release.chart_version or "",
+						"desired_spec_hash": spec_hash,
+						"last_applied_spec_hash": spec_hash,
+						"pending_changes": 0,
+					}
+				)
 
 			_set_stale_helm_operation_state(
 				release_docname=release.name,
@@ -300,9 +301,7 @@ def _reconcile_stale_uninstall(release) -> None:
 			expected_status=release.status,
 			fields={
 				"status": "Failed",
-				"helm_status_detail": _truncate_status_detail(
-					f"Stale uninstall reconciliation error: {e}"
-				),
+				"helm_status_detail": _truncate_status_detail(f"Stale uninstall reconciliation error: {e}"),
 				"operation_type": "",
 				"operation_started_at": None,
 			},
@@ -420,9 +419,14 @@ def _reconcile_frappe_sites():
 		"Frappe Site",
 		filters={"status": ("in", _SITE_IN_FLIGHT_STATUSES)},
 		fields=[
-			"name", "cluster", "namespace", "status",
-			"operation_job_name", "operation_job_token",
-			"bench_release", "site_name",
+			"name",
+			"cluster",
+			"namespace",
+			"status",
+			"operation_job_name",
+			"operation_job_token",
+			"bench_release",
+			"site_name",
 		],
 	)
 
@@ -473,9 +477,18 @@ def _reconcile_frappe_site_backups():
 		"Frappe Site Backup",
 		filters={"status": ("in", _BACKUP_IN_FLIGHT_STATUSES)},
 		fields=[
-			"name", "frappe_site", "cluster", "namespace", "status", "site_name",
-			"source_bench_release", "operation_job_name", "operation_job_token",
-			"operation_token", "storage_path", "size_bytes",
+			"name",
+			"frappe_site",
+			"cluster",
+			"namespace",
+			"status",
+			"site_name",
+			"source_bench_release",
+			"operation_job_name",
+			"operation_job_token",
+			"operation_token",
+			"storage_path",
+			"size_bytes",
 		],
 	)
 
@@ -671,12 +684,14 @@ def _apply_restore_probe(
 
 
 def _site_from_backup_for_probe(backup: "frappe._dict") -> Any:
-	return frappe._dict({
-		"name": backup.frappe_site or backup.name,
-		"bench_release": backup.source_bench_release,
-		"namespace": backup.namespace or "default",
-		"site_name": backup.site_name,
-	})
+	return frappe._dict(
+		{
+			"name": backup.frappe_site or backup.name,
+			"bench_release": backup.source_bench_release,
+			"namespace": backup.namespace or "default",
+			"site_name": backup.site_name,
+		}
+	)
 
 
 def _read_op_job(
@@ -739,8 +754,7 @@ def _reconcile_site_create(
 
 	if not _job_belongs_to_site(job, site):
 		frappe.logger("kubeport").warning(
-			"Skipping reconciliation for Frappe Site '%s': Job '%s' is "
-			"not labeled for this site.",
+			"Skipping reconciliation for Frappe Site '%s': Job '%s' is not labeled for this site.",
 			site.name,
 			site.operation_job_name,
 		)
@@ -800,8 +814,7 @@ def _reconcile_site_delete(
 
 	if not _job_belongs_to_site(job, site):
 		frappe.logger("kubeport").warning(
-			"Skipping reconciliation for Frappe Site '%s': drop-site Job '%s' "
-			"is not labeled for this site.",
+			"Skipping reconciliation for Frappe Site '%s': drop-site Job '%s' is not labeled for this site.",
 			site.name,
 			site.operation_job_name,
 		)
@@ -884,8 +897,7 @@ def _reconcile_site_migrate(
 
 	if not _job_belongs_to_site(job, site):
 		frappe.logger("kubeport").warning(
-			"Skipping reconciliation for Frappe Site '%s': migrate Job '%s' "
-			"is not labeled for this site.",
+			"Skipping reconciliation for Frappe Site '%s': migrate Job '%s' is not labeled for this site.",
 			site.name,
 			site.operation_job_name,
 		)
@@ -963,10 +975,14 @@ def _finalize_site_status(
 		)
 		return False
 
-	frappe.db.set_value("Frappe Site", site.name, {
-		"status": next_status,
-		"status_detail": detail,
-	})
+	frappe.db.set_value(
+		"Frappe Site",
+		site.name,
+		{
+			"status": next_status,
+			"status_detail": detail,
+		},
+	)
 	frappe.publish_realtime(
 		"frappe_site_status_update",
 		{"site_docname": site.name, "status": next_status},
@@ -1017,11 +1033,13 @@ def _finalize_backup_status(
 		parent_status = "Active" if next_status in ("Available", "Failed") else None
 		if parent_status:
 			_finalize_site_status(
-				frappe._dict({
-					"name": backup.frappe_site,
-					"operation_job_token": backup.operation_job_token,
-					"operation_job_name": backup.operation_job_name,
-				}),
+				frappe._dict(
+					{
+						"name": backup.frappe_site,
+						"operation_job_token": backup.operation_job_token,
+						"operation_job_name": backup.operation_job_name,
+					}
+				),
 				"In Progress",
 				parent_status,
 				"" if next_status == "Available" else detail,
@@ -1052,20 +1070,26 @@ def _finalize_restore_status(
 	if current.get("operation_token") != backup.operation_job_token:
 		return False
 
-	frappe.db.set_value("Frappe Site Backup", backup.name, {
-		"status": "Available",
-		"status_detail": detail,
-		"completed_at": frappe.utils.now_datetime(),
-		"operation_job_name": "",
-		"operation_job_token": "",
-	})
+	frappe.db.set_value(
+		"Frappe Site Backup",
+		backup.name,
+		{
+			"status": "Available",
+			"status_detail": detail,
+			"completed_at": frappe.utils.now_datetime(),
+			"operation_job_name": "",
+			"operation_job_token": "",
+		},
+	)
 	if backup.frappe_site:
 		_finalize_site_status(
-			frappe._dict({
-				"name": backup.frappe_site,
-				"operation_job_token": backup.operation_job_token,
-				"operation_job_name": backup.operation_job_name,
-			}),
+			frappe._dict(
+				{
+					"name": backup.frappe_site,
+					"operation_job_token": backup.operation_job_token,
+					"operation_job_name": backup.operation_job_name,
+				}
+			),
 			"Migrating",
 			site_status,
 			detail,
@@ -1259,11 +1283,7 @@ def _probe_backup_archive_on_pvc(
 	job_name = f"ks-probe-{slug}-{secrets.token_hex(3)}"
 	# Tiny shell: print the size sidecar if present, otherwise the literal
 	# string MISSING.  We never trust file contents beyond a small integer.
-	probe_cmd = (
-		f'if [ -f "{storage_path}.size" ]; then '
-		f'cat "{storage_path}.size"; '
-		f'else echo MISSING; fi'
-	)
+	probe_cmd = f'if [ -f "{storage_path}.size" ]; then cat "{storage_path}.size"; else echo MISSING; fi'
 	manifest: dict[str, Any] = {
 		"apiVersion": "batch/v1",
 		"kind": "Job",
@@ -1288,19 +1308,25 @@ def _probe_backup_archive_on_pvc(
 				},
 				"spec": {
 					"restartPolicy": "Never",
-					"containers": [{
-						"name": "probe",
-						"image": _BACKUP_PROBE_IMAGE,
-						"command": ["sh", "-c", probe_cmd],
-						"volumeMounts": [{
+					"containers": [
+						{
+							"name": "probe",
+							"image": _BACKUP_PROBE_IMAGE,
+							"command": ["sh", "-c", probe_cmd],
+							"volumeMounts": [
+								{
+									"name": "kubeport-backups",
+									"mountPath": BACKUP_MOUNT_PATH,
+								}
+							],
+						}
+					],
+					"volumes": [
+						{
 							"name": "kubeport-backups",
-							"mountPath": BACKUP_MOUNT_PATH,
-						}],
-					}],
-					"volumes": [{
-						"name": "kubeport-backups",
-						"persistentVolumeClaim": {"claimName": BACKUP_PVC_NAME},
-					}],
+							"persistentVolumeClaim": {"claimName": BACKUP_PVC_NAME},
+						}
+					],
 				},
 			},
 		},
@@ -1323,9 +1349,7 @@ def _probe_backup_archive_on_pvc(
 	job_terminal = False
 	while time.monotonic() < deadline:
 		try:
-			job = batch_v1.read_namespaced_job(
-				name=job_name, namespace=namespace, _request_timeout=5
-			)
+			job = batch_v1.read_namespaced_job(name=job_name, namespace=namespace, _request_timeout=5)
 			succeeded = (job.status.succeeded or 0) if job.status else 0
 			failed = (job.status.failed or 0) if job.status else 0
 			if succeeded > 0 or failed > 0:
@@ -1342,15 +1366,16 @@ def _probe_backup_archive_on_pvc(
 			label_selector=f"job-name={job_name}",
 			_request_timeout=5,
 		)
-		for pod in (pods.items or []):
+		for pod in pods.items or []:
 			pod_meta = getattr(pod, "metadata", None)
 			pod_name = pod_meta.name if pod_meta else None
 			if not pod_name:
 				continue
 			try:
-				logs = core_v1.read_namespaced_pod_log(
-					name=pod_name, namespace=namespace, _request_timeout=5
-				) or ""
+				logs = (
+					core_v1.read_namespaced_pod_log(name=pod_name, namespace=namespace, _request_timeout=5)
+					or ""
+				)
 				if logs:
 					break
 			except Exception:
@@ -1450,17 +1475,20 @@ def _read_job_logs(
 			label_selector=f"job-name={job_name}",
 			_request_timeout=15,
 		)
-		for pod in (pods.items or []):
+		for pod in pods.items or []:
 			pod_name = pod.metadata.name if pod.metadata else None
 			if not pod_name:
 				continue
 			try:
-				return core_v1.read_namespaced_pod_log(
-					name=pod_name,
-					namespace=namespace,
-					tail_lines=tail_lines,
-					_request_timeout=15,
-				) or ""
+				return (
+					core_v1.read_namespaced_pod_log(
+						name=pod_name,
+						namespace=namespace,
+						tail_lines=tail_lines,
+						_request_timeout=15,
+					)
+					or ""
+				)
 			except Exception:
 				continue
 	except Exception:
@@ -1552,8 +1580,8 @@ def _sweep_orphan_site_jobs():
 			)
 			continue
 
-		now = datetime.now(timezone.utc)
-		for job in (jobs.items or []):
+		now = datetime.now(UTC)
+		for job in jobs.items or []:
 			metadata = getattr(job, "metadata", None)
 			job_name = metadata.name if metadata and metadata.name else None
 			if not job_name or job_name in known_names:
@@ -1570,7 +1598,7 @@ def _sweep_orphan_site_jobs():
 			created = getattr(metadata, "creation_timestamp", None) if metadata else None
 			if created is not None:
 				if created.tzinfo is None:
-					created = created.replace(tzinfo=timezone.utc)
+					created = created.replace(tzinfo=UTC)
 				age_seconds = (now - created).total_seconds()
 				if age_seconds < _ORPHAN_SWEEP_GRACE_SECONDS:
 					continue
@@ -1669,7 +1697,7 @@ def _extract_job_failure_detail(
 			label_selector=f"job-name={job_name}",
 			_request_timeout=15,
 		)
-		for pod in (pods.items or []):
+		for pod in pods.items or []:
 			pod_name = pod.metadata.name if pod.metadata else None
 			if not pod_name:
 				continue
@@ -1708,7 +1736,7 @@ def _summarize_unrunnable_pod(pod: Any) -> str | None:
 	if not status:
 		return None
 
-	for cs in (status.container_statuses or []):
+	for cs in status.container_statuses or []:
 		terminated = getattr(getattr(cs, "state", None), "terminated", None)
 		if terminated:
 			exit_code = getattr(terminated, "exit_code", "unknown")
@@ -1734,7 +1762,7 @@ def _summarize_unrunnable_pod(pod: Any) -> str | None:
 				return f"{base}: {message}"
 			return base
 
-	for cond in (status.conditions or []):
+	for cond in status.conditions or []:
 		if getattr(cond, "status", "") != "False":
 			continue
 		cond_reason = getattr(cond, "reason", "") or ""
@@ -1809,10 +1837,14 @@ def _set_helm_reconciliation_state(
 		)
 		return False
 
-	frappe.db.set_value("Helm Release", release_docname, {
-		"status": next_status,
-		"helm_status_detail": truncated_detail,
-	})
+	frappe.db.set_value(
+		"Helm Release",
+		release_docname,
+		{
+			"status": next_status,
+			"helm_status_detail": truncated_detail,
+		},
+	)
 	frappe.publish_realtime(
 		"helm_release_status_update",
 		{"release_docname": release_docname, "status": next_status},

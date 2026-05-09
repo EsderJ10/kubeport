@@ -76,6 +76,16 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Install Yarn
+        run: npm install -g yarn@1.22.22
+
+      - name: Check runtime versions
+        run: |
+          node --version
+          which node
+          yarn --version
+          yarn node --version
+
       - name: Install system packages
         run: |
           sudo apt-get update
