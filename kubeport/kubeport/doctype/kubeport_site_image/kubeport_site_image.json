@@ -131,7 +131,7 @@
    "fieldtype": "Table",
    "label": "Apps",
    "options": "Kubeport Site Image App",
-   "read_only": 1
+   "read_only_depends_on": "eval:doc.origin === 'Kubeport'"
   }
  ],
  "grid_page_length": 50,
