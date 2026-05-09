@@ -71,3 +71,16 @@ def stale_operations_card_value() -> dict[str, int]:
 	for the Script Report drilldown that lands in Phase 2.
 	"""
 	return {"value": count_stale_operations()["total"]}
+
+
+@frappe.whitelist(allow_guest=True)
+def public_helm_release_count() -> dict[str, int]:
+	"""Return the total number of Helm Release records ever created.
+
+	This endpoint is intentionally guest-accessible so that the public
+	landing page can display a live deployment counter without requiring
+	an authenticated session.  Only a single aggregate integer is exposed;
+	no sensitive release data is returned.
+	"""
+	count: int = frappe.db.count("Helm Release")
+	return {"count": count}
