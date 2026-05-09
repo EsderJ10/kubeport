@@ -11,6 +11,7 @@ kubeport/
 ├── api/              # Whitelisted read-only endpoints
 │   ├── __init__.py   # Namespace lookup, kubeconfig parsing/extraction
 │   ├── discovery.py  # Live release and site discovery
+│   ├── site_images.py  # DB-backed Kubeport Site Image catalog
 │   └── site.py       # Frappe Site job log and backup listing support
 ├── utils/            # Stateless integration helpers
 │   ├── k8s_client.py # Scoped Kubernetes API client builder
@@ -19,6 +20,7 @@ kubeport/
 │   └── k8s_resources.py  # Manifest parsing, CRUD, resource allowlist
 ├── tasks/            # Background jobs (all cluster-mutating work)
 │   ├── helm_tasks.py         # Repo sync, release deploy/uninstall
+│   ├── site_image_tasks.py   # Shipped site-image catalog sync
 │   ├── service_bundle_tasks.py  # Manifest apply/delete
 │   ├── site_tasks.py         # Frappe site creation via K8s Jobs
 │   └── reconciliation.py     # Scheduled drift detection
@@ -28,6 +30,8 @@ kubeport/
 │   ├── helm_chart/
 │   ├── helm_chart_version/
 │   ├── helm_release/
+│   ├── kubeport_site_image/
+│   ├── kubeport_site_image_app/
 │   ├── service_bundle/
 │   ├── frappe_site/
 │   └── frappe_site_backup/
@@ -89,6 +93,8 @@ Stores desired state for a Helm-managed workload deployment.
 - Identity is scoped to `cluster/namespace/release_name`, matching real Helm release scope.
 - Validates YAML values content.
 - Rejects unsafe `local-path` StorageClass plus `ReadWriteMany` access mode combinations.
+- Can link to a `Kubeport Site Image` for official ERPNext/Frappe bench charts. The selected catalog image is desired state and is rendered into Helm values during deploy as `image.repository`, `image.tag`, and `image.pullPolicy=IfNotPresent`.
+- Blocks conflicting manual `values.image.*` overrides while a Site Image is selected so image intent stays unambiguous. The desired spec hash includes the selected image row and digest for pending-change detection.
 - Queues deploy (`helm upgrade --install`), rollback, and uninstall through background jobs.
 - Tracks release lifecycle state (`Draft`, `In Progress`, `Deployed`, `Degraded`, `Failed`, `Uninstalling`).
 - Tracks desired spec hash, last-applied spec hash, last-applied chart version, operation type, and operation start time. `pending_changes` is set when saved desired state differs from the last successful apply.
@@ -127,6 +133,16 @@ Stores metadata for backup archives created from a Frappe Site.
 - Archives live on namespace-local `kubeport-backups` PVCs and are not stored in MariaDB.
 - Backup records are standalone so recovery metadata can outlive the original `Frappe Site` row.
 
+### Kubeport Site Image
+
+Stores Frappe/ERPNext runtime images available for Helm Release selection — both Kubeport-owned defaults and user-registered images.
+
+- Catalog rows are product metadata in MariaDB. Curated rows are seeded from `kubeport/site_images/catalog.json`; user-registered rows are created in the UI.
+- Tracks repository, immutable tag, digest, Frappe major, ERPNext version, source revision, apps.json hash, status, default selection, and `origin` (`Kubeport` for curated rows, `User` for user-registered rows).
+- Includes display-only child rows for bundled apps.
+- Sync runs as a long-queue background job on install/migrate and daily scheduler. The sync only writes `origin=Kubeport` rows and skips repository:tag collisions with user rows (logged as a warning) so user data is never overwritten.
+- `is_default` is reserved for `origin=Kubeport` rows. Deletion is blocked when a Helm Release links to the row, and curated rows cannot be deleted (use `Deprecated`).
+
 ---
 
 ## API Layer
@@ -157,6 +173,12 @@ Frappe Site form support:
 - `list_site_backups(site_docname)` — returns backup rows for the site form, newest first
 - `get_site_backup_job_logs(backup_docname)` — fetches stdout from backup/restore Jobs
 - Returns empty logs gracefully when the Job pod is not yet available or has been cleaned up by TTL
+
+### `kubeport.api.site_images`
+
+Read-only site-image catalog endpoint:
+
+- `list_site_images(include_deprecated=False)` — returns active catalog rows and included app metadata for Helm Release form rendering
 
 ### `kubeport.api.observability`
 

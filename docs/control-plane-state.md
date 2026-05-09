@@ -28,9 +28,22 @@ The current milestone is **robustness** — making discovery, background executi
 - Optional `include_patterns` (comma-separated globs) to filter synced charts.
 - Cached default `values.yaml` per chart, cleared when the latest version changes.
 
+### Site Image Catalog
+
+- Kubeport ships a DB-backed `Kubeport Site Image` catalog seeded from `kubeport/site_images/catalog.json`.
+- Catalog rows are desired/product metadata, not observed cluster state: repository, immutable tag, digest, Frappe major, ERPNext version, apps hash, source revision, default/deprecated status, and display-only included apps.
+- Each row is tagged with an `origin` of `Kubeport` (curated, owned by the shipped catalog sync) or `User` (registered manually in the UI). Sync only writes curated rows and skips entries that collide with a user-registered repository:tag (logging a warning), so user-registered images are never overwritten.
+- Defaults (`is_default=1`) are reserved for `origin=Kubeport` rows; user rows can be selected on Helm Release but cannot be marked default.
+- Deletion is blocked when a Kubeport Site Image is linked to a Helm Release, and curated rows cannot be deleted at all (mark them `Deprecated` instead).
+- Catalog sync runs through a long-queue task on install/migrate and the daily scheduler.
+- Public GHCR images are the v1 default; no imagePullSecret management is exposed in the UI. Frappe v16 is the v1 supported major. Helm value injection assumes ERPNext-style charts (`image.repository`, `image.tag`, `image.pullPolicy`).
+
 ### Helm Release Management
 
 - Desired release state scoped to `cluster/namespace/release_name`.
+- Optional `site_image` links an ERPNext/Frappe bench release to a Kubeport-owned runtime image. Deploy workers render the selected catalog row into Helm values as `image.repository`, `image.tag`, and `image.pullPolicy=IfNotPresent`.
+- Manual YAML remains available, but conflicting `values.image.repository`, `values.image.tag`, or `values.image.pullPolicy` entries are rejected while `site_image` is set.
+- Pending-change hashes include the selected Site Image and digest, even though the current ERPNext Helm chart still deploys by immutable tag (`repository:tag`) rather than digest pinning.
 - Idempotent deploy via `helm upgrade --install` in background jobs.
 - Uninstall via `helm uninstall` in background jobs.
 - Release rows track desired spec hash vs. last-applied spec hash so operators can see saved pending changes before the next install/upgrade.
