@@ -241,17 +241,17 @@ class UnitTestHelmTasks(UnitTestCase):
 				"namespace": "tfg",
 				"cluster": "cluster-a",
 				"values": "workers:\n  replicaCount: 2\n",
-				"site_image": "ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+				"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			},
 			{
-				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
 				"image_digest": "sha256:aaa",
 				"status": "Active",
 			},
 			{"operation_token": "tok-1", "status": "In Progress"},
 			{
-				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
 				"image_digest": "sha256:aaa",
 				"status": "Active",
@@ -269,7 +269,7 @@ class UnitTestHelmTasks(UnitTestCase):
 		install_or_upgrade_release("cluster-a/tfg/bench-a", "tok-1")
 
 		values_yaml = mock_install_or_upgrade.call_args.kwargs["values_yaml"]
-		self.assertIn("repository: ghcr.io/losfavs/kubeport-site", values_yaml)
+		self.assertIn("repository: ghcr.io/esderj10/kubeport-site", values_yaml)
 		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
 		self.assertIn("pullPolicy: IfNotPresent", values_yaml)
 		self.assertIn("replicaCount: 2", values_yaml)

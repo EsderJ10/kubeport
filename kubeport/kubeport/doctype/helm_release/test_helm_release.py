@@ -47,7 +47,7 @@ class UnitTestHelmRelease(UnitTestCase):
 			namespace="erp",
 			release_name="bench-a",
 			values_yaml="workers:\n  replicaCount: 2\n",
-			site_image="ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			site_image_digest="sha256:aaa",
 		)
 		hash_b = calculate_release_spec_hash(
@@ -56,7 +56,7 @@ class UnitTestHelmRelease(UnitTestCase):
 			namespace="erp",
 			release_name="bench-a",
 			values_yaml="workers:\n  replicaCount: 2\n",
-			site_image="ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			site_image_digest="sha256:bbb",
 		)
 
@@ -65,7 +65,7 @@ class UnitTestHelmRelease(UnitTestCase):
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
 	def test_render_site_image_values_injects_catalog_image(self, mock_get_value):
 		mock_get_value.return_value = {
-			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
 			"image_digest": "sha256:aaa",
 			"status": "Active",
@@ -73,10 +73,10 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		values_yaml = render_site_image_values(
 			"workers:\n  replicaCount: 2\n",
-			"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 		)
 
-		self.assertIn("repository: ghcr.io/losfavs/kubeport-site", values_yaml)
+		self.assertIn("repository: ghcr.io/esderj10/kubeport-site", values_yaml)
 		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
 		self.assertIn("pullPolicy: IfNotPresent", values_yaml)
 		self.assertIn("replicaCount: 2", values_yaml)
@@ -89,7 +89,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_throw,
 	):
 		mock_get_value.return_value = {
-			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
 			"image_digest": "sha256:aaa",
 			"status": "Active",
@@ -99,7 +99,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		with self.assertRaisesRegex(RuntimeError, "image.tag"):
 			render_site_image_values(
 				"image:\n  tag: manual\n",
-				"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+				"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
@@ -108,7 +108,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value,
 	):
 		mock_get_value.return_value = {
-			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
 			"image_digest": "sha256:aaa",
 			"status": "Active",
@@ -116,7 +116,7 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		values_yaml = render_site_image_values(
 			None,
-			"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			default_storage_class="local-path",
 		)
 
@@ -133,7 +133,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value,
 	):
 		mock_get_value.return_value = {
-			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
 			"image_digest": "sha256:aaa",
 			"status": "Active",
@@ -141,7 +141,7 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		values_yaml = render_site_image_values(
 			None,
-			"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			default_storage_class="nfs-csi",
 		)
 
@@ -156,7 +156,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value,
 	):
 		mock_get_value.return_value = {
-			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
 			"image_digest": "sha256:aaa",
 			"status": "Active",
@@ -164,7 +164,7 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		values_yaml = render_site_image_values(
 			"persistence:\n  worker:\n    accessModes:\n      - ReadWriteMany\n",
-			"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			default_storage_class="local-path",
 		)
 
@@ -178,7 +178,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value,
 	):
 		mock_get_value.return_value = {
-			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
 			"image_digest": "sha256:aaa",
 			"status": "Active",
@@ -186,7 +186,7 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		values_yaml = render_site_image_values(
 			"persistence:\n  worker:\n    storageClass: fast-ssd\n",
-			"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			default_storage_class="local-path",
 		)
 
@@ -199,7 +199,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value,
 	):
 		mock_get_value.return_value = {
-			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
 			"image_digest": "sha256:aaa",
 			"status": "Active",
@@ -207,7 +207,7 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		values_yaml = render_site_image_values(
 			None,
-			"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			default_storage_class=None,
 		)
 
@@ -220,7 +220,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_value,
 	):
 		mock_get_value.return_value = {
-			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
 			"image_tag": "v1.0.0-frappe16",
 			"image_digest": "sha256:aaa",
 			"status": "Active",
@@ -228,7 +228,7 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		values_yaml = render_site_image_values(
 			"persistence:\n  worker:\n    size: 16Gi\n",
-			"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			default_storage_class="local-path",
 		)
 

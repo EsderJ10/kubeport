@@ -16,7 +16,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		path = _write_catalog({
 			"images": [{
 				"image_title": "Kubeport ERPNext",
-				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
 				"frappe_major": 16,
 				"is_default": True,
@@ -33,7 +33,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		finally:
 			path.unlink()
 
-		self.assertEqual(rows[0]["image_repository"], "ghcr.io/losfavs/kubeport-site")
+		self.assertEqual(rows[0]["image_repository"], "ghcr.io/esderj10/kubeport-site")
 		self.assertEqual(rows[0]["image_tag"], "v1.0.0-frappe16")
 		self.assertEqual(rows[0]["status"], "Active")
 		self.assertEqual(rows[0]["is_default"], 1)
@@ -44,11 +44,11 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		path = _write_catalog({
 			"images": [
 				{
-					"image_repository": "ghcr.io/losfavs/kubeport-site",
+					"image_repository": "ghcr.io/esderj10/kubeport-site",
 					"image_tag": "v1.0.0-frappe16",
 				},
 				{
-					"image_repository": "ghcr.io/losfavs/kubeport-site",
+					"image_repository": "ghcr.io/esderj10/kubeport-site",
 					"image_tag": "v1.0.0-frappe16",
 				},
 			],
@@ -65,7 +65,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 	def test_load_catalog_rejects_deprecated_default(self, mock_throw):
 		path = _write_catalog({
 			"images": [{
-				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
 				"status": "Deprecated",
 				"is_default": True,
@@ -86,7 +86,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		path = _write_catalog({
 			"images": [{
 				"image_title": "Kubeport ERPNext",
-				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
 				"image_digest": "sha256:aaa",
 				"frappe_major": 16,
@@ -102,7 +102,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		mock_exists.return_value = True
 		mock_get_value.return_value = 1
 		doc = MagicMock()
-		doc.name = "ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16"
+		doc.name = "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16"
 		mock_get_doc.return_value = doc
 
 		try:
@@ -110,7 +110,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		finally:
 			path.unlink()
 
-		self.assertEqual(docnames, ["ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16"])
+		self.assertEqual(docnames, ["ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16"])
 		self.assertEqual(doc.image_digest, "sha256:aaa")
 		self.assertEqual(doc.erpnext_version, "16.17.0")
 		self.assertEqual(doc.is_curated, 1)
@@ -127,7 +127,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		path = _write_catalog({
 			"images": [{
 				"image_title": "Kubeport ERPNext",
-				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
 				"frappe_major": 16,
 				"status": "Active",
@@ -153,7 +153,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		path = _write_catalog({
 			"images": [{
 				"image_title": "Kubeport ERPNext",
-				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_repository": "ghcr.io/esderj10/kubeport-site",
 				"image_tag": "v1.0.0-frappe16",
 				"frappe_major": 16,
 				"status": "Active",
@@ -163,7 +163,7 @@ class UnitTestSiteImageCatalog(UnitTestCase):
 		})
 		mock_exists.return_value = False
 		new_doc = MagicMock()
-		new_doc.name = "ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16"
+		new_doc.name = "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16"
 		mock_get_doc.return_value = new_doc
 
 		try:
