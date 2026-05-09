@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install ruff
+        run: pip install ruff==0.14.10
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: ruff check
+        run: ruff check .
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    # First-cycle bench-in-CI bring-up is fragile (Python 3.14 wheel availability,
+    # bench flag drift, service-container timing).  Allow this job to fail without
+    # blocking PRs until a green run is observed; remove this line afterwards to
+    # enforce gating.
+    continue-on-error: true
+
+    services:
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=root"
+          --health-interval=5s
+          --health-timeout=2s
+          --health-retries=10
+
+      redis-cache:
+        image: redis:7-alpine
+        ports:
+          - 13000:6379
+
+      redis-queue:
+        image: redis:7-alpine
+        ports:
+          - 11000:6379
+
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v4
+        with:
+          path: kubeport
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mariadb-client \
+            libmariadb-dev \
+            libffi-dev
+
+      - name: Install frappe-bench
+        run: |
+          python -m pip install --upgrade pip
+          pip install frappe-bench
+
+      - name: Init bench
+        run: |
+          bench init \
+            --skip-redis-config-generation \
+            --skip-assets \
+            --python "$(which python)" \
+            --frappe-branch version-16 \
+            frappe-bench
+          cd frappe-bench
+          bench set-config -g db_host 127.0.0.1
+          bench set-config -g db_port 3306
+          bench set-config -g redis_cache redis://127.0.0.1:13000
+          bench set-config -g redis_queue redis://127.0.0.1:11000
+          bench set-config -g redis_socketio redis://127.0.0.1:11000
+
+      - name: Install kubeport into bench
+        run: |
+          cd frappe-bench
+          bench get-app kubeport "$GITHUB_WORKSPACE/kubeport"
+
+      - name: Create test site
+        run: |
+          cd frappe-bench
+          bench new-site \
+            --db-root-password root \
+            --admin-password admin \
+            --no-mariadb-socket \
+            test_site
+          bench --site test_site install-app kubeport
+          bench --site test_site set-config developer_mode 1
+
+      - name: Run kubeport tests
+        run: |
+          cd frappe-bench
+          bench --site test_site run-tests --app kubeport

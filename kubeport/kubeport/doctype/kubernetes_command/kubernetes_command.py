@@ -128,5 +128,5 @@ class KubernetesCommand(Document):
 		self.db_set("status", "Running")
 		self.db_set("started_at", now_datetime())
 		_execute_command(self.name)
-		self.reload()
-		return {"queued": False, "docname": self.name, "status": self.status}
+		status = frappe.db.get_value("Kubernetes Command", self.name, "status")
+		return {"queued": False, "docname": self.name, "status": status}

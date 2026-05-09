@@ -6,6 +6,78 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-09 — Code-quality cleanup pass and CI test gating
+
+### Context
+
+A thorough review of the codebase was conducted to find bugs, inefficiencies, security concerns,
+and deviations from best practices. The architecture itself was found to be sound: 12 DocTypes for
+desired state only, all cluster mutations enqueued onto the long queue with operation/sync token
+re-checks, discovery is read-only, no shell=True, no SQL string-building, type hints enforced on
+whitelisted APIs. What the audit surfaced was a short list of tactical issues that were not
+worth a structural rewrite but were worth fixing in place. The publish-site-image workflow also
+did not gate tests on PR — formatting and unit-test regressions could merge unnoticed.
+
+### Decision
+
+- Replaced the single `self.reload()` violation in
+  `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py` with a targeted
+  `frappe.db.get_value()` lookup. This is the only `reload()` call in the repo and the project
+  invariant (CLAUDE.md, AGENTS.md) explicitly bans it in favour of `db_set` / `frappe.db.get_value`.
+- Extracted a `_cleanup_op_resources()` helper in `kubeport/tasks/site_tasks.py` and replaced three
+  identical job-and-secret cleanup blocks inside `_run_site_op` with calls to it. The orchestrator's
+  control flow is now linear: token-recheck → build → apply → record → on-rollback cleanup →
+  on-exception cleanup, with one named place where rollback semantics live.
+- Added `.github/workflows/ci.yml` with two jobs: a fast `lint` job (ruff format + check, pinned
+  to v0.14.10 to match `.pre-commit-config.yaml`) and a `test` job that boots a Frappe v16 bench
+  against MariaDB and Redis service containers, installs the kubeport app, and runs
+  `bench --site test_site run-tests --app kubeport`. Both gate on PR and push to main.
+
+### Rejected alternatives
+
+- **Wholesale rewrite into hexagonal/DDD/repository-pattern layering.** DocType controllers,
+  whitelisted methods, and `frappe.enqueue` *are* the framework's idioms — wrapping them in a
+  service-layer shell would fight Frappe and produce churn against the existing 8.7k LoC of
+  integration tests without improving anything demonstrable.
+- **Consolidating the duplicated `_APP_NAME_RE` between `frappe_site.py:29` and
+  `tasks/site_tasks.py:67`.** The comment at `tasks/site_tasks.py:64-67` explicitly documents the
+  duplication as deliberate defense-in-depth: a malformed value reaching the worker through a
+  direct DB write or schema import must still be rejected at the shell-interpolation boundary.
+  Sharing a constant would not change the security property, but it works against the author's
+  stated "validate at every trust boundary" intent.
+- **Wrapping `kubernetes.client.exceptions.ApiException` in a custom `KubeportApiError`.** The
+  initial review punch list flagged this, but a closer audit found the codebase already does
+  layered exception handling correctly: `k8s_resources.py` uses narrow `ApiException` catches with
+  proper re-raise, and `observability.py`/`discovery.py`/`release_health.py` consistently extract
+  `.status` and `.reason` for useful messages before falling back to `RuntimeError`. The remaining
+  broad `except Exception` blocks in `tasks/` are correct — they are last-resort orchestrator
+  hooks where any unexpected failure must still trigger state cleanup. No actionable change.
+- **Replacing the Helm subprocess wrapper with a Python SDK.** The Python Helm SDK ecosystem
+  (PyHelm and forks) is unmaintained; `subprocess.run` with a list of args (no `shell=True`) is
+  the industry standard.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:130-131` — replaced
+  `self.reload(); return {... "status": self.status}` with
+  `status = frappe.db.get_value("Kubernetes Command", self.name, "status")` and returned that.
+- `kubeport/tasks/site_tasks.py` — added `_cleanup_op_resources()` adjacent to the existing
+  `_best_effort_delete_*` helpers, and substituted it for the three duplicated cleanup blocks
+  inside `_run_site_op` (the post-apply token-recheck rollback, the rejected-`record_job`
+  rollback, and the broad-`except` cleanup). Behaviour is unchanged — the third call site forwards
+  `job_name_for_cleanup if job_applied else None` so the helper still respects the
+  "only delete the job if it was actually applied" guard.
+- `.github/workflows/ci.yml` — `lint` job runs ruff against the repo root using a Python 3.14
+  runner; `test` job sets up MariaDB 10.6, Redis 7 (cache + queue), and a fresh Frappe v16 bench,
+  then exercises the full kubeport test suite. The test suite was previously runnable only inside
+  the project's dev container; the CI job reproduces that environment on stock GitHub-hosted
+  runners. The `test` job ships with `continue-on-error: true` for the first cycle — bench-in-CI
+  bring-up has known fragility points (Python 3.14 wheel coverage on Ubuntu, occasional `bench`
+  flag drift, service-container timing) that are easier to surface and fix from a real run than to
+  pre-empt. The flag is to be removed once a green run lands, restoring full PR gating.
+
+---
+
 ## 2026-05-09 — Automate curated site image catalog bumps on tag publish
 
 ### Context

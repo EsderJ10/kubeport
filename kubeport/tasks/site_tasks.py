@@ -729,9 +729,7 @@ def _run_site_op(
 			)
 
 		if not _site_operation_matches(site_docname, operation_token, config.expected_status):
-			_best_effort_delete_job(api_client, job_name, namespace)
-			if creds_secret_name:
-				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+			_cleanup_op_resources(api_client, namespace, job_name, creds_secret_name)
 			return
 
 		if record_job is None:
@@ -744,16 +742,16 @@ def _run_site_op(
 				docname=site_docname,
 			)
 		elif not record_job(doc, release, job_name, operation_token, namespace):
-			_best_effort_delete_job(api_client, job_name, namespace)
-			if creds_secret_name:
-				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+			_cleanup_op_resources(api_client, namespace, job_name, creds_secret_name)
 
 	except Exception as e:
 		if api_client is not None and namespace:
-			if job_applied and job_name_for_cleanup:
-				_best_effort_delete_job(api_client, job_name_for_cleanup, namespace)
-			if creds_secret_name:
-				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+			_cleanup_op_resources(
+				api_client,
+				namespace,
+				job_name_for_cleanup if job_applied else None,
+				creds_secret_name,
+			)
 
 		if not _site_operation_matches(site_docname, operation_token, config.expected_status):
 			return
@@ -1146,6 +1144,24 @@ def _best_effort_delete_job(
 			namespace,
 			e,
 		)
+
+
+def _cleanup_op_resources(
+	api_client: "client.ApiClient",
+	namespace: str,
+	job_name: str | None,
+	creds_secret_name: str | None,
+) -> None:
+	"""Best-effort rollback of resources created by a single ``_run_site_op`` attempt.
+
+	Called when the operation must be undone after the Job/Secret have been
+	applied but before the doc has committed to them — stale-token rollback,
+	rejected ``record_job`` callback, or unexpected failure mid-flight.
+	"""
+	if job_name:
+		_best_effort_delete_job(api_client, job_name, namespace)
+	if creds_secret_name:
+		_best_effort_delete_secret(api_client, creds_secret_name, namespace)
 
 
 # ---------------------------------------------------------------------------
