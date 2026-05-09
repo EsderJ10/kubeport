@@ -25,6 +25,10 @@ build-backend = "flit_core.buildapi"
 [tool.ruff]
 line-length = 110
 target-version = "py314"
+# patches/ holds frozen migration history.  Reformatting these would rewrite
+# code that has already run against production data and obscure the original
+# migration intent; ruff skips them.
+extend-exclude = ["kubeport/patches/"]
 
 [tool.ruff.lint]
 select = [
