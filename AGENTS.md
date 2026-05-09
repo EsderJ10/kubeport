@@ -80,6 +80,8 @@ cd apps/kubeport && pre-commit install
 | `Service Bundle` | Desired raw-manifest state | Validates against supported resource kind allowlist. Per-run operation tokens. Background apply/delete. |
 | `Frappe Site` | Desired Frappe site on a bench | Links to a Helm Release (the bench). Submits K8s Jobs for create/delete/migrate/backup/restore. Ground-truth reconciliation. |
 | `Frappe Site Backup` | Site backup archive metadata | Standalone metadata rows for PVC-backed backups. Archives live on namespace-local `kubeport-backups` PVCs and can outlive the source site row. |
+| `Kubeport Site Image` | Curated and user-registered Frappe runtime images | Repository must be a public GHCR coordinate (`ghcr.io/owner/image`); digest, when present, must be a `sha256:` reference. Curated active rows are required to record the pushed digest. `is_default` is reserved for curated active rows. Curated rows cannot be deleted (must be marked Deprecated); user-registered rows are deletable only when no `Helm Release` references them. Curated rows are seeded from `kubeport/site_images/catalog.json` by the daily sync. |
+| `Kubeport Site Image App` | Child of `Kubeport Site Image` | Records each Frappe/ERPNext/custom app baked into a Site Image with its source URL and ref. Edit-locked unless the parent is user-registered. |
 
 ### Scheduled Jobs
 
@@ -87,6 +89,7 @@ Declared in `hooks.py`:
 
 - `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_all_releases` (drift detection for Helm Releases, Service Bundles, and Frappe Sites)
 - Daily → `kubeport.tasks.helm_tasks.sync_all_repos` (chart catalog refresh)
+- Daily → `kubeport.tasks.site_image_tasks.sync_site_image_catalog` (re-imports `kubeport/site_images/catalog.json` into the `Kubeport Site Image` doctype, marking curated rows and reconciling drift against the shipped manifest)
 
 ---
 

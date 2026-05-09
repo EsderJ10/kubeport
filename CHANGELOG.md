@@ -6,6 +6,69 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-09 — Curated Site Image catalog and digest-pinned bench deploys
+
+### Context
+
+Helm Releases backing Frappe benches were rendered with arbitrary `frappe/erpnext` image references
+supplied by the operator. Nothing prevented an unreviewed image from landing on a cluster, and the
+release spec hash ignored the image identity entirely, so swapping the image tag in-place did not
+trigger a redeploy. Bench deploys also broke on clusters without a default StorageClass annotated:
+`helm upgrade` would fail deep inside the chart with an opaque "no PV found" error.
+
+### Decision
+
+- Introduced a `Kubeport Site Image` doctype (with child `Kubeport Site Image App`) that records a
+  curated GHCR-published image, its pinned `sha256:` digest, and the apps baked into it.
+- Shipped a JSON catalog at `kubeport/site_images/catalog.json` and a daily sync task that seeds
+  the doctype from the manifest, marking curated rows. Curated rows are deletable only by being
+  marked Deprecated; user-registered rows live alongside curated ones and stay deletable while
+  unreferenced.
+- Validated the GHCR coordinates and digest at doctype save time so unreviewable image refs cannot
+  enter the desired-state record.
+- Folded the resolved image digest into the Helm Release spec hash so digest changes (curated
+  republishes, user-registered pin updates) trigger a redeploy on the next reconciliation pass.
+- Auto-injected the cluster's default StorageClass and a compatible access-mode list into the
+  rendered Helm values when a Site Image is selected, so single-node and `local-path` clusters
+  deploy without operator intervention. The deploy is aborted up front with an actionable message
+  when no default class is annotated and the operator did not supply one in values.
+- Added a GitHub Actions workflow that builds the Kubeport-owned `frappe/erpnext/kubeport`
+  composite image and publishes it to GHCR, with provenance attestation and digest verification.
+
+### Rejected alternatives
+
+- **Pulling unpinned tags at deploy time.** Loses reproducibility — the same release row would
+  resolve to different image content over time, and rollbacks become impossible.
+- **Building images inside Frappe at request time.** Would pull a Docker daemon into the
+  control-plane footprint and violate the async-first/desired-state-vs-observed-state invariants.
+  Image build belongs in CI.
+- **Catalog rows in MariaDB only, no JSON source.** No review trail, no way for contributors to
+  propose a curated image via PR, and no way to bootstrap a fresh install.
+- **Forcing operators to specify `persistence.worker.storageClass` manually.** Bench deploys are
+  the most common workflow; making the obvious cluster-default case ergonomic is worth the small
+  amount of value-injection logic. Manual overrides still work because the auto-injection only
+  fires when the operator did not set the key.
+
+### Implementation details
+
+- Doctype + child controllers: `kubeport/kubeport/doctype/kubeport_site_image/` and
+  `kubeport/kubeport/doctype/kubeport_site_image_app/`.
+- Catalog manifest and loader: `kubeport/site_images/catalog.json`,
+  `kubeport/site_images/catalog.py`.
+- Daily sync task: `kubeport.tasks.site_image_tasks.sync_site_image_catalog` (registered in
+  `hooks.py`).
+- Spec hash + StorageClass injection: `kubeport/tasks/helm_tasks.py`
+  (`_get_site_image_digest_for_hash`, `_image_tag_with_digest`, `_resolve_default_storage_class`,
+  `_user_values_have_worker_storage_class`).
+- StorageClass discovery helper: `kubeport.utils.discovery.discover_default_storage_class`.
+- Read-only API for Site Image lookup: `kubeport/api/site_images.py`.
+- Publish workflow: `.github/workflows/publish-site-image.yml` (push on `main` and `v*` tags).
+- Tests: `kubeport/tests/test_site_image_catalog.py`,
+  `kubeport/kubeport/doctype/kubeport_site_image/test_kubeport_site_image.py`, plus extensions to
+  `kubeport/tests/test_helm_tasks.py` and `kubeport/tests/test_reconciliation.py`.
+
+---
+
 ## 2026-05-08 — Helm Release observability drilldown
 
 ### Context
