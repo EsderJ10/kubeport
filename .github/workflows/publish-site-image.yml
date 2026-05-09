@@ -1,0 +1,120 @@
+name: Publish Kubeport Site Image
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/publish-site-image.yml"
+      - "images/site/**"
+      - "kubeport/**"
+      - "pyproject.toml"
+      - "license.txt"
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - ".github/workflows/publish-site-image.yml"
+      - "images/site/**"
+      - "kubeport/**"
+      - "pyproject.toml"
+      - "license.txt"
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/kubeport-site
+  FRAPPE_BRANCH: version-16
+  FRAPPE_DOCKER_REF: d24093469de24cb889d6db31c481ef49c02e4a26
+
+permissions:
+  attestations: write
+  artifact-metadata: write
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  build:
+    name: Build site image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Kubeport
+        uses: actions/checkout@v4
+        with:
+          path: kubeport
+
+      - name: Checkout Frappe Docker
+        uses: actions/checkout@v4
+        with:
+          repository: frappe/frappe_docker
+          ref: ${{ env.FRAPPE_DOCKER_REF }}
+          path: frappe_docker
+
+      - name: Copy app manifest
+        run: cp kubeport/images/site/apps.json frappe_docker/apps.json
+
+      - name: Normalize image name
+        run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kubeport-site" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}-frappe16
+            type=semver,pattern={{version}}
+            type=ref,event=branch,prefix=edge-
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=Kubeport Site
+            org.opencontainers.image.description=Kubeport-owned Frappe/ERPNext runtime image
+            org.opencontainers.image.vendor=Los Favs
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and publish
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: frappe_docker
+          file: frappe_docker/images/layered/Containerfile
+          push: ${{ github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref_protected) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=${{ env.FRAPPE_BRANCH }}
+          secret-files: |
+            apps_json=frappe_docker/apps.json
+          sbom: true
+          provenance: mode=max
+
+      - name: Verify pushed digest
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref_protected) && steps.build.outputs.digest != ''
+        run: |
+          docker buildx imagetools inspect "${IMAGE_NAME}@${{ steps.build.outputs.digest }}"
+          docker run --rm "${IMAGE_NAME}@${{ steps.build.outputs.digest }}" bash -lc \
+            'test -d /home/frappe/frappe-bench/apps/frappe &&
+             test -d /home/frappe/frappe-bench/apps/erpnext &&
+             test -d /home/frappe/frappe-bench/apps/kubeport'
+
+      - name: Attest image
+        if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref_protected) && steps.build.outputs.digest != ''
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

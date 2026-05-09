@@ -86,7 +86,7 @@ app_license = "mit"
 # ------------
 
 # before_install = "kubeport.install.before_install"
-# after_install = "kubeport.install.after_install"
+after_install = "kubeport.tasks.site_image_tasks.enqueue_sync_site_image_catalog"
 
 # Uninstallation
 # ------------
@@ -151,9 +151,12 @@ scheduler_events = {
 		],
 	},
 	"daily": [
-		"kubeport.tasks.helm_tasks.sync_all_repos"
+		"kubeport.tasks.helm_tasks.sync_all_repos",
+		"kubeport.tasks.site_image_tasks.enqueue_sync_site_image_catalog",
 	],
 }
+
+after_migrate = "kubeport.tasks.site_image_tasks.enqueue_sync_site_image_catalog"
 
 # Testing
 # -------

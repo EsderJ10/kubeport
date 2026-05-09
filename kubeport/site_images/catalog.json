@@ -1,0 +1,34 @@
+{
+  "images": [
+    {
+      "image_title": "Kubeport ERPNext v16",
+      "image_repository": "ghcr.io/esderj10/kubeport-site",
+      "image_tag": "0.0.1-frappe16",
+      "image_digest": "sha256:2720aae2fb21598be8dbaa3d8020028966273690a47d70a25341ef046998fad5",
+      "frappe_major": 16,
+      "erpnext_version": "16",
+      "apps_json_hash": "sha256:5820a3b5084fe5ef2e3baa761b7a5553fae7540d15c81c0f2fedc3b5547194fc",
+      "source_revision": "81748f54c1ca9d3075cfc798b9d2959694b359c2",
+      "status": "Active",
+      "is_default": true,
+      "description": "Default public Kubeport-owned Frappe/ERPNext runtime image for v16 benches.",
+      "apps": [
+        {
+          "app_name": "frappe",
+          "source_url": "https://github.com/frappe/frappe",
+          "ref": "version-16"
+        },
+        {
+          "app_name": "erpnext",
+          "source_url": "https://github.com/frappe/erpnext",
+          "ref": "version-16"
+        },
+        {
+          "app_name": "kubeport",
+          "source_url": "https://github.com/EsderJ10/kubeport",
+          "ref": "main"
+        }
+      ]
+    }
+  ]
+}

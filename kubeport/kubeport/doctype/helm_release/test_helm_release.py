@@ -10,6 +10,7 @@ from kubeport.kubeport.doctype.helm_release.helm_release import (
 	build_release_docname,
 	calculate_release_spec_hash,
 	_iter_storage_configs,
+	render_site_image_values,
 	_validate_storage_access_modes,
 )
 
@@ -38,6 +39,221 @@ class UnitTestHelmRelease(UnitTestCase):
 		)
 
 		self.assertEqual(hash_a, hash_b)
+
+	def test_calculate_release_spec_hash_changes_when_site_image_digest_changes(self):
+		hash_a = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 2\n",
+			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			site_image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		)
+		hash_b = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 2\n",
+			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			site_image_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		)
+
+		self.assertNotEqual(hash_a, hash_b)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_injects_catalog_image(self, mock_get_value):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			"workers:\n  replicaCount: 2\n",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+		)
+
+		self.assertIn("repository: ghcr.io/esderj10/kubeport-site", values_yaml)
+		self.assertIn(
+			"tag: v1.0.0-frappe16@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			values_yaml,
+		)
+		self.assertIn("pullPolicy: IfNotPresent", values_yaml)
+		self.assertIn("replicaCount: 2", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_keeps_plain_tag_when_digest_missing(self, mock_get_value):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			"",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+		)
+
+		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
+		self.assertNotIn("@sha256:", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_rejects_conflicting_manual_image_values(
+		self,
+		mock_get_value,
+		mock_throw,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+		mock_throw.side_effect = RuntimeError("selected Kubeport Site Image controls image.tag")
+
+		with self.assertRaisesRegex(RuntimeError, "image.tag"):
+			render_site_image_values(
+				"image:\n  tag: manual\n",
+				"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_injects_default_storage_class_when_missing(
+		self,
+		mock_get_value,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			None,
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			default_storage_class="local-path",
+		)
+
+		self.assertIn("persistence:", values_yaml)
+		self.assertIn("worker:", values_yaml)
+		self.assertIn("storageClass: local-path", values_yaml)
+		# local-path is RWO-only; injection must downgrade the chart's
+		# RWX default so the PVC can actually schedule on k3s/local-path.
+		self.assertIn("- ReadWriteOnce", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_keeps_rwx_default_for_non_local_path_class(
+		self,
+		mock_get_value,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			None,
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			default_storage_class="nfs-csi",
+		)
+
+		self.assertIn("storageClass: nfs-csi", values_yaml)
+		# Non-local-path classes are assumed RWX-capable; let the chart
+		# default ReadWriteMany flow through.
+		self.assertNotIn("accessModes", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_keeps_user_supplied_access_modes(
+		self,
+		mock_get_value,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			"persistence:\n  worker:\n    accessModes:\n      - ReadWriteMany\n",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			default_storage_class="local-path",
+		)
+
+		self.assertIn("storageClass: local-path", values_yaml)
+		self.assertIn("- ReadWriteMany", values_yaml)
+		self.assertNotIn("ReadWriteOnce", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_keeps_user_supplied_storage_class(
+		self,
+		mock_get_value,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			"persistence:\n  worker:\n    storageClass: fast-ssd\n",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			default_storage_class="local-path",
+		)
+
+		self.assertIn("storageClass: fast-ssd", values_yaml)
+		self.assertNotIn("local-path", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_omits_storage_class_when_no_default(
+		self,
+		mock_get_value,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			None,
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			default_storage_class=None,
+		)
+
+		self.assertNotIn("storageClass", values_yaml)
+		self.assertNotIn("persistence:", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_preserves_other_persistence_keys(
+		self,
+		mock_get_value,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			"persistence:\n  worker:\n    size: 16Gi\n",
+			"ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			default_storage_class="local-path",
+		)
+
+		self.assertIn("size: 16Gi", values_yaml)
+		self.assertIn("storageClass: local-path", values_yaml)
 
 	def test_iter_storage_configs_finds_nested_persistence_blocks(self):
 		configs = _iter_storage_configs({

@@ -10,7 +10,8 @@ Kubeport bridges the Frappe framework with Kubernetes by following a clear archi
 
 - **Cluster Connectivity** — connect to Kubernetes clusters via kubeconfig, bearer token, or in-cluster service account. Browser-side kubeconfig import with automatic endpoint normalization for containerized development.
 - **Helm Chart Catalog** — register Helm repositories and sync chart metadata (versions, default values) into the Frappe database with daily background refresh.
-- **Helm Release Management** — declare desired Helm releases (chart, version, namespace, values), deploy/upgrade/rollback/uninstall them through background jobs, inspect live readiness/logs/events/rollout context, track pending desired changes, and recover stale operations through reconciliation.
+- **Site Image Catalog** — select public GHCR Frappe/ERPNext runtime images from a DB-backed catalog when deploying supported bench charts. Kubeport records image metadata and deploys digest-pinned references when a digest is available; image builds and pushes stay in CI, not in the Frappe web worker. Users can also register their own pre-built images alongside curated rows. v1 supports public GHCR images on Frappe v16 and ERPNext-style chart values.
+- **Helm Release Management** — declare desired Helm releases (chart, version, namespace, values, optional site image), deploy/upgrade/rollback/uninstall them through background jobs, inspect live readiness/logs/events/rollout context, track pending desired changes, and recover stale operations through reconciliation.
 - **Raw Manifest Deployment** — define raw Kubernetes manifests in Service Bundles and apply or delete them via server-side apply, with a fixed allowlist of supported resource kinds.
 - **Frappe Site Lifecycle** — create, drop, migrate, back up, and restore Frappe sites on running ERPNext benches by submitting Kubernetes Jobs that run `bench new-site`, `bench drop-site`, `bench migrate`, `bench backup`, or `bench restore`. Status is verified through ground-truth bench probes where needed, and the `Frappe Site` row is auto-removed once the bench confirms a successful drop.
 - **Live Discovery** — cluster-scoped, read-only discovery of Helm releases and Frappe sites. Discovery results are rendered client-side and never persisted unless an operator explicitly tracks a discovered Helm release.
@@ -56,7 +57,7 @@ Kubeport bridges the Frappe framework with Kubernetes by following a clear archi
 
 ```bash
 cd $PATH_TO_YOUR_BENCH
-bench get-app $URL_OF_THIS_REPO --branch dev/jose
+bench get-app $URL_OF_THIS_REPO --branch main
 bench install-app kubeport
 ```
 

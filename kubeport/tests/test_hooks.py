@@ -17,5 +17,8 @@ class UnitTestHooks(UnitTestCase):
 		)
 		self.assertEqual(
 			hooks.scheduler_events["daily"],
-			["kubeport.tasks.helm_tasks.sync_all_repos"],
+			[
+				"kubeport.tasks.helm_tasks.sync_all_repos",
+				"kubeport.tasks.site_image_tasks.enqueue_sync_site_image_catalog",
+			],
 		)
