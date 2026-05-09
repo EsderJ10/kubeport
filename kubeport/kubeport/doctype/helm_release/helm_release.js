@@ -1,4 +1,14 @@
 frappe.ui.form.on('Helm Release', {
+    setup: function(frm) {
+        frm.set_query('site_image', () => {
+            return {
+                filters: {
+                    status: 'Active'
+                }
+            };
+        });
+    },
+
     refresh: function(frm) {
         kubeport_close_observability_panel(frm);
         const status_map = {
@@ -13,6 +23,7 @@ frappe.ui.form.on('Helm Release', {
             frm.page.set_indicator(frm.doc.status, status_map[frm.doc.status] || 'grey');
         }
         kubeport_configure_release_actions(frm);
+        kubeport_configure_site_image_selector(frm);
 
         if (!frm.__helm_release_status_listener_bound) {
             frm.__helm_release_status_listener_bound = true;
@@ -53,8 +64,16 @@ frappe.ui.form.on('Helm Release', {
                         }
                     );
                 }
+                kubeport_configure_site_image_selector(frm, chart_doc);
             });
+        } else {
+            frm.set_value('site_image', '');
+            kubeport_configure_site_image_selector(frm);
         }
+    },
+
+    site_image: function(frm) {
+        kubeport_render_site_image_detail(frm);
     },
 
     cluster: function(frm) {
@@ -126,6 +145,102 @@ frappe.ui.form.on('Helm Release', {
         kubeport_show_release_history(frm);
     }
 });
+
+function kubeport_configure_site_image_selector(frm, chart_doc) {
+    const apply_state = (chart) => {
+        const is_site_chart = kubeport_is_site_chart(chart);
+        frm.toggle_display('site_image', is_site_chart);
+        frm.toggle_display('site_image_detail', is_site_chart && Boolean(frm.doc.site_image));
+        if (!is_site_chart && frm.doc.site_image) {
+            frm.set_value('site_image', '');
+        }
+        kubeport_render_site_image_detail(frm);
+    };
+
+    if (chart_doc) {
+        apply_state(chart_doc);
+        return;
+    }
+
+    if (!frm.doc.chart) {
+        apply_state(null);
+        return;
+    }
+
+    frappe.db.get_doc('Helm Chart', frm.doc.chart).then(apply_state, () => apply_state(null));
+}
+
+function kubeport_is_site_chart(chart_doc) {
+    if (!chart_doc) return false;
+    const name = String(chart_doc.chart_name || chart_doc.name || '').toLowerCase();
+    return name.includes('erpnext') || name.includes('frappe');
+}
+
+function kubeport_render_site_image_detail(frm) {
+    const field = frm.fields_dict.site_image_detail;
+    if (!field || !field.$wrapper) return;
+
+    if (!frm.doc.site_image) {
+        field.$wrapper.html('');
+        return;
+    }
+
+    field.$wrapper.html(`<div class="text-muted small">${__('Loading image catalog details...')}</div>`);
+    frappe.xcall('kubeport.api.site_images.list_site_images', {
+        include_deprecated: 1
+    }).then((rows) => {
+        const row = (rows || []).find((entry) => entry.name === frm.doc.site_image);
+        if (!row) {
+            field.$wrapper.html(
+                `<div class="text-muted small">${__('Selected image was not found in the catalog.')}</div>`
+            );
+            return;
+        }
+        field.$wrapper.html(kubeport_site_image_detail_html(row));
+    }, () => {
+        field.$wrapper.html(
+            `<div class="text-muted small">${__('Could not load image catalog details.')}</div>`
+        );
+    });
+}
+
+function kubeport_site_image_detail_html(row) {
+    const apps = (row.apps || []).map((app) => {
+        const label = `${app.app_name || ''}${app.ref ? ':' + app.ref : ''}`;
+        return `<code>${frappe.utils.escape_html(label)}</code>`;
+    }).join(' ');
+    const digest = row.image_digest || __('not recorded');
+    const status_color = row.status === 'Deprecated' ? 'orange' : 'green';
+    const origin = row.origin === 'Kubeport' ? 'Curated' : 'Custom';
+    const origin_color = row.origin === 'Kubeport' ? 'blue' : 'gray';
+    return `
+        <div style="margin-top: 8px; padding: 8px;
+                    border: 1px solid var(--border-color); border-radius: 4px;">
+            <div style="display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+                <strong>${frappe.utils.escape_html(row.image_title || row.name)}</strong>
+                <div style="display: flex; gap: 6px;">
+                    <span class="indicator-pill ${origin_color}">
+                        ${__(origin)}
+                    </span>
+                    <span class="indicator-pill ${status_color}">
+                        ${frappe.utils.escape_html(row.status || '')}
+                    </span>
+                </div>
+            </div>
+            <div class="small" style="margin-top: 6px; word-break: break-all;">
+                <code>${frappe.utils.escape_html(row.image_repository || '')}:${frappe.utils.escape_html(row.image_tag || '')}</code>
+            </div>
+            <div class="text-muted small" style="margin-top: 4px; word-break: break-all;">
+                ${__('Digest')}: ${frappe.utils.escape_html(digest)}
+            </div>
+            <div class="text-muted small" style="margin-top: 4px;">
+                ${__('Frappe')}: ${frappe.utils.escape_html(String(row.frappe_major || ''))}
+                ${row.erpnext_version ? ` &middot; ${__('ERPNext')}: ${frappe.utils.escape_html(row.erpnext_version)}` : ''}
+            </div>
+            ${apps ? `<div class="small" style="margin-top: 6px;">${apps}</div>` : ''}
+        </div>
+    `;
+}
 
 function kubeport_configure_release_actions(frm) {
     if (!frm.doc || frm.is_new()) return;

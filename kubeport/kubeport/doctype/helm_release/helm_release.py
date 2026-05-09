@@ -49,12 +49,15 @@ class HelmRelease(Document):
 		operation_type: DF.Literal["", "Deploy", "Upgrade", "Rollback", "Uninstall"]
 		pending_changes: DF.Check
 		release_name: DF.Data
+		site_image: DF.Link | None
+		site_image_detail: DF.HTML | None
 		status: DF.Literal["Draft", "In Progress", "Deployed", "Degraded", "Uninstalling", "Failed"]
 		values: DF.Code | None
 	# end: auto-generated types
 
 	def validate(self) -> None:
 		"""Validate YAML syntax in the values field."""
+		site_image = getattr(self, "site_image", None)
 		if not self.is_new() and self.name != build_release_docname(
 			self.cluster,
 			self.namespace,
@@ -73,8 +76,11 @@ class HelmRelease(Document):
 						"Values must be a YAML mapping (key-value pairs), not a list or scalar."
 					)
 				_validate_storage_access_modes(parsed)
+				_validate_site_image_value_conflicts(parsed, _get_site_image_for_release(site_image))
 			except yaml.YAMLError as e:
 				frappe.throw(f"Invalid YAML in values: {e}")
+		elif site_image:
+			_get_site_image_for_release(site_image)
 
 		self.desired_spec_hash = calculate_release_spec_hash(
 			chart=self.chart,
@@ -82,6 +88,8 @@ class HelmRelease(Document):
 			namespace=self.namespace,
 			release_name=self.release_name,
 			values_yaml=self.values,
+			site_image=site_image,
+			site_image_digest=_get_site_image_digest(site_image),
 		)
 		self.pending_changes = int(bool(
 			self.last_applied_spec_hash
@@ -356,6 +364,8 @@ def calculate_release_spec_hash(
 	namespace: str | None,
 	release_name: str | None,
 	values_yaml: str | None,
+	site_image: str | None = None,
+	site_image_digest: str | None = None,
 ) -> str:
 	"""Return a stable hash for the Helm desired-state fields Kubeport applies."""
 	payload = {
@@ -363,10 +373,34 @@ def calculate_release_spec_hash(
 		"chart_version": str(chart_version or "").strip(),
 		"namespace": str(namespace or "default").strip() or "default",
 		"release_name": str(release_name or "").strip(),
+		"site_image": str(site_image or "").strip(),
+		"site_image_digest": str(site_image_digest or "").strip(),
 		"values": _normalize_values_for_hash(values_yaml),
 	}
 	encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 	return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def render_site_image_values(values_yaml: str | None, site_image: str | None) -> str | None:
+	"""Return Helm values YAML with the selected catalog image applied."""
+	site_image_doc = _get_site_image_for_release(site_image)
+	if not site_image_doc:
+		return values_yaml
+
+	values = _normalize_values_for_hash(values_yaml)
+	if not isinstance(values, dict):
+		frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
+
+	_validate_site_image_value_conflicts(values, site_image_doc)
+	rendered = dict(values)
+	image_values = dict(rendered.get("image") or {})
+	image_values.update({
+		"repository": site_image_doc["image_repository"],
+		"tag": site_image_doc["image_tag"],
+		"pullPolicy": "IfNotPresent",
+	})
+	rendered["image"] = image_values
+	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
 
 
 def _normalize_values_for_hash(values_yaml: str | None) -> Any:
@@ -377,6 +411,62 @@ def _normalize_values_for_hash(values_yaml: str | None) -> Any:
 	if parsed is None:
 		return {}
 	return parsed
+
+
+def _get_site_image_digest(site_image: str | None) -> str:
+	site_image_doc = _get_site_image_for_release(site_image)
+	if not site_image_doc:
+		return ""
+	return str(site_image_doc.get("image_digest") or "")
+
+
+def _get_site_image_for_release(site_image: str | None) -> dict[str, str] | None:
+	if not site_image:
+		return None
+
+	row = frappe.db.get_value(
+		"Kubeport Site Image",
+		site_image,
+		["image_repository", "image_tag", "image_digest", "status"],
+		as_dict=True,
+	)
+	if not row:
+		frappe.throw(f"Kubeport Site Image '{site_image}' was not found.")
+
+	row = dict(row)
+	if row.get("status") == "Deprecated":
+		frappe.throw(f"Kubeport Site Image '{site_image}' is deprecated and cannot be deployed.")
+	return row
+
+
+def _validate_site_image_value_conflicts(
+	values: dict | None,
+	site_image_doc: dict[str, str] | None,
+) -> None:
+	if not values or not site_image_doc:
+		return
+
+	manual_image = values.get("image")
+	if manual_image is None:
+		return
+	if not isinstance(manual_image, dict):
+		frappe.throw(
+			"Invalid Helm values: image must be a mapping when a Kubeport Site Image is selected."
+		)
+
+	expected = {
+		"repository": site_image_doc.get("image_repository") or "",
+		"tag": site_image_doc.get("image_tag") or "",
+		"pullPolicy": "IfNotPresent",
+	}
+	for fieldname, selected_value in expected.items():
+		manual_value = manual_image.get(fieldname)
+		if manual_value in (None, "") or str(manual_value) == str(selected_value):
+			continue
+		frappe.throw(
+			"Invalid Helm values: selected Kubeport Site Image controls "
+			f"image.{fieldname}; remove the manual value '{manual_value}' or clear Site Image."
+		)
 
 
 def _get_uninstall_blocking_sites(release_docname: str) -> list[dict[str, str]]:

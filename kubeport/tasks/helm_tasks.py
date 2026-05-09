@@ -22,7 +22,10 @@ import secrets
 import frappe
 import yaml
 
-from kubeport.kubeport.doctype.helm_release.helm_release import calculate_release_spec_hash
+from kubeport.kubeport.doctype.helm_release.helm_release import (
+	calculate_release_spec_hash,
+	render_site_image_values,
+)
 from kubeport.utils import helm
 from kubeport.utils.release_health import ResourceHealth, classify_release_state
 
@@ -181,7 +184,7 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 	release = frappe.db.get_value(
 		"Helm Release",
 		release_name,
-		["release_name", "chart", "chart_version", "namespace", "cluster", "values"],
+		["release_name", "chart", "chart_version", "namespace", "cluster", "values", "site_image"],
 		as_dict=True,
 	)
 	if not release:
@@ -192,13 +195,14 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 	try:
 		chart_ref = chart_doc.get_chart_reference()
 		version = release["chart_version"] or chart_doc.latest_version
+		values_yaml = render_site_image_values(release.get("values"), release.get("site_image"))
 
 		result = helm.install_or_upgrade(
 			release_name=release["release_name"],
 			chart_ref=chart_ref,
 			namespace=release["namespace"] or "default",
 			cluster_name=release["cluster"],
-			values_yaml=release.get("values"),
+			values_yaml=values_yaml,
 			chart_version=version,
 		)
 
@@ -239,6 +243,7 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 				namespace=release["namespace"],
 				release_name=release["release_name"],
 				values_yaml=release.get("values"),
+				site_image=release.get("site_image"),
 			)
 			fields.update({
 				"last_applied_chart_version": version,

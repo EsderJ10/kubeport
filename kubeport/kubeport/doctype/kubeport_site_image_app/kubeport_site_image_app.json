@@ -1,0 +1,47 @@
+{
+ "actions": [],
+ "creation": "2026-05-08 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "app_name",
+  "source_url",
+  "ref"
+ ],
+ "fields": [
+  {
+   "columns": 3,
+   "fieldname": "app_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "App",
+   "reqd": 1
+  },
+  {
+   "columns": 6,
+   "fieldname": "source_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Source URL"
+  },
+  {
+   "columns": 3,
+   "fieldname": "ref",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Ref"
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-05-08 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Kubeport",
+ "name": "Kubeport Site Image App",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

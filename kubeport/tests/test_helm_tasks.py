@@ -223,6 +223,64 @@ class UnitTestHelmTasks(UnitTestCase):
 	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
 	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
 	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_install_or_upgrade_release_passes_site_image_values_to_helm(
+		self,
+		mock_get_value,
+		mock_get_doc,
+		mock_install_or_upgrade,
+		_mock_safe_walk,
+		mock_set_helm_release_fields,
+		_mock_publish_realtime,
+	):
+		mock_get_value.side_effect = [
+			{"operation_token": "tok-1", "status": "In Progress"},
+			{
+				"release_name": "bench-a",
+				"chart": "ERPNext",
+				"chart_version": "8.0.41",
+				"namespace": "tfg",
+				"cluster": "cluster-a",
+				"values": "workers:\n  replicaCount: 2\n",
+				"site_image": "ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			},
+			{
+				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_tag": "v1.0.0-frappe16",
+				"image_digest": "sha256:aaa",
+				"status": "Active",
+			},
+			{"operation_token": "tok-1", "status": "In Progress"},
+			{
+				"image_repository": "ghcr.io/losfavs/kubeport-site",
+				"image_tag": "v1.0.0-frappe16",
+				"image_digest": "sha256:aaa",
+				"status": "Active",
+			},
+		]
+		mock_get_doc.return_value = SimpleNamespace(
+			latest_version="8.0.41",
+			get_chart_reference=lambda: "repo/erpnext",
+		)
+		mock_install_or_upgrade.return_value = {
+			"version": 3,
+			"info": {"status": "deployed"},
+		}
+
+		install_or_upgrade_release("cluster-a/tfg/bench-a", "tok-1")
+
+		values_yaml = mock_install_or_upgrade.call_args.kwargs["values_yaml"]
+		self.assertIn("repository: ghcr.io/losfavs/kubeport-site", values_yaml)
+		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
+		self.assertIn("pullPolicy: IfNotPresent", values_yaml)
+		self.assertIn("replicaCount: 2", values_yaml)
+		mock_set_helm_release_fields.assert_called_once()
+
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks._safe_walk", return_value=([], None))
+	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
 	def test_install_or_upgrade_release_marks_non_deployed_runtime_state_as_failed(
 		self,
 		mock_get_value,

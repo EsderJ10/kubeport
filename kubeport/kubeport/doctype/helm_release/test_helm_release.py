@@ -10,6 +10,7 @@ from kubeport.kubeport.doctype.helm_release.helm_release import (
 	build_release_docname,
 	calculate_release_spec_hash,
 	_iter_storage_configs,
+	render_site_image_values,
 	_validate_storage_access_modes,
 )
 
@@ -38,6 +39,68 @@ class UnitTestHelmRelease(UnitTestCase):
 		)
 
 		self.assertEqual(hash_a, hash_b)
+
+	def test_calculate_release_spec_hash_changes_when_site_image_digest_changes(self):
+		hash_a = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 2\n",
+			site_image="ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			site_image_digest="sha256:aaa",
+		)
+		hash_b = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 2\n",
+			site_image="ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			site_image_digest="sha256:bbb",
+		)
+
+		self.assertNotEqual(hash_a, hash_b)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_injects_catalog_image(self, mock_get_value):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaa",
+			"status": "Active",
+		}
+
+		values_yaml = render_site_image_values(
+			"workers:\n  replicaCount: 2\n",
+			"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+		)
+
+		self.assertIn("repository: ghcr.io/losfavs/kubeport-site", values_yaml)
+		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
+		self.assertIn("pullPolicy: IfNotPresent", values_yaml)
+		self.assertIn("replicaCount: 2", values_yaml)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	def test_render_site_image_values_rejects_conflicting_manual_image_values(
+		self,
+		mock_get_value,
+		mock_throw,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/losfavs/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaa",
+			"status": "Active",
+		}
+		mock_throw.side_effect = RuntimeError("selected Kubeport Site Image controls image.tag")
+
+		with self.assertRaisesRegex(RuntimeError, "image.tag"):
+			render_site_image_values(
+				"image:\n  tag: manual\n",
+				"ghcr.io/losfavs/kubeport-site:v1.0.0-frappe16",
+			)
 
 	def test_iter_storage_configs_finds_nested_persistence_blocks(self):
 		configs = _iter_storage_configs({

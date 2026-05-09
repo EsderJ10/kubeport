@@ -13,6 +13,8 @@
   "column_break_chart",
   "chart",
   "chart_version",
+  "site_image",
+  "site_image_detail",
   "section_break_values",
   "load_defaults",
   "values",
@@ -82,6 +84,20 @@
    "label": "Chart Version",
    "description": "The specific chart version to install. Leave blank for the latest version.",
    "depends_on": "chart"
+  },
+  {
+   "fieldname": "site_image",
+   "fieldtype": "Link",
+   "label": "Site Image",
+   "options": "Kubeport Site Image",
+   "description": "Optional Kubeport-owned Frappe/ERPNext runtime image. When set, Kubeport injects image.repository, image.tag, and image.pullPolicy into Helm values during deploy.",
+   "depends_on": "chart"
+  },
+  {
+   "fieldname": "site_image_detail",
+   "fieldtype": "HTML",
+   "label": "Site Image Detail",
+   "depends_on": "site_image"
   },
   {
    "fieldname": "section_break_values",

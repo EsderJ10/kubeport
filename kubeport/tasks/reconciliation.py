@@ -168,6 +168,7 @@ def _reconcile_stale_helm_operations():
 			"chart",
 			"chart_version",
 			"values",
+			"site_image",
 			"status",
 			"operation_token",
 			"operation_started_at",
@@ -211,6 +212,7 @@ def _reconcile_stale_helm_operations():
 					namespace=release.namespace,
 					release_name=release.release_name,
 					values_yaml=release.values,
+					site_image=release.site_image,
 				)
 				fields.update({
 					"last_applied_chart_version": release.chart_version or "",
