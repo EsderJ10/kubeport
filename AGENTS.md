@@ -17,7 +17,7 @@ Kubeport is a Frappe app that acts as a Kubernetes control plane inside the Frap
 | Type | Frappe app for ERPNext/Frappe |
 | Python | 3.14+ |
 | Build backend | `flit` |
-| Install | `bench get-app <url> --branch dev/jose` then `bench install-app kubeport` |
+| Install | `bench get-app <url> --branch main` then `bench install-app kubeport` |
 | Dependencies | `kubernetes`, `urllib3`, `PyYAML` |
 
 ### Code Style

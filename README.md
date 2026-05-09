@@ -57,7 +57,7 @@ Kubeport bridges the Frappe framework with Kubernetes by following a clear archi
 
 ```bash
 cd $PATH_TO_YOUR_BENCH
-bench get-app $URL_OF_THIS_REPO --branch dev/jose
+bench get-app $URL_OF_THIS_REPO --branch main
 bench install-app kubeport
 ```
 

@@ -10,7 +10,6 @@ on:
       - "license.txt"
   push:
     branches:
-      - dev/jose
       - main
     tags:
       - "v*"
