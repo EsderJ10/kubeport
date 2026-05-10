@@ -126,7 +126,9 @@ jobs:
           bench --site test_site set-config developer_mode 1
 
       - name: Install dev test deps
-        run: pip install "hypothesis>=6.100"
+        run: |
+          cd frappe-bench
+          env/bin/pip install "hypothesis>=6.100"
 
       - name: Run kubeport tests
         run: |

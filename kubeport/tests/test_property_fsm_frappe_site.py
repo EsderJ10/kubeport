@@ -59,12 +59,63 @@ from __future__ import annotations
 import secrets
 import unittest
 
+# ``frappe.testing.discovery`` does ``importlib.import_module`` on every
+# ``test_*`` module and treats *any* exception raised at import time — even
+# ``unittest.SkipTest`` — as a hard ``TestRunnerError`` that aborts the
+# whole run. So this module must import cleanly without hypothesis. When
+# the dependency is missing we degrade to a single skipped test case
+# instead of refusing to load.
 try:
 	from hypothesis import HealthCheck, settings
 	from hypothesis import strategies as st
 	from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
+
+	HYPOTHESIS_AVAILABLE = True
+	HYPOTHESIS_IMPORT_ERROR: str | None = None
 except ImportError as exc:
-	raise unittest.SkipTest(f"hypothesis is required for property FSM tests: {exc}")
+	HYPOTHESIS_AVAILABLE = False
+	HYPOTHESIS_IMPORT_ERROR = str(exc)
+
+	# Stubs that let the rest of the module load cleanly. The
+	# ``FrappeSiteFSM`` class still resolves and Frappe's ``import_module``
+	# call does not raise — discovery sees a single skipped TestCase that
+	# we install at the bottom of the file.
+	class _StubHealthCheck:
+		too_slow = 0
+		filter_too_much = 0
+
+	HealthCheck = _StubHealthCheck  # type: ignore[assignment, misc]
+
+	def settings(**_kwargs):  # type: ignore[no-redef]
+		return None
+
+	class _StubStrategies:
+		@staticmethod
+		def booleans():
+			return None
+
+	st = _StubStrategies  # type: ignore[assignment]
+
+	def rule(*_args, **_kwargs):  # type: ignore[no-redef]
+		def wrap(fn):
+			return fn
+
+		return wrap
+
+	def invariant(*_args, **_kwargs):  # type: ignore[no-redef]
+		def wrap(fn):
+			return fn
+
+		return wrap
+
+	class _StubRBSM:
+		class TestCase:
+			pass
+
+		def __init_subclass__(cls, **_kwargs):
+			super().__init_subclass__()
+
+	RuleBasedStateMachine = _StubRBSM  # type: ignore[assignment, misc]
 
 
 # ---------------------------------------------------------------------------
@@ -400,3 +451,13 @@ try:
 		pass
 except ImportError:
 	TestFrappeSiteFSM = FrappeSiteFSM.TestCase
+
+
+if not HYPOTHESIS_AVAILABLE:
+	# Replace the placeholder hypothesis-stub TestCase with a single
+	# skipped test so discovery sees a clear "skipped" instead of a class
+	# that silently runs zero tests against an inert state machine.
+	@unittest.skip(f"hypothesis not installed: {HYPOTHESIS_IMPORT_ERROR}")
+	class TestFrappeSiteFSM(unittest.TestCase):
+		def test_property_fsm_skipped(self):
+			pass
