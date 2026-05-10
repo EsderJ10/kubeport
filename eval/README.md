@@ -170,112 +170,102 @@ timeouts are set generously above expected medians to absorb image
 pulls and pod scheduling delays; tighten them for CI use. A fresh
 end-to-end run adds another ~5-10 min for the ERPNext Helm deploy.
 
-## Scaling characterisation (`eval/scaling/`)
+## Fault scenarios (TODO-05)
 
-A separate, hermetic harness that characterises how the periodic
-reconciliation tick scales with N persisted rows.  It does **not**
-contact a real cluster: cluster-touching helpers are monkey-patched to
-deterministic stubs so the measured wall-clock reflects framework + DB
-cost only.
+The fault-injection harness lives under `eval/faults/` and is driven by
+`eval/faults/run.py`.  Each scenario empirically validates one
+robustness defence listed in `docs/control-plane-state.md` §Robustness
+Properties.  Reports land at `eval/results/faults-<utc-timestamp>.json`
+and the `make eval-faults` / `make eval-faults-real` targets cover the
+default invocation shapes.
 
-### Layout
+| Scenario | Defended invariant | Witness | Status |
+|---|---|---|---|
+| `worker_kill_mid_helm_upgrade` | Stale-operation reconciler recovers worker-stranded Helm Release rows within `STALE_OPERATION_THRESHOLD_MINUTES` (30 min) | [`kubeport/tasks/reconciliation.py:_reconcile_stale_helm_operations`](../kubeport/tasks/reconciliation.py) | Implemented |
+| `job_ttl_expired_before_reconcile` | Reconciliation falls back to ground-truth bench probe when the operation Job is gone before the tick reads it | [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
+| `pod_exec_timeout_during_site_probe` | Three-state probe returns `unknown` on transient pod-exec failure; row stays In Progress for the tick and recovers next tick | [`kubeport/utils/discovery.py:_exec_list_sites`](../kubeport/utils/discovery.py) and [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
+| `corrupt_archive_size_sidecar` | PVC sidecar probe marks backup `Failed` when the `<archive>.size` sidecar is truncated; row delete enqueues archive trash cleanup that removes the archive from the PVC | [`kubeport/tasks/reconciliation.py:_probe_backup_archive_on_pvc`](../kubeport/tasks/reconciliation.py) and [`kubeport/tasks/site_tasks.py:delete_backup_archive_task`](../kubeport/tasks/site_tasks.py) | Implemented |
 
-| Path | Purpose |
-|---|---|
-| `eval/scaling/host_driver.py` | Host-side driver. Validates the dev container, copies the in-container scripts, captures JSON, optionally invokes the plot. |
-| `eval/scaling/_inproc.py` | In-container driver. Seeds rows, mocks cluster reads, runs `reconcile_all_releases()` repeatedly, fits regression. |
-| `eval/scaling/seed.py` | Bulk-insert helpers (`frappe.db.bulk_insert`) and `cleanup_synthetic_rows`. All synthetic rows share the prefix `scalebench-`. |
-| `eval/scaling/extract_latencies.py` | Walks `eval/results/*.json` reports and extracts helm-touching phase durations as latency samples. |
-| `eval/scaling/plot.py` | Renders `scaling-tick-latency.png` on a log-log scale with the regression overlay. |
+### Running the implemented scenarios
 
-### Running
+`worker_kill_mid_helm_upgrade` requires:
+
+- An existing `Helm Release` row in `Deployed` (or `Degraded`) state — the harness drives a no-op upgrade against it. Default: `demo-k3d/demo/demo-bench` (the same release used by `make eval`).
+- The dev container, long-queue worker, and bench scheduler running per the Prerequisites section above.
+
+`job_ttl_expired_before_reconcile` and `pod_exec_timeout_during_site_probe` both require:
+
+- An existing `Frappe Site` row in `Active` state whose underlying site
+  is **actually functional** on the bench (`bench list-apps` exits 0
+  inside the bench pod).  Default: `demo-k3d/demo/demo-bench/erp.cluster.local`.
+  If your bench has a different known-good site, override with
+  `--site-doc-name <docname>`.
+- The probe contract relies on the existing release/cluster the row
+  points at — no extra cluster setup is needed beyond a healthy bench.
+
+`pod_exec_timeout_during_site_probe` additionally monkey-patches
+`kubeport.utils.discovery._exec_list_sites` for one reconcile tick to
+raise a synthetic `urllib3.exceptions.ReadTimeoutError`; the patch is
+restored in a `finally` block before the second tick so the dev
+container is left in the same state it was found.
+
+`corrupt_archive_size_sidecar` requires the `kubeport-backups` PVC to
+be present in the target namespace (auto-created by Kubeport on the
+first backup) and the bench long-queue worker for the post-Failed row
+delete to enqueue the archive cleanup Job.  The scenario submits two
+short-lived `busybox` Jobs that mount the PVC: one to truncate
+`<archive>.size` to zero bytes, one to verify the archive is absent
+after trash cleanup runs.  Both Jobs carry the standard
+`app.kubernetes.io/managed-by=kubeport` label and a 60s
+`ttlSecondsAfterFinished` so they self-clean.
 
 ```bash
-make eval-scaling                              # default N=1,10,100,1000, 5 repeats
-EVAL_SCALING_NS=1,10,100 make eval-scaling     # smaller sweep
-make eval-scaling-plot                         # re-render PNG from the latest scaling-*.json
+# Fast path: for both scenarios, backdate the staleness clock or
+# directly invoke the per-doctype reconciler so recovery is observed
+# in seconds; the report records fast_forward_used=true per scenario.
+make eval-faults
+
+# Realistic path: wait for the natural 5-min cron tick (and, for
+# scenario 1, the 30-min staleness window). Wall-clock typically
+# 30-35 min for scenario 1; ~5 min for scenario 2.
+make eval-faults-real
 ```
 
-Each run writes a new `eval/results/scaling-<utc-timestamp>.json` and
-either writes or refreshes `eval/results/scaling-tick-latency.png`.
+After every scenario the harness checks whether the long-queue worker
+is still up and restarts it if needed (scenario 1 kills it
+deliberately).  Pass `--no-restart-worker` to `eval/faults/run.py` to
+skip the restart (useful when investigating).  The dev container is
+left in the same state it was found.
 
-### What the JSON contains
+### Report schema
+
+Top-level matches the golden-path report shape (`schema_version`,
+`generated_at`, `started_at`, `finished_at`, `duration_seconds`,
+`context`, `summary`).  Each entry in `scenarios[]` carries:
 
 ```json
 {
-  "schema_version": 1,
-  "context":  { "ns": [1, 10, 100, 1000], "repeats": 5, "results_dir": "..." },
-  "sweep":    { "pre_run":  {"Helm Release": 0, ...},
-                "post_run": {"Helm Release": 0, ...} },
-  "tick_latency": [
-    { "n": 1,    "tick_seconds": [...], "median_seconds": 0.018, "max_seconds": 0.022, ... },
-    { "n": 10,   ... },
-    { "n": 100,  ... },
-    { "n": 1000, ... }
-  ],
-  "regression": { "slope": 0.97, "intercept": -3.91, "shape": "linear" },
-  "helm_subprocess_latency": {
-    "samples":  [ { "source": "<utc>.json", "phase": "deploy_release",
-                    "duration_seconds": 12.3, "helm_call": true }, ... ],
-    "summary": { "sample_count": N, "median_seconds": ..., "p95_seconds": ... }
-  }
+  "scenario": "worker_kill_mid_helm_upgrade",
+  "defended_invariant": "Stale operation reconciler recovers worker-stranded Helm Release rows",
+  "witness": { "reconciler": "<file:symbol>", "threshold_minutes": 30 },
+  "injected_at":   "2026-05-10T18:00:00Z",
+  "recovered_at":  "2026-05-10T18:00:12Z",
+  "mttr_seconds":  12.0,
+  "expected_mttr_bound_seconds": 1800,
+  "fast_forward_used": true,
+  "observed":  { "final_status": "Deployed", "operation_token_rotated": true },
+  "passed":    true,
+  "detail":    "Stale-op reconciler recovered the stranded row to 'Deployed' in 12.0s (fast-forwarded).",
+  "steps": [ ... ordered timeline of every observation and mutation ... ]
 }
 ```
 
-`regression.shape` is one of `constant`, `sublinear`, `linear`,
-`superlinear`, derived from a stdlib least-squares fit of
-`log(median_tick_latency) ~ slope * log(N) + intercept` and bucketed by
-slope (see `_inproc._regression`).
-
-### Seeding model and what the numbers mean
-
-Per N, `seed.py` bulk-inserts:
-
-- N **`Helm Release`** rows in `Deployed` — iterated by
-  `_reconcile_helm_releases`. The mock returns a healthy `helm.status`
-  and an empty `walk` result, so each row becomes one DB read + one
-  no-op classification per tick.
-- N **`Service Bundle`** rows in `Deployed` — iterated by
-  `_reconcile_service_bundles`. The mock returns `(True, "")` from
-  `check_resources_exist`, so each row becomes one DB read per tick.
-- N **`Frappe Site`** rows in `Active` — *not* iterated by
-  `_reconcile_frappe_sites` (which filters on `In Progress`,
-  `Deleting`, `Migrating`). These rows characterise the cost floor of
-  carrying a large healthy backlog: filter time only, no per-row work.
-
-The TODO-07 spec specifies the `Active` shape; if a future run wants to
-characterise per-row in-flight cost, extend `seed_frappe_sites` with an
-`in_flight=True` flag.
-
-### Helm-subprocess latency
-
-The Kubeport helm wrapper at `kubeport/utils/helm.py` does not emit
-per-call structured timing today (that is TODO-14). Until then,
-`extract_latencies.py` treats per-phase wall-clocks recorded by the
-TODO-04 harness (`setup_helm_repo`, `deploy_release`) as proxy samples
-for helm-subprocess latency. Samples accumulate as more harness reports
-land in `eval/results/`. The helm-call rows in `samples` are the ones
-counted in `summary` (verify_chart is reference-only and excluded from
-percentiles).
-
-### PNG rendering
-
-matplotlib is not installed in the dev container or on the host. The
-plot script prints a copyable install hint and exits 0 when
-matplotlib is unavailable so `make eval-scaling` does not regress to
-red — the JSON is the acceptance artefact. To install it:
-
-```bash
-docker exec tfg_devcontainer-frappe-1 \
-    /workspace/development/bench-16/env/bin/pip install matplotlib
-make eval-scaling-plot
-```
+The reference run is checked in at `eval/results/sample-faults.json`
+for thesis quoting.
 
 ## Cross-references
 
 - Invariants the harness exercises: AGENTS.md §Design Invariants.
 - Per-DocType state machines: `docs/control-plane-state.md`.
-- Extended fault scenarios on top of this harness:
-  upcoming TODO-05 in `TODO.md`.
-- Per-call helm timing logger that would replace the proxy in
-  `extract_latencies.py`: TODO-14 in `TODO.md`.
+- Robustness properties matched to scenarios:
+  `docs/control-plane-state.md` §Robustness Properties.
