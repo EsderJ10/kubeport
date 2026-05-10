@@ -8,6 +8,17 @@ Operators connect to clusters, register Helm repositories, declare Helm releases
 
 ---
 
+## Project context
+
+Kubeport is the backend artefact of a final project (TFG, 2026). It is delivered alongside two sibling repos:
+
+- **Landing page** — [`1DAW-victorjim551/lp-KubePort`](https://github.com/1DAW-victorjim551/lp-KubePort) (deployed at [`1daw-victorjim551.github.io/lp-KubePort`](https://1daw-victorjim551.github.io/lp-KubePort/)), authored by Víctor Jiménez.
+- **Project umbrella** — [`EsderJ10/tfg`](https://github.com/EsderJ10/tfg): dev-container, design notes, task tracker.
+
+For the academic framing (problem, state of the art, objectives, results) see [`docs/thesis.md`](docs/thesis.md).
+
+---
+
 ## Documentation map
 
 Start with the document that matches what you want to do.
