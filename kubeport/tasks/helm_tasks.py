@@ -231,6 +231,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			"ingress_hostname",
 			"ingress_class_name",
 			"ingress_cluster_issuer",
+			"use_external_database",
 		],
 		as_dict=True,
 	)
@@ -252,6 +253,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			ingress_class_name=release.get("ingress_class_name"),
 			ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
 			release_name=release["release_name"],
+			use_external_database=release.get("use_external_database"),
 		)
 
 		result = helm.install_or_upgrade(
@@ -306,6 +308,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 				ingress_hostname=release.get("ingress_hostname"),
 				ingress_class_name=release.get("ingress_class_name"),
 				ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
+				use_external_database=release.get("use_external_database"),
 			)
 			fields.update(
 				{
@@ -390,6 +393,7 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 			"ingress_hostname",
 			"ingress_class_name",
 			"ingress_cluster_issuer",
+			"use_external_database",
 		],
 		as_dict=True,
 	)
@@ -456,6 +460,7 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 				ingress_hostname=release.get("ingress_hostname"),
 				ingress_class_name=release.get("ingress_class_name"),
 				ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
+				use_external_database=release.get("use_external_database"),
 			)
 			fields.update(
 				{

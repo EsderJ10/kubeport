@@ -779,6 +779,18 @@ def _run_site_op(
 		if prepare_ref_spec is not None:
 			prepare_ref_spec(doc, release, namespace, api_client, ref_spec)
 
+		# Auto-wire a release-owned MariaDB root Secret onto the doc when the
+		# operator hasn't supplied one.  Runs before build_creds_secret so the
+		# creds-Secret build sees the updated db_root_secret/db_root_secret_key.
+		# Best-effort for all op kinds — for create-site this is what makes
+		# the bundled-MariaDB happy path zero-config.
+		_auto_wire_db_root_secret(
+			core_v1=core_v1,
+			doc=doc,
+			namespace=namespace,
+			release_name=release_name,
+		)
+
 		job_name = _job_name(doc.site_name, operation_token)
 		job_name_for_cleanup = job_name
 
@@ -1169,6 +1181,108 @@ def _read_config_map_key(
 	if not isinstance(data, dict):
 		return ""
 	return str(data.get(key) or "")
+
+
+# Bitnami's MariaDB chart (used as the dependency by Frappe/ERPNext) puts the
+# generated root password into a Secret named ``<release>-mariadb`` under key
+# ``mariadb-root-password``.  Encoding that convention here lets us auto-wire
+# the Frappe Site doc's db_root_secret without requiring the operator to copy
+# the secret name out of kubectl.
+_BUNDLED_DB_ROOT_SECRET_KEY = "mariadb-root-password"
+
+
+def _resolve_db_root_secret_for_release(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	release_name: str,
+) -> tuple[str, str]:
+	"""Return ``(secret_name, key)`` for a release-owned MariaDB root Secret, or ``("", "")``.
+
+	Same ownership rule as ``_resolve_db_host_from_services``: name prefix or
+	the Helm ``app.kubernetes.io/instance`` label.  We never return a Secret
+	owned by a different release — that would route the Job at the wrong
+	credentials, the very failure mode we're protecting against in the host
+	resolver.
+	"""
+	release_name = str(release_name or "")
+	if not release_name:
+		return "", ""
+	try:
+		secrets_list = core_v1.list_namespaced_secret(namespace=namespace, _request_timeout=10).items
+	except Exception:
+		return "", ""
+	prefix = f"{release_name}-"
+	for secret in secrets_list:
+		metadata = getattr(secret, "metadata", None)
+		name = str(getattr(metadata, "name", "") or "")
+		if not name:
+			continue
+		normalized = name.lower()
+		if "mariadb" not in normalized and "mysql" not in normalized:
+			continue
+		labels = getattr(metadata, "labels", None) or {}
+		owns_via_name = name == release_name or name.startswith(prefix)
+		owns_via_label = labels.get("app.kubernetes.io/instance") == release_name
+		if not (owns_via_name or owns_via_label):
+			continue
+		data = getattr(secret, "data", None) or {}
+		if _BUNDLED_DB_ROOT_SECRET_KEY in data:
+			return name, _BUNDLED_DB_ROOT_SECRET_KEY
+	return "", ""
+
+
+def _auto_wire_db_root_secret(
+	core_v1: "client.CoreV1Api",
+	doc: Any,
+	namespace: str,
+	release_name: str,
+) -> None:
+	"""Populate ``doc.db_root_secret`` from a release-owned MariaDB Secret if empty.
+
+	A no-op when the operator already chose a Secret reference or there is no
+	release-owned Secret (e.g. external-DB topology).  When we do auto-wire we
+	persist via ``db_set`` so a worker reload (or the read inside
+	``_create_creds_secret`` further down ``_run_site_op``) sees the value.
+	"""
+	if str(getattr(doc, "db_root_secret", "") or "").strip():
+		return
+	secret_name, secret_key = _resolve_db_root_secret_for_release(
+		core_v1=core_v1,
+		namespace=namespace,
+		release_name=release_name,
+	)
+	if not secret_name:
+		return
+	doc.db_root_secret = secret_name
+	doc.db_root_secret_key = secret_key
+	doc.db_set("db_root_secret", secret_name, update_modified=False)
+	doc.db_set("db_root_secret_key", secret_key, update_modified=False)
+
+
+def can_resolve_db_host_for_release(
+	cluster: str,
+	namespace: str,
+	release_name: str,
+) -> bool:
+	"""Pre-flight: would create-site's DB-host resolver find anything for this release?
+
+	Synchronous, fast (one Service list).  Used by the Frappe Site controller
+	to surface an actionable error in the same UI click as the user's
+	``Create Site`` action, instead of waiting for the worker to fail.
+
+	A True return is necessary but not sufficient — the worker still runs the
+	full resolution chain and may discover host info via configMap mounts the
+	pre-flight skips.  A False return reliably means the bundled-MariaDB
+	default flow is broken (no release-owned Service exists yet).
+	"""
+	try:
+		api_client = get_k8s_api_client(cluster)
+		core_v1 = client.CoreV1Api(api_client=api_client)
+	except Exception:
+		# If we can't even build a client, the worker will fail with a clearer
+		# cluster-side error.  Don't block the click on a transient network blip.
+		return True
+	return bool(_resolve_db_host_from_services(core_v1, namespace, release_name))
 
 
 def _bench_drop_site_command(site_name: str) -> str:

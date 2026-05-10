@@ -14,6 +14,7 @@ from kubeport.kubeport.doctype.helm_release.helm_release import (
 	build_release_docname,
 	calculate_release_spec_hash,
 	prepare_release_values,
+	render_bundled_database_values,
 	render_chart_starter_values,
 	render_ingress_values,
 	render_site_image_values,
@@ -284,6 +285,112 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		with self.assertRaisesRegex(RuntimeError, "default StorageClass"):
 			render_chart_starter_values("", chart_doc, cluster_name="cluster-a")
+
+	def test_render_bundled_database_values_noop_for_non_frappe_chart(self):
+		chart_doc = SimpleNamespace(chart_name="postgres")
+		self.assertEqual(
+			render_bundled_database_values("foo: bar\n", chart_doc, use_external_database=False),
+			"foo: bar\n",
+		)
+
+	def test_render_bundled_database_values_noop_when_user_chose_external_db(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		self.assertEqual(
+			render_bundled_database_values("", chart_doc, use_external_database=True),
+			"",
+		)
+
+	def test_render_bundled_database_values_noop_when_dbhost_supplied(self):
+		# A user-supplied top-level dbHost signals external-DB intent even
+		# without ticking the toggle; defaulting mariadb.enabled would
+		# silently provision an unused MariaDB.
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = render_bundled_database_values(
+			"dbHost: my-mariadb.svc\n", chart_doc, use_external_database=False
+		)
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["dbHost"], "my-mariadb.svc")
+		self.assertNotIn("mariadb", parsed)
+
+	def test_render_bundled_database_values_noop_when_user_set_mariadb_enabled(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = render_bundled_database_values(
+			"mariadb:\n  enabled: false\n", chart_doc, use_external_database=False
+		)
+		parsed = yaml.safe_load(out)
+		self.assertFalse(parsed["mariadb"]["enabled"])
+
+	def test_render_bundled_database_values_enables_mariadb_for_frappe_default(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = render_bundled_database_values("", chart_doc, use_external_database=False)
+		parsed = yaml.safe_load(out)
+		self.assertTrue(parsed["mariadb"]["enabled"])
+
+	def test_render_bundled_database_values_preserves_existing_mariadb_subkeys(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = render_bundled_database_values(
+			"mariadb:\n  auth:\n    rootPassword: stash\n",
+			chart_doc,
+			use_external_database=False,
+		)
+		parsed = yaml.safe_load(out)
+		self.assertTrue(parsed["mariadb"]["enabled"])
+		self.assertEqual(parsed["mariadb"]["auth"]["rootPassword"], "stash")
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
+	def test_prepare_release_values_pipeline_enables_bundled_mariadb_for_frappe_default(
+		self, _mock_discover_default_storage_class, mock_get_value
+	):
+		"""Wiring guard: prepare_release_values must call render_bundled_database_values
+		so the Frappe-chart default flow ends up with mariadb.enabled=true. If a refactor
+		ever drops the call from the pipeline, this test catches it before the field
+		toggle silently stops working."""
+		mock_get_value.return_value = None
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = prepare_release_values(
+			"",
+			chart_doc,
+			cluster_name="cluster-a",
+			use_external_database=False,
+		)
+		parsed = yaml.safe_load(out)
+		self.assertTrue(parsed["mariadb"]["enabled"])
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
+	def test_prepare_release_values_pipeline_skips_bundled_mariadb_when_external_db(
+		self, _mock_discover_default_storage_class, mock_get_value
+	):
+		mock_get_value.return_value = None
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = prepare_release_values(
+			"",
+			chart_doc,
+			cluster_name="cluster-a",
+			use_external_database=True,
+		)
+		parsed = yaml.safe_load(out) or {}
+		self.assertNotIn("mariadb", parsed)
+
+	def test_calculate_release_spec_hash_changes_when_use_external_database_toggled(self):
+		hash_a = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="",
+			use_external_database=False,
+		)
+		hash_b = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="",
+			use_external_database=True,
+		)
+		self.assertNotEqual(hash_a, hash_b)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
 	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")

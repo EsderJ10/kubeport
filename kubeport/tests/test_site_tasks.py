@@ -10,6 +10,7 @@ from frappe.tests import UnitTestCase
 from kubeport.tasks.site_tasks import (
 	BACKUP_MOUNT_PATH,
 	BACKUP_PVC_NAME,
+	_auto_wire_db_root_secret,
 	_backup_storage_path,
 	_bench_backup_command,
 	_bench_drop_site_command,
@@ -28,7 +29,9 @@ from kubeport.tasks.site_tasks import (
 	_merge_env,
 	_parse_install_apps,
 	_prepare_backup_ref_spec,
+	_resolve_db_root_secret_for_release,
 	_safe_label_value,
+	can_resolve_db_host_for_release,
 )
 
 
@@ -357,6 +360,144 @@ class UnitTestSiteHelpers(UnitTestCase):
 		self.assertIn("bench-a", str(ctx.exception))
 		self.assertIn("dbHost", str(ctx.exception))
 		self.assertEqual(env, [])
+
+	def test_resolve_db_root_secret_returns_release_owned_secret(self):
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_secret.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="bench-a-mariadb", labels=None),
+					data={"mariadb-root-password": "abc"},
+				),
+			]
+		)
+		secret_name, secret_key = _resolve_db_root_secret_for_release(core_v1, "bench-ns", "bench-a")
+		self.assertEqual((secret_name, secret_key), ("bench-a-mariadb", "mariadb-root-password"))
+
+	def test_resolve_db_root_secret_matches_via_helm_instance_label(self):
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_secret.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(
+						name="custom-mariadb-secret",
+						labels={"app.kubernetes.io/instance": "bench-a"},
+					),
+					data={"mariadb-root-password": "abc"},
+				),
+			]
+		)
+		secret_name, secret_key = _resolve_db_root_secret_for_release(core_v1, "bench-ns", "bench-a")
+		self.assertEqual((secret_name, secret_key), ("custom-mariadb-secret", "mariadb-root-password"))
+
+	def test_resolve_db_root_secret_ignores_foreign_release_secrets(self):
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_secret.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(
+						name="wp-prueba-mariadb",
+						labels={"app.kubernetes.io/instance": "wp-prueba"},
+					),
+					data={"mariadb-root-password": "abc"},
+				),
+			]
+		)
+		secret_name, secret_key = _resolve_db_root_secret_for_release(core_v1, "default", "bench-a")
+		self.assertEqual((secret_name, secret_key), ("", ""))
+
+	def test_resolve_db_root_secret_returns_empty_when_expected_key_missing(self):
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_secret.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="bench-a-mariadb", labels=None),
+					data={"unrelated-key": "abc"},
+				),
+			]
+		)
+		secret_name, secret_key = _resolve_db_root_secret_for_release(core_v1, "bench-ns", "bench-a")
+		self.assertEqual((secret_name, secret_key), ("", ""))
+
+	def test_auto_wire_db_root_secret_populates_doc_when_empty(self):
+		doc = MagicMock()
+		doc.db_root_secret = ""
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_secret.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="bench-a-mariadb", labels=None),
+					data={"mariadb-root-password": "abc"},
+				),
+			]
+		)
+		_auto_wire_db_root_secret(core_v1=core_v1, doc=doc, namespace="bench-ns", release_name="bench-a")
+		self.assertEqual(doc.db_root_secret, "bench-a-mariadb")
+		self.assertEqual(doc.db_root_secret_key, "mariadb-root-password")
+		# Persistence happens via db_set so a worker reload sees the value.
+		set_calls = {call.args[0] for call in doc.db_set.call_args_list}
+		self.assertIn("db_root_secret", set_calls)
+		self.assertIn("db_root_secret_key", set_calls)
+
+	def test_auto_wire_db_root_secret_no_op_when_doc_already_has_secret(self):
+		doc = MagicMock()
+		doc.db_root_secret = "operator-supplied-secret"
+		core_v1 = MagicMock()
+		_auto_wire_db_root_secret(core_v1=core_v1, doc=doc, namespace="bench-ns", release_name="bench-a")
+		# Operator's choice wins; we don't even query the cluster.
+		self.assertEqual(doc.db_root_secret, "operator-supplied-secret")
+		core_v1.list_namespaced_secret.assert_not_called()
+		doc.db_set.assert_not_called()
+
+	def test_auto_wire_db_root_secret_no_op_when_no_release_owned_secret(self):
+		doc = MagicMock()
+		doc.db_root_secret = ""
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_secret.return_value = SimpleNamespace(items=[])
+		_auto_wire_db_root_secret(core_v1=core_v1, doc=doc, namespace="bench-ns", release_name="bench-a")
+		self.assertEqual(doc.db_root_secret, "")
+		doc.db_set.assert_not_called()
+
+	@patch("kubeport.tasks.site_tasks.client")
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client")
+	def test_can_resolve_db_host_for_release_true_when_release_owned_service_exists(
+		self, mock_get_client, mock_client_module
+	):
+		mock_get_client.return_value = MagicMock()
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_service.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(metadata=SimpleNamespace(name="bench-a-mariadb", labels=None)),
+			]
+		)
+		mock_client_module.CoreV1Api.return_value = core_v1
+		self.assertTrue(can_resolve_db_host_for_release("cluster-a", "bench-ns", "bench-a"))
+
+	@patch("kubeport.tasks.site_tasks.client")
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client")
+	def test_can_resolve_db_host_for_release_false_when_only_foreign_mariadb(
+		self, mock_get_client, mock_client_module
+	):
+		mock_get_client.return_value = MagicMock()
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_service.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(
+						name="wp-prueba-mariadb",
+						labels={"app.kubernetes.io/instance": "wp-prueba"},
+					)
+				),
+			]
+		)
+		mock_client_module.CoreV1Api.return_value = core_v1
+		self.assertFalse(can_resolve_db_host_for_release("cluster-a", "default", "bench-a"))
+
+	@patch("kubeport.tasks.site_tasks.get_k8s_api_client", side_effect=RuntimeError("boom"))
+	def test_can_resolve_db_host_for_release_returns_true_on_client_build_failure(self, _mock_get_client):
+		# Transient K8s client-build failure must not block the click — the
+		# worker will surface a clearer cluster-side error.
+		self.assertTrue(can_resolve_db_host_for_release("cluster-a", "ns", "rel-a"))
 
 	def test_inject_resolved_db_host_non_create_ops_tolerate_unresolved(self):
 		# Migrate / drop fall back to site_config.json on the bench PVC, so a
@@ -1439,6 +1580,217 @@ class UnitTestControllerValidation(UnitTestCase):
 			throw_args = mock_frappe.throw.call_args
 			self.assertIn("Draft", throw_args.args[0])
 			self.assertIn("deployed", throw_args.args[0].lower())
+
+	def test_validate_allows_empty_db_root_credentials_for_bundled_default(self):
+		"""validate() defers DB credential checks to create_site so the bundled-
+		MariaDB default flow can save a doc with neither password nor secret;
+		the worker auto-wires the chart's <release>-mariadb Secret at run time.
+		"""
+		from unittest.mock import patch
+
+		doc = self._make_doc(bench_release="release-a", db_root_password="", db_root_secret="")
+		mock_release = MagicMock()
+		mock_release.cluster = "cluster-a"
+		mock_release.namespace = "ns"
+		mock_release.status = "Deployed"
+
+		with patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe") as mock_frappe:
+			mock_frappe.get_doc.return_value = mock_release
+			doc.is_new = lambda: True
+			doc.validate()
+			# No throw mentioning credentials.
+			for call_args in mock_frappe.throw.call_args_list:
+				self.assertNotIn(
+					"db root password",
+					str(call_args.args[0]).lower(),
+				)
+
+	def test_create_site_auto_engages_force_create_on_retry_from_failed(self):
+		"""Frappe's site_config.json is non-overwriting; bench --force does not
+		reset it.  A previously partial creation poisons retries unless we wipe
+		the dir.  The bench Job's pre-clean is gated on force_create, so the
+		controller must auto-engage it on Failed→retry — the operator should
+		not have to know about the toggle to recover."""
+		from unittest.mock import patch
+
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+		doc = MagicMock(spec=FrappeSite)
+		doc.bench_release = "release-a"
+		doc.site_name = "demo.example.com"
+		doc.name = "release-a/demo.example.com"
+		doc.status = "Failed"
+		doc.force_create = 0
+		# Bind the real action so we exercise controller logic.
+		doc.create_site = FrappeSite.create_site.__get__(doc, FrappeSite)
+
+		with (
+			patch.object(FrappeSite, "_preflight_db_topology", return_value=None),
+			patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue"),
+			patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint"),
+		):
+			doc.create_site()
+
+		set_calls = {call.args[0]: call.args[1] for call in doc.db_set.call_args_list}
+		self.assertEqual(set_calls.get("force_create"), 1)
+		self.assertEqual(doc.force_create, 1)
+
+	def test_preflight_db_topology_passes_for_bundled_flow_when_service_exists(self):
+		"""Bundled-MariaDB happy path: Service exists, no operator-supplied creds.
+		Worker will auto-wire the chart's <release>-mariadb Secret at run time."""
+		from unittest.mock import patch
+
+		doc = self._make_doc(bench_release="release-a", db_root_password="", db_root_secret="")
+		mock_release = MagicMock()
+		mock_release.cluster = "cluster-a"
+		mock_release.namespace = "ns"
+		mock_release.release_name = "rel-a"
+		mock_release.use_external_database = 0
+
+		with (
+			patch(
+				"kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.get_doc",
+				return_value=mock_release,
+			),
+			patch(
+				"kubeport.tasks.site_tasks.can_resolve_db_host_for_release",
+				return_value=True,
+			),
+			patch(
+				"kubeport.tasks.site_tasks._resolve_db_root_secret_for_release",
+				return_value=("rel-a-mariadb", "mariadb-root-password"),
+			),
+			patch("kubeport.utils.k8s_client.get_k8s_api_client", return_value=MagicMock()),
+		):
+			# Should not throw.
+			doc._preflight_db_topology()
+
+	def test_preflight_db_topology_throws_when_no_release_owned_mariadb_service(self):
+		"""Bundled flow but no <release>-mariadb Service in the namespace —
+		the most common control-plane misconfiguration we want to catch
+		before the user sits through a Job submission and a Failed status."""
+		from unittest.mock import patch
+
+		doc = self._make_doc(bench_release="release-a", db_root_password="pw")
+		mock_release = MagicMock()
+		mock_release.cluster = "cluster-a"
+		mock_release.namespace = "ns"
+		mock_release.release_name = "rel-a"
+		mock_release.use_external_database = 0
+
+		with (
+			patch(
+				"kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.get_doc",
+				return_value=mock_release,
+			),
+			patch(
+				"kubeport.tasks.site_tasks.can_resolve_db_host_for_release",
+				return_value=False,
+			),
+			patch(
+				"kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.throw",
+				side_effect=frappe.ValidationError,
+			) as mock_throw,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				doc._preflight_db_topology()
+			# Error message must reference both the release and the actionable fix.
+			msg = str(mock_throw.call_args.args[0])
+			self.assertIn("rel-a", msg)
+			self.assertIn("MariaDB", msg)
+			self.assertIn("Use External Database", msg)
+
+	def test_preflight_db_topology_throws_for_external_db_without_credentials(self):
+		"""External-DB topology requires operator-supplied creds; we trust
+		their dbHost wiring but the credential gap would surface as an
+		auth error inside the Job — better to catch it at the click."""
+		from unittest.mock import patch
+
+		doc = self._make_doc(bench_release="release-a", db_root_password="", db_root_secret="")
+		mock_release = MagicMock()
+		mock_release.cluster = "cluster-a"
+		mock_release.namespace = "ns"
+		mock_release.release_name = "rel-a"
+		mock_release.use_external_database = 1
+
+		with (
+			patch(
+				"kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.get_doc",
+				return_value=mock_release,
+			),
+			patch(
+				"kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.throw",
+				side_effect=frappe.ValidationError,
+			) as mock_throw,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				doc._preflight_db_topology()
+			msg = str(mock_throw.call_args.args[0])
+			self.assertIn("external database", msg.lower())
+
+	def test_preflight_db_topology_throws_when_bundled_flow_has_no_root_secret_and_no_creds(self):
+		"""Bundled flow + no operator creds + the chart didn't expose a
+		release-owned root Secret (e.g. user disabled mariadb.auth or used
+		a non-Bitnami subchart).  Auto-wire would find nothing — fail
+		early instead of letting the worker submit a Job that can't auth."""
+		from unittest.mock import patch
+
+		doc = self._make_doc(bench_release="release-a", db_root_password="", db_root_secret="")
+		mock_release = MagicMock()
+		mock_release.cluster = "cluster-a"
+		mock_release.namespace = "ns"
+		mock_release.release_name = "rel-a"
+		mock_release.use_external_database = 0
+
+		with (
+			patch(
+				"kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.get_doc",
+				return_value=mock_release,
+			),
+			patch(
+				"kubeport.tasks.site_tasks.can_resolve_db_host_for_release",
+				return_value=True,
+			),
+			patch(
+				"kubeport.tasks.site_tasks._resolve_db_root_secret_for_release",
+				return_value=("", ""),
+			),
+			patch("kubeport.utils.k8s_client.get_k8s_api_client", return_value=MagicMock()),
+			patch(
+				"kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.throw",
+				side_effect=frappe.ValidationError,
+			) as mock_throw,
+		):
+			with self.assertRaises(frappe.ValidationError):
+				doc._preflight_db_topology()
+			msg = str(mock_throw.call_args.args[0])
+			self.assertIn("DB Root Password", msg)
+
+	def test_create_site_does_not_engage_force_create_on_first_attempt_from_draft(self):
+		"""From Draft (first creation), force_create must stay opt-in.  Auto-
+		engaging it would silently destroy a freshly-uploaded site dir if the
+		operator created the doc via API while the chart was provisioning."""
+		from unittest.mock import patch
+
+		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
+		doc = MagicMock(spec=FrappeSite)
+		doc.bench_release = "release-a"
+		doc.site_name = "demo.example.com"
+		doc.name = "release-a/demo.example.com"
+		doc.status = "Draft"
+		doc.force_create = 0
+		doc.create_site = FrappeSite.create_site.__get__(doc, FrappeSite)
+
+		with (
+			patch.object(FrappeSite, "_preflight_db_topology", return_value=None),
+			patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.enqueue"),
+			patch("kubeport.kubeport.doctype.frappe_site.frappe_site.frappe.msgprint"),
+		):
+			doc.create_site()
+
+		set_calls = {call.args[0] for call in doc.db_set.call_args_list}
+		self.assertNotIn("force_create", set_calls)
 
 	def test_validate_accepts_deployed_bench_release(self):
 		"""The controller must allow saving when the bench release is deployed."""

@@ -24,6 +24,8 @@
   "column_break_ingress",
   "ingress_class_name",
   "ingress_cluster_issuer",
+  "section_break_database",
+  "use_external_database",
   "section_break_actions",
   "deploy_release",
   "uninstall_release",
@@ -163,6 +165,20 @@
    "label": "cert-manager ClusterIssuer",
    "depends_on": "eval:doc.ingress_enabled",
    "description": "Optional. When set, renders cert-manager.io/cluster-issuer annotation and a TLS block referencing secret <release-name>-tls. Leave blank for HTTP-only."
+  },
+  {
+   "fieldname": "section_break_database",
+   "fieldtype": "Section Break",
+   "label": "Database",
+   "depends_on": "eval:doc.chart",
+   "description": "Frappe/ERPNext charts only. By default Kubeport bundles a per-release MariaDB so site creation works out of the box."
+  },
+  {
+   "default": "0",
+   "fieldname": "use_external_database",
+   "fieldtype": "Check",
+   "label": "Use External Database",
+   "description": "When checked, Kubeport will not auto-bundle MariaDB. You must supply 'dbHost' (and root credentials via the Frappe Site form) yourself. Has no effect for non-Frappe charts."
   },
   {
    "fieldname": "section_break_actions",

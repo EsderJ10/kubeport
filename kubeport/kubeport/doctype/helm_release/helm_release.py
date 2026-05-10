@@ -64,6 +64,7 @@ class HelmRelease(Document):
 		site_image: DF.Link | None
 		site_image_detail: DF.HTML | None
 		status: DF.Literal["Draft", "In Progress", "Deployed", "Degraded", "Uninstalling", "Failed"]
+		use_external_database: DF.Check
 		values: DF.Code | None
 	# end: auto-generated types
 
@@ -111,6 +112,7 @@ class HelmRelease(Document):
 			ingress_hostname=ingress_hostname,
 			ingress_class_name=ingress_class_name,
 			ingress_cluster_issuer=ingress_cluster_issuer,
+			use_external_database=getattr(self, "use_external_database", 0),
 		)
 		self.pending_changes = int(
 			bool(self.last_applied_spec_hash and self.desired_spec_hash != self.last_applied_spec_hash)
@@ -347,6 +349,7 @@ class HelmRelease(Document):
 				ingress_class_name=getattr(self, "ingress_class_name", None),
 				ingress_cluster_issuer=getattr(self, "ingress_cluster_issuer", None),
 				release_name=getattr(self, "release_name", None),
+				use_external_database=getattr(self, "use_external_database", 0),
 			)
 			or ""
 		)
@@ -430,6 +433,7 @@ def calculate_release_spec_hash(
 	ingress_hostname: str | None = None,
 	ingress_class_name: str | None = None,
 	ingress_cluster_issuer: str | None = None,
+	use_external_database: bool | int | None = False,
 ) -> str:
 	"""Return a stable hash for the Helm desired-state fields Kubeport applies."""
 	payload = {
@@ -444,6 +448,7 @@ def calculate_release_spec_hash(
 		"ingress_hostname": str(ingress_hostname or "").strip(),
 		"ingress_class_name": str(ingress_class_name or "").strip(),
 		"ingress_cluster_issuer": str(ingress_cluster_issuer or "").strip(),
+		"use_external_database": int(bool(use_external_database)),
 	}
 	encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 	return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -514,6 +519,7 @@ def prepare_release_values(
 	ingress_class_name: str | None = None,
 	ingress_cluster_issuer: str | None = None,
 	release_name: str | None = None,
+	use_external_database: bool | int | None = False,
 ) -> str | None:
 	"""Return values YAML ready for Helm for a Kubeport Helm Release.
 
@@ -524,6 +530,11 @@ def prepare_release_values(
 	chart-specific starter values.
 	"""
 	values_yaml = render_chart_starter_values(values_yaml, chart_doc, cluster_name)
+	values_yaml = render_bundled_database_values(
+		values_yaml,
+		chart_doc,
+		use_external_database=use_external_database,
+	)
 	values_yaml = render_ingress_values(
 		values_yaml,
 		chart_doc,
@@ -538,6 +549,48 @@ def prepare_release_values(
 		site_image,
 		allow_image_override=allow_site_image_override,
 	)
+
+
+def render_bundled_database_values(
+	values_yaml: str | None,
+	chart_doc: Any,
+	*,
+	use_external_database: bool | int | None,
+) -> str | None:
+	"""Default ``mariadb.enabled=true`` for Frappe charts unless the user opted out.
+
+	The Frappe/ERPNext chart leaves ``mariadb.enabled`` off by default, which
+	is a footgun for first-time users: the bench installs cleanly but site
+	creation immediately fails with no database to connect to.  We flip the
+	default so the happy path "deploy chart, create site" works without any
+	values plumbing.
+
+	No-op when:
+	- the chart is not a Frappe site chart (other charts have their own DB story);
+	- the user toggled "Use External Database" — they're on their own;
+	- the user already set ``mariadb.enabled`` (any value) — explicit wins;
+	- the user supplied a top-level ``dbHost`` — that signals external DB,
+	  bundled mariadb would be wasted.
+	"""
+	if not is_frappe_site_chart(chart_doc) or use_external_database:
+		return values_yaml
+
+	values = _normalize_values_for_hash(values_yaml)
+	if not isinstance(values, dict):
+		frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
+
+	if str(values.get("dbHost") or "").strip():
+		return values_yaml
+
+	mariadb = values.get("mariadb")
+	if isinstance(mariadb, dict) and "enabled" in mariadb:
+		return values_yaml
+
+	rendered = dict(values)
+	mariadb_block = dict(mariadb) if isinstance(mariadb, dict) else {}
+	mariadb_block["enabled"] = True
+	rendered["mariadb"] = mariadb_block
+	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
 
 
 def render_chart_starter_values(
