@@ -796,6 +796,7 @@ def _run_site_op(
 			release_name=release_name,
 			ref_spec=ref_spec,
 			container_env=container_env,
+			op_kind=config.op_kind,
 		)
 		job_manifest = _build_op_job_manifest(
 			job_name=job_name,
@@ -949,9 +950,24 @@ def _merge_env(
 
 
 def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool) -> str:
-	"""Build the ``bench new-site`` shell command string."""
-	parts = [
+	"""Build the ``bench new-site`` shell command string.
+
+	When ``force`` is set we also wipe the site directory on the bench PVC
+	before invoking bench.  Frappe's ``make_site_config`` never overwrites an
+	existing ``site_config.json``, and ``bench new-site --force`` does not
+	reset that file either — it only allows bench to proceed past the
+	"site exists" check.  If a previous attempt left a partial config behind
+	(e.g. one written before ``--db-host`` was passed), every subsequent
+	retry would silently inherit the broken config and default to 127.0.0.1.
+	Pre-cleaning under ``--force`` makes retries deterministic.
+	"""
+	preamble: list[str] = [
 		'test -n "$DB_HOST" || { echo "DB_HOST is not set; cannot create site"; exit 1; };',
+	]
+	if force:
+		preamble.append('rm -rf "sites/$SITE_NAME";')
+	parts = [
+		*preamble,
 		"bench",
 		"new-site",
 		'"$SITE_NAME"',
@@ -975,7 +991,17 @@ def _inject_resolved_db_host(
 	release_name: str,
 	ref_spec: dict[str, Any],
 	container_env: list[dict[str, Any]],
+	op_kind: str = "",
 ) -> None:
+	"""Inject ``DB_HOST`` into ``container_env`` if we can resolve a host.
+
+	For create-site we **require** resolution: the new site has no
+	``site_config.json`` yet, so bench has nowhere else to learn ``db_host``
+	from, and a missing value silently defaults to 127.0.0.1.  For other
+	operations (migrate, drop) bench reads ``db_host`` from the existing
+	site's ``site_config.json`` on the bench PVC, so resolution is
+	best-effort and a miss is non-fatal.
+	"""
 	db_host = (
 		_resolve_db_host_from_env_entries(ref_spec.get("container_env") or [])
 		or _resolve_db_host_from_env_refs(core_v1, namespace, ref_spec.get("container_env") or [])
@@ -985,6 +1011,16 @@ def _inject_resolved_db_host(
 	)
 	if db_host:
 		container_env.append({"name": "DB_HOST", "value": db_host})
+		return
+	if op_kind == "create":
+		raise RuntimeError(
+			f"Could not resolve DB host for Helm release '{release_name}' in "
+			f"namespace '{namespace}'. The bench pod has no DB_HOST env, no "
+			"mounted common_site_config.json with db_host, and no "
+			"release-owned mariadb/mysql Service. Set 'dbHost' in the chart "
+			"values, enable the bundled MariaDB, or expose a release-owned "
+			"MariaDB Service before retrying."
+		)
 
 
 def _resolve_db_host_from_env_entries(env_entries: list[dict[str, Any]]) -> str:
@@ -1086,24 +1122,37 @@ def _resolve_db_host_from_services(
 	namespace: str,
 	release_name: str,
 ) -> str:
+	"""Find a mariadb/mysql Service strictly owned by this Helm release.
+
+	We require ownership evidence — either a release-prefixed name (Helm
+	chart convention, e.g. ``<release>-mariadb``) or the standard Helm
+	``app.kubernetes.io/instance`` label.  We deliberately do NOT fall
+	back to any mariadb/mysql Service in the namespace: silently routing
+	a new-site Job at a foreign tenant's database is a far worse failure
+	mode than failing loudly with no host at all.
+	"""
+	release_name = str(release_name or "")
+	if not release_name:
+		return ""
 	try:
 		services = core_v1.list_namespaced_service(namespace=namespace, _request_timeout=10).items
 	except Exception:
 		return ""
-	candidates: list[str] = []
-	release_name = str(release_name or "")
+	prefix = f"{release_name}-"
 	for service in services:
-		name = str(getattr(getattr(service, "metadata", None), "name", "") or "")
+		metadata = getattr(service, "metadata", None)
+		name = str(getattr(metadata, "name", "") or "")
 		if not name:
 			continue
 		normalized = name.lower()
 		if "mariadb" not in normalized and "mysql" not in normalized:
 			continue
-		if release_name and release_name in name:
-			candidates.insert(0, name)
-		else:
-			candidates.append(name)
-	return candidates[0] if candidates else ""
+		labels = getattr(metadata, "labels", None) or {}
+		owns_via_name = name == release_name or name.startswith(prefix)
+		owns_via_label = labels.get("app.kubernetes.io/instance") == release_name
+		if owns_via_name or owns_via_label:
+			return name
+	return ""
 
 
 def _read_config_map_key(

@@ -117,6 +117,19 @@ class UnitTestSiteHelpers(UnitTestCase):
 		cmd = _bench_new_site_command("s1", [], force=False)
 		self.assertIn('--db-host="$DB_HOST"', cmd)
 
+	def test_bench_new_site_command_force_preceans_site_dir(self):
+		# Frappe's make_site_config never overwrites an existing site_config.json,
+		# and ``bench new-site --force`` does not clear it either.  We must reset
+		# the site dir ourselves under --force to guarantee retries observe a
+		# fresh slate; otherwise a stale partial config silently poisons the run.
+		cmd_forced = _bench_new_site_command("s1", [], force=True)
+		cmd_unforced = _bench_new_site_command("s1", [], force=False)
+		self.assertIn('rm -rf "sites/$SITE_NAME"', cmd_forced)
+		# Pre-clean must run before bench so bench sees a clean dir.
+		self.assertLess(cmd_forced.index('rm -rf "sites/$SITE_NAME"'), cmd_forced.index("bench"))
+		# Without --force we never wipe the dir.
+		self.assertNotIn('rm -rf "sites/$SITE_NAME"', cmd_unforced)
+
 	def test_build_env_admin_password_always_references_creds_secret(self):
 		env = _build_env(
 			site_name="s1",
@@ -242,12 +255,12 @@ class UnitTestSiteHelpers(UnitTestCase):
 
 		self.assertEqual(env, [{"name": "DB_HOST", "value": "bench-a-mariadb"}])
 
-	def test_inject_resolved_db_host_falls_back_to_mariadb_service(self):
+	def test_inject_resolved_db_host_falls_back_to_release_owned_mariadb_service(self):
 		core_v1 = MagicMock()
 		core_v1.list_namespaced_service.return_value = SimpleNamespace(
 			items=[
-				SimpleNamespace(metadata=SimpleNamespace(name="bench-a-redis")),
-				SimpleNamespace(metadata=SimpleNamespace(name="bench-a-mariadb")),
+				SimpleNamespace(metadata=SimpleNamespace(name="bench-a-redis", labels=None)),
+				SimpleNamespace(metadata=SimpleNamespace(name="bench-a-mariadb", labels=None)),
 			]
 		)
 		env = []
@@ -261,6 +274,112 @@ class UnitTestSiteHelpers(UnitTestCase):
 		)
 
 		self.assertEqual(env, [{"name": "DB_HOST", "value": "bench-a-mariadb"}])
+
+	def test_inject_resolved_db_host_matches_via_helm_instance_label(self):
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_service.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(
+						name="custom-named-mariadb",
+						labels={"app.kubernetes.io/instance": "bench-a"},
+					)
+				),
+			]
+		)
+		env = []
+
+		_inject_resolved_db_host(
+			core_v1=core_v1,
+			namespace="bench-ns",
+			release_name="bench-a",
+			ref_spec={"container_env": [], "container_env_from": [], "volume_mounts": [], "volumes": []},
+			container_env=env,
+		)
+
+		self.assertEqual(env, [{"name": "DB_HOST", "value": "custom-named-mariadb"}])
+
+	def test_inject_resolved_db_host_ignores_foreign_release_mariadb(self):
+		# Regression: a mariadb Service for an unrelated release in the same
+		# namespace must NOT be picked up — picking it up would silently
+		# route the new-site Job at the wrong DB credentials.
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_service.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(
+						name="wp-prueba-mariadb",
+						labels={"app.kubernetes.io/instance": "wp-prueba"},
+					)
+				),
+			]
+		)
+		env: list[dict] = []
+
+		with self.assertRaises(RuntimeError) as ctx:
+			_inject_resolved_db_host(
+				core_v1=core_v1,
+				namespace="default",
+				release_name="bench-a",
+				ref_spec={
+					"container_env": [],
+					"container_env_from": [],
+					"volume_mounts": [],
+					"volumes": [],
+				},
+				container_env=env,
+				op_kind="create",
+			)
+
+		self.assertIn("bench-a", str(ctx.exception))
+		self.assertEqual(env, [])
+
+	def test_inject_resolved_db_host_create_op_raises_when_unresolved(self):
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_service.return_value = SimpleNamespace(items=[])
+		env: list[dict] = []
+
+		with self.assertRaises(RuntimeError) as ctx:
+			_inject_resolved_db_host(
+				core_v1=core_v1,
+				namespace="bench-ns",
+				release_name="bench-a",
+				ref_spec={
+					"container_env": [],
+					"container_env_from": [],
+					"volume_mounts": [],
+					"volumes": [],
+				},
+				container_env=env,
+				op_kind="create",
+			)
+
+		self.assertIn("bench-a", str(ctx.exception))
+		self.assertIn("dbHost", str(ctx.exception))
+		self.assertEqual(env, [])
+
+	def test_inject_resolved_db_host_non_create_ops_tolerate_unresolved(self):
+		# Migrate / drop fall back to site_config.json on the bench PVC, so a
+		# resolution miss must not block them.
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_service.return_value = SimpleNamespace(items=[])
+		env: list[dict] = []
+
+		for op_kind in ("migrate", "delete", ""):
+			_inject_resolved_db_host(
+				core_v1=core_v1,
+				namespace="bench-ns",
+				release_name="bench-a",
+				ref_spec={
+					"container_env": [],
+					"container_env_from": [],
+					"volume_mounts": [],
+					"volumes": [],
+				},
+				container_env=env,
+				op_kind=op_kind,
+			)
+		self.assertEqual(env, [])
 
 
 class UnitTestClonePodSpec(UnitTestCase):
@@ -883,7 +1002,7 @@ class UnitTestCreateSiteTask(UnitTestCase):
 			mock_clone.return_value = {
 				"image": "frappe/erpnext:v15.0.0",
 				"pod_level": {},
-				"container_env": [],
+				"container_env": [{"name": "DB_HOST", "value": "release-a-mariadb"}],
 				"container_env_from": [],
 				"container_resources": None,
 				"container_security_context": None,
@@ -975,7 +1094,7 @@ class UnitTestCreateSiteTask(UnitTestCase):
 			mock_clone.return_value = {
 				"image": "frappe/erpnext:v15.0.0",
 				"pod_level": {},
-				"container_env": [],
+				"container_env": [{"name": "DB_HOST", "value": "release-a-mariadb"}],
 				"container_env_from": [],
 				"container_resources": None,
 				"container_security_context": None,
@@ -1037,7 +1156,7 @@ class UnitTestCreateSiteTask(UnitTestCase):
 			mock_clone.return_value = {
 				"image": "frappe/erpnext:v15.0.0",
 				"pod_level": {},
-				"container_env": [],
+				"container_env": [{"name": "DB_HOST", "value": "release-a-mariadb"}],
 				"container_env_from": [],
 				"container_resources": None,
 				"container_security_context": None,
@@ -1735,10 +1854,12 @@ class UnitTestRunSiteOp(UnitTestCase):
 		)
 
 	def _ref_spec(self):
+		# Pre-populate DB_HOST in container_env so the orchestrator's required
+		# DB host resolution succeeds without needing a fake Service list.
 		return {
 			"image": "img:1",
 			"pod_level": {},
-			"container_env": [],
+			"container_env": [{"name": "DB_HOST", "value": "rel-a-mariadb"}],
 			"container_env_from": [],
 			"container_resources": None,
 			"container_security_context": None,
