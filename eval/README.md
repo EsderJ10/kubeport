@@ -183,7 +183,7 @@ default invocation shapes.
 |---|---|---|---|
 | `worker_kill_mid_helm_upgrade` | Stale-operation reconciler recovers worker-stranded Helm Release rows within `STALE_OPERATION_THRESHOLD_MINUTES` (30 min) | [`kubeport/tasks/reconciliation.py:_reconcile_stale_helm_operations`](../kubeport/tasks/reconciliation.py) | Implemented |
 | `job_ttl_expired_before_reconcile` | Reconciliation falls back to ground-truth bench probe when the operation Job is gone before the tick reads it | [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
-| `pod_exec_timeout_during_site_probe` | Three-state probe returns `unknown` on transient pod-exec failure; row stays In Progress for the tick and recovers next tick | `kubeport/utils/observability.py` | Planned (next commit) |
+| `pod_exec_timeout_during_site_probe` | Three-state probe returns `unknown` on transient pod-exec failure; row stays In Progress for the tick and recovers next tick | [`kubeport/utils/discovery.py:_exec_list_sites`](../kubeport/utils/discovery.py) and [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
 | `corrupt_archive_size_sidecar` | PVC-side completion probe marks backup `Failed` and the archive trash cleanup runs when the `<archive>.size` sidecar disappears | `kubeport/tasks/reconciliation.py:reconcile_site_backups` | Planned (next commit) |
 
 ### Running the implemented scenarios
@@ -193,7 +193,7 @@ default invocation shapes.
 - An existing `Helm Release` row in `Deployed` (or `Degraded`) state — the harness drives a no-op upgrade against it. Default: `demo-k3d/demo/demo-bench` (the same release used by `make eval`).
 - The dev container, long-queue worker, and bench scheduler running per the Prerequisites section above.
 
-`job_ttl_expired_before_reconcile` requires:
+`job_ttl_expired_before_reconcile` and `pod_exec_timeout_during_site_probe` both require:
 
 - An existing `Frappe Site` row in `Active` state whose underlying site
   is **actually functional** on the bench (`bench list-apps` exits 0
@@ -202,6 +202,12 @@ default invocation shapes.
   `--site-doc-name <docname>`.
 - The probe contract relies on the existing release/cluster the row
   points at — no extra cluster setup is needed beyond a healthy bench.
+
+`pod_exec_timeout_during_site_probe` additionally monkey-patches
+`kubeport.utils.discovery._exec_list_sites` for one reconcile tick to
+raise a synthetic `urllib3.exceptions.ReadTimeoutError`; the patch is
+restored in a `finally` block before the second tick so the dev
+container is left in the same state it was found.
 
 ```bash
 # Fast path: for both scenarios, backdate the staleness clock or

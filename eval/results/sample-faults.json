@@ -7,87 +7,87 @@
     "mttr_bound_seconds": 1800,
     "release_doc_name": "demo-k3d/demo/demo-bench"
   },
-  "duration_seconds": 16.537,
-  "finished_at": "2026-05-10T10:28:01Z",
-  "generated_at": "2026-05-10T10:28:01Z",
+  "duration_seconds": 34.318,
+  "finished_at": "2026-05-10T10:40:16Z",
+  "generated_at": "2026-05-10T10:40:16Z",
   "scenarios": [
     {
       "defended_invariant": "Stale operation reconciler recovers worker-stranded Helm Release rows",
-      "detail": "Stale-op reconciler recovered the stranded row to 'Deployed' in 1.5s (fast-forwarded).",
+      "detail": "Stale-op reconciler recovered the stranded row to 'Deployed' in 1.8s (fast-forwarded).",
       "expected_mttr_bound_seconds": 1800,
       "fast_forward_used": true,
-      "injected_at": "2026-05-10T10:27:48Z",
-      "mttr_seconds": 1.467,
+      "injected_at": "2026-05-10T10:39:46Z",
+      "mttr_seconds": 1.847,
       "observed": {
         "final_helm_status_detail": "Recovered stale operation: deployed | 19/19 ready",
         "final_status": "Deployed",
         "operation_token_rotated": false
       },
       "passed": true,
-      "recovered_at": "2026-05-10T10:27:49Z",
+      "recovered_at": "2026-05-10T10:39:48Z",
       "scenario": "worker_kill_mid_helm_upgrade",
       "steps": [
         {
-          "at": "2026-05-10T10:27:46Z",
-          "operation_token": "95dd97dfa9275cc3e5bb7b56d7316672",
+          "at": "2026-05-10T10:39:44Z",
+          "operation_token": "7f8a19ca3767fe75046b24c39b55d100",
           "status": "Deployed",
           "step": "pre_status"
         },
         {
-          "at": "2026-05-10T10:27:46Z",
+          "at": "2026-05-10T10:39:45Z",
           "step": "deploy_release_enqueued"
         },
         {
-          "at": "2026-05-10T10:27:47Z",
-          "operation_token": "7f8a19ca3767fe75046b24c39b55d100",
+          "at": "2026-05-10T10:39:45Z",
+          "operation_token": "7ed14e525e94f7756c005c45667e3209",
           "step": "in_progress_observed"
         },
         {
-          "at": "2026-05-10T10:27:48Z",
+          "at": "2026-05-10T10:39:46Z",
           "step": "helm_subprocess_observed"
         },
         {
-          "at": "2026-05-10T10:27:48Z",
+          "at": "2026-05-10T10:39:46Z",
           "killed": [
-            100832,
-            111536,
-            111559
+            112022,
+            115541,
+            115572
           ],
           "parents": [
-            100832,
-            111536
+            112022,
+            115541
           ],
           "step": "worker_killed",
           "targets": [
-            100832,
-            111536,
-            111559
+            112022,
+            115541,
+            115572
           ]
         },
         {
-          "at": "2026-05-10T10:27:48Z",
+          "at": "2026-05-10T10:39:46Z",
           "step": "worker_exit_confirmed"
         },
         {
-          "at": "2026-05-10T10:27:48Z",
-          "operation_token": "7f8a19ca3767fe75046b24c39b55d100",
+          "at": "2026-05-10T10:39:46Z",
+          "operation_token": "7ed14e525e94f7756c005c45667e3209",
           "status": "In Progress",
           "step": "post_kill_state"
         },
         {
-          "at": "2026-05-10T10:27:48Z",
-          "backdated_to": "2026-05-10 11:52:48.244606",
+          "at": "2026-05-10T10:39:46Z",
+          "backdated_to": "2026-05-10 12:04:46.890130",
           "minutes_subtracted": 35,
           "step": "fast_forward_backdated"
         },
         {
-          "at": "2026-05-10T10:27:49Z",
+          "at": "2026-05-10T10:39:48Z",
           "step": "reconciler_invoked"
         },
         {
-          "at": "2026-05-10T10:27:49Z",
+          "at": "2026-05-10T10:39:48Z",
           "helm_status_detail": "Recovered stale operation: deployed | 19/19 ready",
-          "operation_token": "7f8a19ca3767fe75046b24c39b55d100",
+          "operation_token": "7ed14e525e94f7756c005c45667e3209",
           "status": "Deployed",
           "step": "recovered"
         }
@@ -99,56 +99,56 @@
     },
     {
       "defended_invariant": "Reconciliation falls back to ground-truth bench probe when the operation Job has been removed before the tick reads it",
-      "detail": "Bench probe restored row to 'Active' in 3.3s (fast-forwarded).",
+      "detail": "Bench probe restored row to 'Active' in 4.3s (fast-forwarded).",
       "expected_mttr_bound_seconds": 1800,
       "fast_forward_used": true,
-      "injected_at": "2026-05-10T10:27:56Z",
-      "mttr_seconds": 3.258,
+      "injected_at": "2026-05-10T10:39:57Z",
+      "mttr_seconds": 4.313,
       "observed": {
         "final_status": "Active",
         "final_status_detail": ""
       },
       "passed": true,
-      "recovered_at": "2026-05-10T10:27:59Z",
+      "recovered_at": "2026-05-10T10:40:02Z",
       "scenario": "job_ttl_expired_before_reconcile",
       "steps": [
         {
-          "at": "2026-05-10T10:27:53Z",
+          "at": "2026-05-10T10:39:54Z",
           "cluster": "demo-k3d",
           "namespace": "demo",
           "status": "Active",
           "step": "pre_status"
         },
         {
-          "at": "2026-05-10T10:27:54Z",
+          "at": "2026-05-10T10:39:55Z",
           "step": "migrate_enqueued"
         },
         {
-          "at": "2026-05-10T10:27:56Z",
-          "job_name": "ks-erp-cluster-local-99d235424706",
-          "operation_job_token": "99d235424706ea4c2dcd11085fced1de",
+          "at": "2026-05-10T10:39:57Z",
+          "job_name": "ks-erp-cluster-local-fa8268b6f416",
+          "operation_job_token": "fa8268b6f416b4a4fab433f15aa6cd48",
           "step": "job_recorded"
         },
         {
-          "at": "2026-05-10T10:27:56Z",
+          "at": "2026-05-10T10:39:57Z",
           "step": "job_visible_in_cluster"
         },
         {
-          "at": "2026-05-10T10:27:56Z",
-          "job_name": "ks-erp-cluster-local-99d235424706",
+          "at": "2026-05-10T10:39:57Z",
+          "job_name": "ks-erp-cluster-local-fa8268b6f416",
           "step": "job_force_deleted"
         },
         {
-          "at": "2026-05-10T10:27:56Z",
+          "at": "2026-05-10T10:39:57Z",
           "step": "job_404_confirmed"
         },
         {
-          "at": "2026-05-10T10:27:59Z",
+          "at": "2026-05-10T10:40:02Z",
           "step": "reconciler_invoked"
         },
         {
-          "at": "2026-05-10T10:27:59Z",
-          "operation_job_name": "ks-erp-cluster-local-99d235424706",
+          "at": "2026-05-10T10:40:02Z",
+          "operation_job_name": "ks-erp-cluster-local-fa8268b6f416",
           "status": "Active",
           "status_detail": "",
           "step": "recovered"
@@ -158,13 +158,78 @@
         "probe": "kubeport/tasks/reconciliation.py:_probe_site_state",
         "reconciler": "kubeport/tasks/reconciliation.py:_reconcile_site_migrate"
       }
+    },
+    {
+      "defended_invariant": "Three-state probe returns unknown on transient pod-exec failure; the reconciler defers the row instead of defaulting to Failed",
+      "detail": "Probe deferred for 1 tick under exec timeout; row recovered to 'Active' once exec was restored (MTTR 6.9s, fast-forwarded).",
+      "expected_mttr_bound_seconds": 1800,
+      "fast_forward_used": true,
+      "injected_at": "2026-05-10T10:40:08Z",
+      "mttr_seconds": 6.871,
+      "observed": {
+        "deferred_ticks": 1,
+        "final_status": "Active",
+        "final_status_detail": ""
+      },
+      "passed": true,
+      "recovered_at": "2026-05-10T10:40:15Z",
+      "scenario": "pod_exec_timeout_during_site_probe",
+      "steps": [
+        {
+          "at": "2026-05-10T10:40:05Z",
+          "status": "Active",
+          "step": "pre_status"
+        },
+        {
+          "at": "2026-05-10T10:40:06Z",
+          "step": "migrate_enqueued"
+        },
+        {
+          "at": "2026-05-10T10:40:08Z",
+          "job_name": "ks-erp-cluster-local-ec45b56b06a9",
+          "step": "job_recorded"
+        },
+        {
+          "at": "2026-05-10T10:40:08Z",
+          "step": "job_force_deleted"
+        },
+        {
+          "at": "2026-05-10T10:40:08Z",
+          "step": "job_404_confirmed"
+        },
+        {
+          "at": "2026-05-10T10:40:08Z",
+          "step": "exec_patched_to_timeout"
+        },
+        {
+          "at": "2026-05-10T10:40:09Z",
+          "status": "Migrating",
+          "step": "tick_1_under_timeout"
+        },
+        {
+          "at": "2026-05-10T10:40:09Z",
+          "step": "exec_restored"
+        },
+        {
+          "at": "2026-05-10T10:40:15Z",
+          "deferred_ticks": 1,
+          "status": "Active",
+          "status_detail": "",
+          "step": "recovered"
+        }
+      ],
+      "witness": {
+        "exec": "kubeport/utils/discovery.py:_exec_list_sites",
+        "probe": "kubeport/tasks/reconciliation.py:_probe_site_state",
+        "reconciler": "kubeport/tasks/reconciliation.py:_reconcile_site_migrate"
+      }
     }
   ],
   "schema_version": 1,
-  "started_at": "2026-05-10T10:27:44Z",
+  "started_at": "2026-05-10T10:39:42Z",
   "summary": {
     "failed": 0,
-    "passed": 2,
-    "total": 2
+    "passed": 3,
+    "total": 3
   }
 }

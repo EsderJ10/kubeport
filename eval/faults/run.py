@@ -36,6 +36,7 @@ DEFAULT_BENCH_SITE = "frappe-k8s.localhost"
 SCENARIO_INPROC: dict[str, str] = {
 	"worker_kill_mid_helm_upgrade": "_inproc_worker_kill.py",
 	"job_ttl_expired_before_reconcile": "_inproc_job_ttl.py",
+	"pod_exec_timeout_during_site_probe": "_inproc_pod_exec_timeout.py",
 }
 
 
@@ -186,7 +187,7 @@ def _run_scenario(
 			"--in-progress-poll-seconds",
 			str(args.in_progress_poll_seconds),
 		]
-	elif scenario == "job_ttl_expired_before_reconcile":
+	elif scenario in ("job_ttl_expired_before_reconcile", "pod_exec_timeout_during_site_probe"):
 		cmd = [
 			*common,
 			"--site-doc-name",
