@@ -88,7 +88,7 @@
 
 ---
 
-### TODO-03 — `chore/strip-known-failures-disclaimer`
+### TODO-03 — `chore/strip-known-failures-disclaimer` ✅ DONE 2026-05-10
 
 **Goal**: Remove the "Pre-existing test failures" disclaimer once TODO-01 and TODO-02 are merged.
 
