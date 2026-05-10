@@ -37,6 +37,7 @@ SCENARIO_INPROC: dict[str, str] = {
 	"worker_kill_mid_helm_upgrade": "_inproc_worker_kill.py",
 	"job_ttl_expired_before_reconcile": "_inproc_job_ttl.py",
 	"pod_exec_timeout_during_site_probe": "_inproc_pod_exec_timeout.py",
+	"corrupt_archive_size_sidecar": "_inproc_archive_corrupt.py",
 }
 
 
@@ -195,6 +196,16 @@ def _run_scenario(
 			"--migrate-job-poll-seconds",
 			str(args.migrate_job_poll_seconds),
 		]
+	elif scenario == "corrupt_archive_size_sidecar":
+		cmd = [
+			*common,
+			"--site-doc-name",
+			args.site_doc_name,
+			"--backup-job-poll-seconds",
+			str(args.backup_job_poll_seconds),
+			"--cleanup-poll-seconds",
+			str(args.cleanup_poll_seconds),
+		]
 	else:
 		return {
 			"scenario": scenario,
@@ -264,6 +275,18 @@ def main() -> int:
 		type=int,
 		default=120,
 		help="Maximum time to wait for operation_job_name to be recorded after migrate_site (default 120s)",
+	)
+	parser.add_argument(
+		"--backup-job-poll-seconds",
+		type=int,
+		default=600,
+		help="Maximum time to wait for the bench backup Job to record + succeed (default 600s)",
+	)
+	parser.add_argument(
+		"--cleanup-poll-seconds",
+		type=int,
+		default=180,
+		help="Maximum time to wait for archive trash cleanup to remove the archive from the PVC (default 180s)",
 	)
 	parser.add_argument(
 		"--recovery-poll-seconds",

@@ -184,7 +184,7 @@ default invocation shapes.
 | `worker_kill_mid_helm_upgrade` | Stale-operation reconciler recovers worker-stranded Helm Release rows within `STALE_OPERATION_THRESHOLD_MINUTES` (30 min) | [`kubeport/tasks/reconciliation.py:_reconcile_stale_helm_operations`](../kubeport/tasks/reconciliation.py) | Implemented |
 | `job_ttl_expired_before_reconcile` | Reconciliation falls back to ground-truth bench probe when the operation Job is gone before the tick reads it | [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
 | `pod_exec_timeout_during_site_probe` | Three-state probe returns `unknown` on transient pod-exec failure; row stays In Progress for the tick and recovers next tick | [`kubeport/utils/discovery.py:_exec_list_sites`](../kubeport/utils/discovery.py) and [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
-| `corrupt_archive_size_sidecar` | PVC-side completion probe marks backup `Failed` and the archive trash cleanup runs when the `<archive>.size` sidecar disappears | `kubeport/tasks/reconciliation.py:reconcile_site_backups` | Planned (next commit) |
+| `corrupt_archive_size_sidecar` | PVC sidecar probe marks backup `Failed` when the `<archive>.size` sidecar is truncated; row delete enqueues archive trash cleanup that removes the archive from the PVC | [`kubeport/tasks/reconciliation.py:_probe_backup_archive_on_pvc`](../kubeport/tasks/reconciliation.py) and [`kubeport/tasks/site_tasks.py:delete_backup_archive_task`](../kubeport/tasks/site_tasks.py) | Implemented |
 
 ### Running the implemented scenarios
 
@@ -208,6 +208,16 @@ default invocation shapes.
 raise a synthetic `urllib3.exceptions.ReadTimeoutError`; the patch is
 restored in a `finally` block before the second tick so the dev
 container is left in the same state it was found.
+
+`corrupt_archive_size_sidecar` requires the `kubeport-backups` PVC to
+be present in the target namespace (auto-created by Kubeport on the
+first backup) and the bench long-queue worker for the post-Failed row
+delete to enqueue the archive cleanup Job.  The scenario submits two
+short-lived `busybox` Jobs that mount the PVC: one to truncate
+`<archive>.size` to zero bytes, one to verify the archive is absent
+after trash cleanup runs.  Both Jobs carry the standard
+`app.kubernetes.io/managed-by=kubeport` label and a 60s
+`ttlSecondsAfterFinished` so they self-clean.
 
 ```bash
 # Fast path: for both scenarios, backdate the staleness clock or

@@ -7,87 +7,87 @@
     "mttr_bound_seconds": 1800,
     "release_doc_name": "demo-k3d/demo/demo-bench"
   },
-  "duration_seconds": 34.318,
-  "finished_at": "2026-05-10T10:40:16Z",
-  "generated_at": "2026-05-10T10:40:16Z",
+  "duration_seconds": 103.661,
+  "finished_at": "2026-05-10T10:48:55Z",
+  "generated_at": "2026-05-10T10:48:55Z",
   "scenarios": [
     {
       "defended_invariant": "Stale operation reconciler recovers worker-stranded Helm Release rows",
-      "detail": "Stale-op reconciler recovered the stranded row to 'Deployed' in 1.8s (fast-forwarded).",
+      "detail": "Stale-op reconciler recovered the stranded row to 'Deployed' in 2.3s (fast-forwarded).",
       "expected_mttr_bound_seconds": 1800,
       "fast_forward_used": true,
-      "injected_at": "2026-05-10T10:39:46Z",
-      "mttr_seconds": 1.847,
+      "injected_at": "2026-05-10T10:47:16Z",
+      "mttr_seconds": 2.304,
       "observed": {
         "final_helm_status_detail": "Recovered stale operation: deployed | 19/19 ready",
         "final_status": "Deployed",
         "operation_token_rotated": false
       },
       "passed": true,
-      "recovered_at": "2026-05-10T10:39:48Z",
+      "recovered_at": "2026-05-10T10:47:18Z",
       "scenario": "worker_kill_mid_helm_upgrade",
       "steps": [
         {
-          "at": "2026-05-10T10:39:44Z",
-          "operation_token": "7f8a19ca3767fe75046b24c39b55d100",
+          "at": "2026-05-10T10:47:13Z",
+          "operation_token": "7ed14e525e94f7756c005c45667e3209",
           "status": "Deployed",
           "step": "pre_status"
         },
         {
-          "at": "2026-05-10T10:39:45Z",
+          "at": "2026-05-10T10:47:14Z",
           "step": "deploy_release_enqueued"
         },
         {
-          "at": "2026-05-10T10:39:45Z",
-          "operation_token": "7ed14e525e94f7756c005c45667e3209",
+          "at": "2026-05-10T10:47:14Z",
+          "operation_token": "7e50fb9b3c9c56d647c53422b5680715",
           "step": "in_progress_observed"
         },
         {
-          "at": "2026-05-10T10:39:46Z",
+          "at": "2026-05-10T10:47:16Z",
           "step": "helm_subprocess_observed"
         },
         {
-          "at": "2026-05-10T10:39:46Z",
+          "at": "2026-05-10T10:47:16Z",
           "killed": [
-            112022,
-            115541,
-            115572
+            116066,
+            119847,
+            119878
           ],
           "parents": [
-            112022,
-            115541
+            116066,
+            119847
           ],
           "step": "worker_killed",
           "targets": [
-            112022,
-            115541,
-            115572
+            116066,
+            119847,
+            119878
           ]
         },
         {
-          "at": "2026-05-10T10:39:46Z",
+          "at": "2026-05-10T10:47:16Z",
           "step": "worker_exit_confirmed"
         },
         {
-          "at": "2026-05-10T10:39:46Z",
-          "operation_token": "7ed14e525e94f7756c005c45667e3209",
+          "at": "2026-05-10T10:47:16Z",
+          "operation_token": "7e50fb9b3c9c56d647c53422b5680715",
           "status": "In Progress",
           "step": "post_kill_state"
         },
         {
-          "at": "2026-05-10T10:39:46Z",
-          "backdated_to": "2026-05-10 12:04:46.890130",
+          "at": "2026-05-10T10:47:16Z",
+          "backdated_to": "2026-05-10 12:12:16.698132",
           "minutes_subtracted": 35,
           "step": "fast_forward_backdated"
         },
         {
-          "at": "2026-05-10T10:39:48Z",
+          "at": "2026-05-10T10:47:18Z",
           "step": "reconciler_invoked"
         },
         {
-          "at": "2026-05-10T10:39:48Z",
+          "at": "2026-05-10T10:47:18Z",
           "helm_status_detail": "Recovered stale operation: deployed | 19/19 ready",
-          "operation_token": "7ed14e525e94f7756c005c45667e3209",
+          "operation_token": "7e50fb9b3c9c56d647c53422b5680715",
           "status": "Deployed",
           "step": "recovered"
         }
@@ -99,56 +99,56 @@
     },
     {
       "defended_invariant": "Reconciliation falls back to ground-truth bench probe when the operation Job has been removed before the tick reads it",
-      "detail": "Bench probe restored row to 'Active' in 4.3s (fast-forwarded).",
+      "detail": "Bench probe restored row to 'Active' in 6.7s (fast-forwarded).",
       "expected_mttr_bound_seconds": 1800,
       "fast_forward_used": true,
-      "injected_at": "2026-05-10T10:39:57Z",
-      "mttr_seconds": 4.313,
+      "injected_at": "2026-05-10T10:47:31Z",
+      "mttr_seconds": 6.68,
       "observed": {
         "final_status": "Active",
         "final_status_detail": ""
       },
       "passed": true,
-      "recovered_at": "2026-05-10T10:40:02Z",
+      "recovered_at": "2026-05-10T10:47:38Z",
       "scenario": "job_ttl_expired_before_reconcile",
       "steps": [
         {
-          "at": "2026-05-10T10:39:54Z",
+          "at": "2026-05-10T10:47:27Z",
           "cluster": "demo-k3d",
           "namespace": "demo",
           "status": "Active",
           "step": "pre_status"
         },
         {
-          "at": "2026-05-10T10:39:55Z",
+          "at": "2026-05-10T10:47:27Z",
           "step": "migrate_enqueued"
         },
         {
-          "at": "2026-05-10T10:39:57Z",
-          "job_name": "ks-erp-cluster-local-fa8268b6f416",
-          "operation_job_token": "fa8268b6f416b4a4fab433f15aa6cd48",
+          "at": "2026-05-10T10:47:31Z",
+          "job_name": "ks-erp-cluster-local-d9e6deec3273",
+          "operation_job_token": "d9e6deec32736ece4852c2df1d22817d",
           "step": "job_recorded"
         },
         {
-          "at": "2026-05-10T10:39:57Z",
+          "at": "2026-05-10T10:47:31Z",
           "step": "job_visible_in_cluster"
         },
         {
-          "at": "2026-05-10T10:39:57Z",
-          "job_name": "ks-erp-cluster-local-fa8268b6f416",
+          "at": "2026-05-10T10:47:31Z",
+          "job_name": "ks-erp-cluster-local-d9e6deec3273",
           "step": "job_force_deleted"
         },
         {
-          "at": "2026-05-10T10:39:57Z",
+          "at": "2026-05-10T10:47:31Z",
           "step": "job_404_confirmed"
         },
         {
-          "at": "2026-05-10T10:40:02Z",
+          "at": "2026-05-10T10:47:38Z",
           "step": "reconciler_invoked"
         },
         {
-          "at": "2026-05-10T10:40:02Z",
-          "operation_job_name": "ks-erp-cluster-local-fa8268b6f416",
+          "at": "2026-05-10T10:47:38Z",
+          "operation_job_name": "ks-erp-cluster-local-d9e6deec3273",
           "status": "Active",
           "status_detail": "",
           "step": "recovered"
@@ -161,57 +161,57 @@
     },
     {
       "defended_invariant": "Three-state probe returns unknown on transient pod-exec failure; the reconciler defers the row instead of defaulting to Failed",
-      "detail": "Probe deferred for 1 tick under exec timeout; row recovered to 'Active' once exec was restored (MTTR 6.9s, fast-forwarded).",
+      "detail": "Probe deferred for 1 tick under exec timeout; row recovered to 'Active' once exec was restored (MTTR 9.6s, fast-forwarded).",
       "expected_mttr_bound_seconds": 1800,
       "fast_forward_used": true,
-      "injected_at": "2026-05-10T10:40:08Z",
-      "mttr_seconds": 6.871,
+      "injected_at": "2026-05-10T10:47:47Z",
+      "mttr_seconds": 9.63,
       "observed": {
         "deferred_ticks": 1,
         "final_status": "Active",
         "final_status_detail": ""
       },
       "passed": true,
-      "recovered_at": "2026-05-10T10:40:15Z",
+      "recovered_at": "2026-05-10T10:47:56Z",
       "scenario": "pod_exec_timeout_during_site_probe",
       "steps": [
         {
-          "at": "2026-05-10T10:40:05Z",
+          "at": "2026-05-10T10:47:43Z",
           "status": "Active",
           "step": "pre_status"
         },
         {
-          "at": "2026-05-10T10:40:06Z",
+          "at": "2026-05-10T10:47:43Z",
           "step": "migrate_enqueued"
         },
         {
-          "at": "2026-05-10T10:40:08Z",
-          "job_name": "ks-erp-cluster-local-ec45b56b06a9",
+          "at": "2026-05-10T10:47:47Z",
+          "job_name": "ks-erp-cluster-local-cd3dcec1309d",
           "step": "job_recorded"
         },
         {
-          "at": "2026-05-10T10:40:08Z",
+          "at": "2026-05-10T10:47:47Z",
           "step": "job_force_deleted"
         },
         {
-          "at": "2026-05-10T10:40:08Z",
+          "at": "2026-05-10T10:47:47Z",
           "step": "job_404_confirmed"
         },
         {
-          "at": "2026-05-10T10:40:08Z",
+          "at": "2026-05-10T10:47:47Z",
           "step": "exec_patched_to_timeout"
         },
         {
-          "at": "2026-05-10T10:40:09Z",
+          "at": "2026-05-10T10:47:47Z",
           "status": "Migrating",
           "step": "tick_1_under_timeout"
         },
         {
-          "at": "2026-05-10T10:40:09Z",
+          "at": "2026-05-10T10:47:47Z",
           "step": "exec_restored"
         },
         {
-          "at": "2026-05-10T10:40:15Z",
+          "at": "2026-05-10T10:47:56Z",
           "deferred_ticks": 1,
           "status": "Active",
           "status_detail": "",
@@ -223,13 +223,85 @@
         "probe": "kubeport/tasks/reconciliation.py:_probe_site_state",
         "reconciler": "kubeport/tasks/reconciliation.py:_reconcile_site_migrate"
       }
+    },
+    {
+      "defended_invariant": "PVC sidecar probe marks Failed when the archive size sidecar is truncated/missing; row delete enqueues archive trash cleanup that removes the archive from the PVC",
+      "detail": "Sidecar corruption marked row Failed; trash cleanup removed the archive from the PVC in 22.3s (fast-forwarded reconcile).",
+      "expected_mttr_bound_seconds": 1800,
+      "fast_forward_used": true,
+      "injected_at": "2026-05-10T10:48:31Z",
+      "mttr_seconds": 22.335,
+      "observed": {
+        "archive_absent_after_cleanup": true,
+        "cleanup_check_log": "ABSENT\nSIZE_ABSENT",
+        "final_status": "Failed",
+        "final_status_detail": "Backup Job reported success but the archive is not on the PVC."
+      },
+      "passed": true,
+      "recovered_at": "2026-05-10T10:48:53Z",
+      "scenario": "corrupt_archive_size_sidecar",
+      "steps": [
+        {
+          "at": "2026-05-10T10:48:02Z",
+          "cluster": "demo-k3d",
+          "namespace": "demo",
+          "status": "Active",
+          "step": "pre_status"
+        },
+        {
+          "at": "2026-05-10T10:48:02Z",
+          "backup_docname": "erp.cluster.local::erp.cluster.local-20260510124802",
+          "step": "backup_enqueued"
+        },
+        {
+          "at": "2026-05-10T10:48:08Z",
+          "job_name": "ks-erp-cluster-local-5dd0f11cfa57",
+          "step": "backup_job_recorded",
+          "storage_path": "/mnt/kubeport-backups/demo-k3d/demo/erp.cluster.local/erp.cluster.local-20260510124802.tar.gz"
+        },
+        {
+          "at": "2026-05-10T10:48:26Z",
+          "step": "backup_job_succeeded"
+        },
+        {
+          "at": "2026-05-10T10:48:31Z",
+          "log": "SIZE_AFTER=0",
+          "step": "size_sidecar_truncated"
+        },
+        {
+          "at": "2026-05-10T10:48:37Z",
+          "step": "reconciler_invoked"
+        },
+        {
+          "at": "2026-05-10T10:48:37Z",
+          "size_bytes": 0,
+          "status": "Failed",
+          "status_detail": "Backup Job reported success but the archive is not on the PVC.",
+          "step": "reconcile_terminal"
+        },
+        {
+          "at": "2026-05-10T10:48:37Z",
+          "step": "backup_row_deleted"
+        },
+        {
+          "archive_absent": true,
+          "at": "2026-05-10T10:48:53Z",
+          "log": "ABSENT\nSIZE_ABSENT",
+          "step": "cleanup_check"
+        }
+      ],
+      "witness": {
+        "cleanup": "kubeport/tasks/site_tasks.py:delete_backup_archive_task",
+        "probe": "kubeport/tasks/reconciliation.py:_probe_backup_archive_on_pvc",
+        "reconciler": "kubeport/tasks/reconciliation.py:_reconcile_site_backup"
+      }
     }
   ],
   "schema_version": 1,
-  "started_at": "2026-05-10T10:39:42Z",
+  "started_at": "2026-05-10T10:47:11Z",
   "summary": {
     "failed": 0,
-    "passed": 3,
-    "total": 3
+    "passed": 4,
+    "total": 4
   }
 }
