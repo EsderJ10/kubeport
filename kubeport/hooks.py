@@ -256,9 +256,14 @@ fixtures = [
 	{"dt": "Dashboard", "filters": [["module", "=", "Kubeport"]]},
 ]
 
-# default_log_clearing_doctypes = {
-# 	"Logging DocType Name": 30  # days to retain logs
-# }
+# Frappe's built-in periodic log clearer reads this map.  Reconciliation runs
+# every 5 minutes and emits one Error Log row per failing release / bundle on
+# state transitions; over a multi-cluster bench this accumulates indefinitely
+# without a TTL.  30 days keeps the table searchable while preserving enough
+# history to investigate recurring drift.
+default_log_clearing_doctypes = {
+	"Error Log": 30,
+}
 
 # Translation
 # ------------
