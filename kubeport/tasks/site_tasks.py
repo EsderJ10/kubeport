@@ -29,6 +29,7 @@ from typing import Any
 import frappe
 from kubernetes import client
 
+from kubeport.utils import metrics
 from kubeport.utils.discovery import (
 	FRAPPE_BENCH_SITES_PATH,
 	_select_site_discovery_pod,
@@ -160,19 +161,26 @@ def _create_creds_secret(doc: Any, job_name: str) -> dict[str, Any]:
 	)
 
 
-def create_site_task(site_docname: str, operation_token: str):
+def create_site_task(site_docname: str, operation_token: str, correlation_id: str | None = None):
 	"""Background task: submit a Kubernetes Job that runs ``bench new-site``."""
-	_run_site_op(
-		site_docname=site_docname,
-		operation_token=operation_token,
-		config=_CREATE_OP_CONFIG,
-		build_command=_create_command,
-		build_env=_create_env,
-		build_creds_secret=_create_creds_secret,
-	)
+	with metrics.correlation_scope(correlation_id):
+		metrics.logger("kubeport.site").info("worker enter create_site_task site=%s", site_docname)
+		_run_site_op(
+			site_docname=site_docname,
+			operation_token=operation_token,
+			config=_CREATE_OP_CONFIG,
+			build_command=_create_command,
+			build_env=_create_env,
+			build_creds_secret=_create_creds_secret,
+		)
 
 
-def cancel_site_task(cluster: str, namespace: str, job_name: str):
+def cancel_site_task(
+	cluster: str,
+	namespace: str,
+	job_name: str,
+	correlation_id: str | None = None,
+):
 	"""Background task: best-effort delete the site-creation Job and its creds Secret.
 
 	Called from ``FrappeSite.cancel_site`` and ``FrappeSite.on_trash``.  The
@@ -185,6 +193,17 @@ def cancel_site_task(cluster: str, namespace: str, job_name: str):
 	backstop for the narrow window where the Job never existed (e.g. Secret
 	got applied, Job submission failed) or ownerReferences were not attached.
 	"""
+	with metrics.correlation_scope(correlation_id):
+		metrics.logger("kubeport.site").info(
+			"worker enter cancel_site_task cluster=%s namespace=%s job=%s",
+			cluster,
+			namespace,
+			job_name,
+		)
+		_cancel_site_task_impl(cluster, namespace, job_name)
+
+
+def _cancel_site_task_impl(cluster: str, namespace: str, job_name: str):
 	from kubernetes.client.rest import ApiException
 
 	try:
@@ -252,16 +271,18 @@ def _delete_creds_secret(doc: Any, job_name: str) -> dict[str, Any] | None:
 	)
 
 
-def delete_site_task(site_docname: str, operation_token: str):
+def delete_site_task(site_docname: str, operation_token: str, correlation_id: str | None = None):
 	"""Background task: submit a Kubernetes Job that runs ``bench drop-site``."""
-	_run_site_op(
-		site_docname=site_docname,
-		operation_token=operation_token,
-		config=_DELETE_OP_CONFIG,
-		build_command=_delete_command,
-		build_env=_delete_env,
-		build_creds_secret=_delete_creds_secret,
-	)
+	with metrics.correlation_scope(correlation_id):
+		metrics.logger("kubeport.site").info("worker enter delete_site_task site=%s", site_docname)
+		_run_site_op(
+			site_docname=site_docname,
+			operation_token=operation_token,
+			config=_DELETE_OP_CONFIG,
+			build_command=_delete_command,
+			build_env=_delete_env,
+			build_creds_secret=_delete_creds_secret,
+		)
 
 
 def _migrate_command(doc: Any) -> str:
@@ -463,20 +484,35 @@ def _archive_delete_job_name(storage_path: str) -> str:
 	return f"ks-delete-backup-{slug[:30]}"
 
 
-def migrate_site_task(site_docname: str, operation_token: str):
+def migrate_site_task(site_docname: str, operation_token: str, correlation_id: str | None = None):
 	"""Background task: submit a Kubernetes Job that runs ``bench migrate``."""
-	_run_site_op(
-		site_docname=site_docname,
-		operation_token=operation_token,
-		config=_MIGRATE_OP_CONFIG,
-		build_command=_migrate_command,
-		build_env=_migrate_env,
-		build_creds_secret=None,
-	)
+	with metrics.correlation_scope(correlation_id):
+		metrics.logger("kubeport.site").info("worker enter migrate_site_task site=%s", site_docname)
+		_run_site_op(
+			site_docname=site_docname,
+			operation_token=operation_token,
+			config=_MIGRATE_OP_CONFIG,
+			build_command=_migrate_command,
+			build_env=_migrate_env,
+			build_creds_secret=None,
+		)
 
 
-def backup_site_task(site_docname: str, backup_docname: str, operation_token: str):
+def backup_site_task(
+	site_docname: str,
+	backup_docname: str,
+	operation_token: str,
+	correlation_id: str | None = None,
+):
 	"""Background task: submit a Kubernetes Job that runs ``bench backup``."""
+	with metrics.correlation_scope(correlation_id):
+		metrics.logger("kubeport.site").info(
+			"worker enter backup_site_task site=%s backup=%s", site_docname, backup_docname
+		)
+		_backup_site_task_impl(site_docname, backup_docname, operation_token)
+
+
+def _backup_site_task_impl(site_docname: str, backup_docname: str, operation_token: str):
 	if not _backup_operation_matches(backup_docname, operation_token, ("Pending",)):
 		return
 
@@ -539,8 +575,21 @@ def backup_site_task(site_docname: str, backup_docname: str, operation_token: st
 	)
 
 
-def restore_site_task(site_docname: str, backup_docname: str, operation_token: str):
+def restore_site_task(
+	site_docname: str,
+	backup_docname: str,
+	operation_token: str,
+	correlation_id: str | None = None,
+):
 	"""Background task: submit a Kubernetes Job that runs ``bench restore``."""
+	with metrics.correlation_scope(correlation_id):
+		metrics.logger("kubeport.site").info(
+			"worker enter restore_site_task site=%s backup=%s", site_docname, backup_docname
+		)
+		_restore_site_task_impl(site_docname, backup_docname, operation_token)
+
+
+def _restore_site_task_impl(site_docname: str, backup_docname: str, operation_token: str):
 	if not _backup_operation_matches(backup_docname, operation_token, ("Restoring",)):
 		return
 
@@ -594,8 +643,25 @@ def restore_site_task(site_docname: str, backup_docname: str, operation_token: s
 	)
 
 
-def delete_backup_archive_task(cluster: str, namespace: str, release_name: str, storage_path: str):
+def delete_backup_archive_task(
+	cluster: str,
+	namespace: str,
+	release_name: str,
+	storage_path: str,
+	correlation_id: str | None = None,
+):
 	"""Best-effort archive delete for an Available backup row being trashed."""
+	with metrics.correlation_scope(correlation_id):
+		metrics.logger("kubeport.backup").info(
+			"worker enter delete_backup_archive_task cluster=%s namespace=%s path=%s",
+			cluster,
+			namespace,
+			storage_path,
+		)
+		_delete_backup_archive_task_impl(cluster, namespace, release_name, storage_path)
+
+
+def _delete_backup_archive_task_impl(cluster: str, namespace: str, release_name: str, storage_path: str):
 	if not storage_path:
 		return
 

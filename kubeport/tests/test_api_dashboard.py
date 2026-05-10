@@ -6,7 +6,16 @@ from unittest.mock import patch
 
 from frappe.tests import UnitTestCase
 
-from kubeport.api.dashboard import count_stale_operations, stale_operations_card_value
+from kubeport.api.dashboard import (
+	count_stale_operations,
+	helm_p95_latency_card_value,
+	internal_metrics_summary,
+	orphan_jobs_swept_card_value,
+	reconcile_ticks_card_value,
+	stale_operations_card_value,
+	stale_ops_recovered_card_value,
+)
+from kubeport.utils import metrics
 from kubeport.utils.constants import STALE_OPERATION_THRESHOLD_MINUTES
 
 
@@ -96,3 +105,60 @@ class UnitTestApiDashboard(UnitTestCase):
 			result = stale_operations_card_value()
 
 		self.assertEqual(result, {"value": 7})
+
+
+class UnitTestApiDashboardInternalMetrics(UnitTestCase):
+	"""Cover the four new internal-observability number-card endpoints
+	introduced by TODO-14.  Each one is a thin wrapper around the
+	``kubeport.utils.metrics`` module; the tests stub the metrics module so
+	the dashboard contract can be verified without a live Redis."""
+
+	def test_reconcile_ticks_card_reads_counter(self):
+		with patch("kubeport.api.dashboard.metrics.get_counter", return_value=42) as gc:
+			result = reconcile_ticks_card_value()
+		self.assertEqual(result, {"value": 42})
+		gc.assert_called_once_with(metrics.COUNTER_RECONCILE_TICKS)
+
+	def test_stale_ops_recovered_card_reads_counter(self):
+		with patch("kubeport.api.dashboard.metrics.get_counter", return_value=3) as gc:
+			result = stale_ops_recovered_card_value()
+		self.assertEqual(result, {"value": 3})
+		gc.assert_called_once_with(metrics.COUNTER_STALE_OPS_RECOVERED)
+
+	def test_orphan_jobs_swept_card_reads_counter(self):
+		with patch("kubeport.api.dashboard.metrics.get_counter", return_value=1) as gc:
+			result = orphan_jobs_swept_card_value()
+		self.assertEqual(result, {"value": 1})
+		gc.assert_called_once_with(metrics.COUNTER_ORPHAN_JOBS_SWEPT)
+
+	def test_helm_p95_latency_card_reports_p95_in_seconds(self):
+		summary = {"count": 100, "p50": 0.4, "p95": 0.85, "p99": 1.2}
+		with patch("kubeport.api.dashboard.metrics.get_histogram_summary", return_value=summary):
+			result = helm_p95_latency_card_value()
+		self.assertEqual(result, {"value": 0.85})
+
+	def test_helm_p95_latency_card_returns_zero_for_empty_window(self):
+		empty = {"count": 0, "p50": 0.0, "p95": 0.0, "p99": 0.0}
+		with patch("kubeport.api.dashboard.metrics.get_histogram_summary", return_value=empty):
+			result = helm_p95_latency_card_value()
+		self.assertEqual(result, {"value": 0.0})
+
+	def test_internal_metrics_summary_aggregates_counters_and_histogram(self):
+		counters = {
+			metrics.COUNTER_RECONCILE_TICKS: 12,
+			metrics.COUNTER_STALE_OPS_RECOVERED: 1,
+			metrics.COUNTER_ORPHAN_JOBS_SWEPT: 0,
+		}
+		histogram = {"count": 4, "p50": 0.1, "p95": 0.4, "p99": 0.9}
+		with (
+			patch("kubeport.api.dashboard.metrics.get_all_counters", return_value=counters),
+			patch(
+				"kubeport.api.dashboard.metrics.get_histogram_summary",
+				return_value=histogram,
+			) as ghs,
+		):
+			result = internal_metrics_summary()
+
+		self.assertEqual(result["counters"], counters)
+		self.assertEqual(result["histograms"][metrics.HISTOGRAM_HELM_LATENCY], histogram)
+		ghs.assert_called_once_with(metrics.HISTOGRAM_HELM_LATENCY)

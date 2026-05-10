@@ -1,0 +1,20 @@
+{
+ "color": "#9F7AEA",
+ "doctype": "Number Card",
+ "document_type": null,
+ "dynamic_filters_json": "[]",
+ "filters_json": "[]",
+ "function": null,
+ "is_public": 1,
+ "is_standard": 1,
+ "label": "Orphan Jobs Swept",
+ "method": "kubeport.api.dashboard.orphan_jobs_swept_card_value",
+ "module": "Kubeport",
+ "name": "Orphan Jobs Swept",
+ "owner": "Administrator",
+ "report_function": null,
+ "report_name": null,
+ "show_percentage_stats": 0,
+ "stats_time_interval": "Daily",
+ "type": "Custom"
+}

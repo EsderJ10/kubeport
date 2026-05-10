@@ -1,0 +1,20 @@
+{
+ "color": "#3490DC",
+ "doctype": "Number Card",
+ "document_type": null,
+ "dynamic_filters_json": "[]",
+ "filters_json": "[]",
+ "function": null,
+ "is_public": 1,
+ "is_standard": 1,
+ "label": "Reconcile Ticks",
+ "method": "kubeport.api.dashboard.reconcile_ticks_card_value",
+ "module": "Kubeport",
+ "name": "Reconcile Ticks",
+ "owner": "Administrator",
+ "report_function": null,
+ "report_name": null,
+ "show_percentage_stats": 0,
+ "stats_time_interval": "Daily",
+ "type": "Custom"
+}

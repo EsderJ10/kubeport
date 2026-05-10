@@ -12,6 +12,7 @@ import secrets
 import frappe
 from frappe.model.document import Document
 
+from kubeport.utils import metrics
 from kubeport.utils.k8s_resources import load_managed_manifest_objects
 
 
@@ -72,13 +73,19 @@ class ServiceBundle(Document):
 
 	def _enqueue_operation(self, task_path: str, status: str, message: str) -> None:
 		operation_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("status", status)
 		self.db_set("status_detail", "")
 		self.db_set("operation_token", operation_token)
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.bundle").info(
+				"enqueue %s bundle=%s", task_path.rsplit(".", 1)[-1], self.name
+			)
 		frappe.enqueue(
 			task_path,
 			bundle_name=self.name,
 			operation_token=operation_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)

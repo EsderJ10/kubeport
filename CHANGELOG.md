@@ -6,6 +6,79 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-10 — Internal observability: counters, helm-latency histogram, and correlation IDs
+
+### Context
+
+The thesis claims robustness defenses (stale-operation reconciler, orphan-job
+sweep, helm subprocess timing) but had no way to measure how often any of
+them fire under load.  TODO-14 calls for in-process counters surfaced on the
+operator workspace plus a UUID4 correlation ID threaded through `frappe.enqueue`
+so a single operation can be grep-ed from web → enqueue → worker.
+
+### Decision
+
+Add a Frappe-native `kubeport/utils/metrics.py` backed by `frappe.cache()`
+(Redis under the hood, the same store Frappe already uses).  Counters
+(`reconcile_ticks_total`, `stale_ops_recovered_total`, `orphan_jobs_swept_total`)
+use raw `INCRBY` against keys made site-scoped via `RedisWrapper.make_key`.
+A rolling-window histogram of helm subprocess wall-clock latency is recorded
+via `LPUSH` + `LTRIM`; percentiles (p50/p95/p99) are computed at read time.
+
+The correlation ID is generated at the `frappe.enqueue` site, passed as a
+kwarg to the worker, and bound onto `frappe.local.correlation_id` for the
+duration of the worker body via a `correlation_scope` context manager.  A
+small `metrics.logger(name)` proxy reads that local and prefixes every log
+line with `[correlation_id=<cid>]`, giving the same log substring on both
+sides of the enqueue.
+
+### Rejected alternatives
+
+- **Prometheus / external metrics dependency.**  Out of scope for the thesis
+  surface; the TODO explicitly forbids it.  Frappe-native is enough to
+  surface live values on the operator workspace.
+- **Process-local counters only.**  Would not satisfy the acceptance
+  criterion (the worker and the web request live in different processes).
+- **Persisting metrics into a new DocType row.**  Deferred; in-Redis values
+  meet the criterion and avoid a write hot path on every reconciliation tick.
+
+### Implementation details
+
+- New `kubeport/utils/metrics.py`: counters (whitelist-checked), rolling
+  histogram, `correlation_scope` / `current_correlation_id` / `logger`
+  helpers.
+- New whitelisted endpoints on `kubeport/api/dashboard.py`:
+  `internal_metrics_summary`, `reconcile_ticks_card_value`,
+  `stale_ops_recovered_card_value`, `orphan_jobs_swept_card_value`,
+  `helm_p95_latency_card_value`.
+- Four new Number Cards under `kubeport/kubeport/number_card/`, surfaced as
+  a new "Internal Observability" section on `Kubeport Operations` workspace.
+- Counter increments wired into `kubeport/tasks/reconciliation.py`
+  (`reconcile_all_releases`, `reconcile_site_backups`,
+  `_set_stale_helm_operation_state`, `_sweep_orphan_site_jobs`) and the
+  helm-subprocess timer wired into `kubeport/utils/helm.py` (`_run_helm`).
+- Correlation ID generated in `Helm Release` `deploy_release`,
+  `uninstall_release`, `rollback_release`; propagated as a `correlation_id`
+  kwarg into `install_or_upgrade_release`, `rollback_release`,
+  `uninstall_release` worker tasks.  Follow-up commit extended the same
+  pattern to every remaining enqueue site: `Frappe Site` (create / delete /
+  migrate / backup / restore / cancel / on_trash / cascade), `Frappe Site
+  Backup.on_trash` → `delete_backup_archive_task`, `Service Bundle` (apply /
+  delete), `Helm Repository` (`add_and_sync_repo` / `sync_repo_charts` and
+  the daily `sync_all_repos` scheduler tick), `Kubernetes Command.execute`,
+  and `site_image_tasks.enqueue_sync_site_image_catalog`.  Each task accepts
+  `correlation_id: str | None = None` and wraps its body in
+  `metrics.correlation_scope`.
+- `stale_ops_recovered_total` counts every successful `_set_stale_helm_operation_state`
+  write (including the `Failed` terminal); `orphan_jobs_swept_total` counts
+  every sweep action taken (404s on the cluster side are still counted as
+  the orphan was already gone — the row was nonetheless reconciled).
+- New unit suite `kubeport/tests/test_metrics.py` covers counter, histogram,
+  and correlation-scope contracts; `kubeport/tests/test_api_dashboard.py`
+  is extended with one test per new endpoint.
+
+---
+
 ## 2026-05-10 — Documentation overhaul: industry-standard layout
 
 ### Context

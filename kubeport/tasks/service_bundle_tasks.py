@@ -7,6 +7,7 @@ Service Bundle document.
 
 import frappe
 
+from kubeport.utils import metrics
 from kubeport.utils.k8s_client import get_k8s_api_client
 from kubeport.utils.k8s_resources import (
 	apply_resource,
@@ -17,12 +18,22 @@ from kubeport.utils.k8s_resources import (
 _SERVICE_BUNDLE_STATUS_DETAIL_LIMIT = 500
 
 
-def apply_bundle_task(bundle_name: str, operation_token: str):
+def apply_bundle_task(
+	bundle_name: str,
+	operation_token: str,
+	correlation_id: str | None = None,
+):
 	"""Background task: apply K8s resources defined in a Service Bundle.
 
 	Uses server-side apply for idempotency — re-deploying an already-active
 	bundle updates it instead of failing with a 409 Conflict.
 	"""
+	with metrics.correlation_scope(correlation_id):
+		_apply_bundle_task_impl(bundle_name, operation_token)
+
+
+def _apply_bundle_task_impl(bundle_name: str, operation_token: str):
+	metrics.logger("kubeport.bundle").info("worker enter apply_bundle_task bundle=%s", bundle_name)
 	if not _bundle_operation_matches(bundle_name, operation_token, "In Progress"):
 		return
 
@@ -67,8 +78,18 @@ def apply_bundle_task(bundle_name: str, operation_token: str):
 		)
 
 
-def delete_bundle_task(bundle_name: str, operation_token: str):
+def delete_bundle_task(
+	bundle_name: str,
+	operation_token: str,
+	correlation_id: str | None = None,
+):
 	"""Background task: delete K8s resources defined in a Service Bundle."""
+	with metrics.correlation_scope(correlation_id):
+		_delete_bundle_task_impl(bundle_name, operation_token)
+
+
+def _delete_bundle_task_impl(bundle_name: str, operation_token: str):
+	metrics.logger("kubeport.bundle").info("worker enter delete_bundle_task bundle=%s", bundle_name)
 	if not _bundle_operation_matches(bundle_name, operation_token, "Deleting"):
 		return
 

@@ -27,7 +27,7 @@ from kubeport.kubeport.doctype.helm_release.helm_release import (
 	calculate_release_spec_hash,
 	prepare_release_values,
 )
-from kubeport.utils import helm
+from kubeport.utils import helm, metrics
 from kubeport.utils.release_health import ResourceHealth, classify_release_state
 
 _HELM_STATUS_DETAIL_LIMIT = 500
@@ -39,12 +39,22 @@ _UNINSTALLING_WORKER_STATUS = "Uninstalling"
 # ---------------------------------------------------------------------------
 
 
-def add_and_sync_repo(repo_name: str, sync_token: str):
+def add_and_sync_repo(
+	repo_name: str,
+	sync_token: str,
+	correlation_id: str | None = None,
+):
 	"""Register a Helm repo and trigger a chart index sync.
 
 	Called automatically when a new Helm Repository document is created
 	(via ``after_insert``).
 	"""
+	with metrics.correlation_scope(correlation_id):
+		_add_and_sync_repo_impl(repo_name, sync_token)
+
+
+def _add_and_sync_repo_impl(repo_name: str, sync_token: str):
+	metrics.logger("kubeport.helm").info("worker enter add_and_sync_repo repo=%s", repo_name)
 	if not _repo_sync_token_matches(repo_name, sync_token):
 		return
 
@@ -86,11 +96,21 @@ def add_and_sync_repo(repo_name: str, sync_token: str):
 		)
 
 
-def sync_repo_charts(repo_name: str, sync_token: str):
+def sync_repo_charts(
+	repo_name: str,
+	sync_token: str,
+	correlation_id: str | None = None,
+):
 	"""Update a repo's chart index and sync new charts to the database.
 
 	Called by the "Sync Charts" button and the daily scheduler.
 	"""
+	with metrics.correlation_scope(correlation_id):
+		_sync_repo_charts_impl(repo_name, sync_token)
+
+
+def _sync_repo_charts_impl(repo_name: str, sync_token: str):
+	metrics.logger("kubeport.helm").info("worker enter sync_repo_charts repo=%s", repo_name)
 	if not _repo_sync_token_matches(repo_name, sync_token):
 		return
 
@@ -150,12 +170,16 @@ def sync_all_repos():
 	for repo_name in repos:
 		try:
 			sync_token = secrets.token_hex(16)
+			correlation_id = metrics.new_correlation_id()
 			frappe.db.set_value("Helm Repository", repo_name, "status", "Syncing")
 			frappe.db.set_value("Helm Repository", repo_name, "sync_token", sync_token)
+			with metrics.correlation_scope(correlation_id):
+				metrics.logger("kubeport.helm").info("enqueue sync_repo_charts (daily) repo=%s", repo_name)
 			frappe.enqueue(
 				"kubeport.tasks.helm_tasks.sync_repo_charts",
 				repo_name=repo_name,
 				sync_token=sync_token,
+				correlation_id=correlation_id,
 				queue="long",
 				enqueue_after_commit=True,
 			)
@@ -171,7 +195,11 @@ def sync_all_repos():
 # ---------------------------------------------------------------------------
 
 
-def install_or_upgrade_release(release_name: str, operation_token: str):
+def install_or_upgrade_release(
+	release_name: str,
+	operation_token: str,
+	correlation_id: str | None = None,
+):
 	"""Install or upgrade a Helm release on the target cluster.
 
 	Uses ``helm upgrade --install`` for idempotency.  Re-checks
@@ -179,6 +207,12 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 	double-click on Deploy, mid-flight uninstall) never overwrites the newer
 	operation's state.
 	"""
+	with metrics.correlation_scope(correlation_id):
+		_install_or_upgrade_release_impl(release_name, operation_token)
+
+
+def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
+	metrics.logger("kubeport.helm").info("worker enter install_or_upgrade_release release=%s", release_name)
 	if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
 		return
 
@@ -303,8 +337,21 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 		)
 
 
-def rollback_release(release_name: str, operation_token: str, target_revision: int):
+def rollback_release(
+	release_name: str,
+	operation_token: str,
+	target_revision: int,
+	correlation_id: str | None = None,
+):
 	"""Roll back a Helm release to a previous revision on the target cluster."""
+	with metrics.correlation_scope(correlation_id):
+		_rollback_release_impl(release_name, operation_token, target_revision)
+
+
+def _rollback_release_impl(release_name: str, operation_token: str, target_revision: int):
+	metrics.logger("kubeport.helm").info(
+		"worker enter rollback_release release=%s revision=%s", release_name, target_revision
+	)
 	if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
 		return
 
@@ -427,8 +474,18 @@ def rollback_release(release_name: str, operation_token: str, target_revision: i
 		)
 
 
-def uninstall_release(release_name: str, operation_token: str):
+def uninstall_release(
+	release_name: str,
+	operation_token: str,
+	correlation_id: str | None = None,
+):
 	"""Uninstall a Helm release from the target cluster."""
+	with metrics.correlation_scope(correlation_id):
+		_uninstall_release_impl(release_name, operation_token)
+
+
+def _uninstall_release_impl(release_name: str, operation_token: str):
+	metrics.logger("kubeport.helm").info("worker enter uninstall_release release=%s", release_name)
 	if not _release_operation_matches(release_name, operation_token, _UNINSTALLING_WORKER_STATUS):
 		return
 

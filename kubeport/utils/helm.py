@@ -28,6 +28,8 @@ from typing import Any
 import frappe
 import yaml
 
+from kubeport.utils import metrics
+
 _HELM_WORKER_TIMEOUT_SECONDS = 600
 _HELM_READ_TIMEOUT_SECONDS = 30
 
@@ -522,13 +524,14 @@ def _run_helm(cmd: list[str], timeout: int = _HELM_WORKER_TIMEOUT_SECONDS) -> st
 		frappe.ValidationError: If the command fails (non-zero exit code).
 	"""
 	try:
-		result = subprocess.run(
-			cmd,
-			capture_output=True,
-			text=True,
-			check=True,
-			timeout=timeout,
-		)
+		with metrics.time_helm_subprocess():
+			result = subprocess.run(
+				cmd,
+				capture_output=True,
+				text=True,
+				check=True,
+				timeout=timeout,
+			)
 		return result.stdout
 	except FileNotFoundError:
 		frappe.throw("Helm CLI binary not found. Please install Helm 3: https://helm.sh/docs/intro/install/")

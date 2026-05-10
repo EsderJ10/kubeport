@@ -15,6 +15,8 @@ import re
 import frappe
 from frappe.model.document import Document
 
+from kubeport.utils import metrics
+
 _STATUS_DETAIL_LIMIT = 500
 _BACKUP_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*[a-z0-9]$")
 
@@ -85,12 +87,19 @@ class FrappeSiteBackup(Document):
 		if not self.storage_path:
 			return
 
+		correlation_id = metrics.new_correlation_id()
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.backup").info(
+				"enqueue delete_backup_archive_task path=%s",
+				self.storage_path,
+			)
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.delete_backup_archive_task",
 			cluster=self.cluster,
 			namespace=self.namespace or "default",
 			release_name=self.source_release_name or "",
 			storage_path=self.storage_path,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)

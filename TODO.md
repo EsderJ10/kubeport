@@ -371,7 +371,7 @@
 
 ---
 
-### TODO-14 — `feat/internal-observability`
+### TODO-14 — `feat/internal-observability` ✅ DONE 2026-05-10 — 4f477e0
 
 **Goal**: Make Kubeport itself measurable. Counters and histograms surfaced on the existing operator workspace dashboard, plus correlation-ID-threaded structured logs.
 

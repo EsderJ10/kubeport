@@ -17,6 +17,8 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import now_datetime
 
+from kubeport.utils import metrics
+
 _NAMESPACED_KINDS = {
 	"PersistentVolumeClaim",
 	"Pod",
@@ -112,11 +114,15 @@ class KubernetesCommand(Document):
 		if self.action == "Delete":
 			if not self.confirm_destructive:
 				frappe.throw("Confirm Destructive must be checked before executing a Delete.")
+			correlation_id = metrics.new_correlation_id()
 			self.db_set("status", "Running")
 			self.db_set("started_at", now_datetime())
+			with metrics.correlation_scope(correlation_id):
+				metrics.logger("kubeport.k8scmd").info("enqueue run_kubernetes_command command=%s", self.name)
 			frappe.enqueue(
 				"kubeport.tasks.kubernetes_command_tasks.run_kubernetes_command",
 				command_docname=self.name,
+				correlation_id=correlation_id,
 				queue="long",
 				enqueue_after_commit=True,
 			)
