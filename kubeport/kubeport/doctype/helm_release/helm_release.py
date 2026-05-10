@@ -295,6 +295,7 @@ class HelmRelease(Document):
 			return {
 				"rows": [r.to_dict() for r in walk(self.name)],
 				"error": "",
+				"is_frappe_site_chart": _release_uses_frappe_site_chart(self),
 			}
 		except Exception as e:
 			frappe.logger("kubeport").warning(
@@ -305,6 +306,7 @@ class HelmRelease(Document):
 			return {
 				"rows": [],
 				"error": _format_observed_state_error(e),
+				"is_frappe_site_chart": _release_uses_frappe_site_chart(self),
 			}
 
 	@frappe.whitelist()
@@ -644,6 +646,16 @@ def render_ingress_values(
 def is_frappe_site_chart(chart_doc: Any) -> bool:
 	chart_name = _chart_value(chart_doc, "chart_name") or _chart_value(chart_doc, "name")
 	return "erpnext" in chart_name.lower() or "frappe" in chart_name.lower()
+
+
+def _release_uses_frappe_site_chart(release_doc: Any) -> bool:
+	chart = getattr(release_doc, "chart", None)
+	if not chart:
+		return False
+	try:
+		return is_frappe_site_chart(frappe.get_doc("Helm Chart", chart))
+	except Exception:
+		return False
 
 
 def _normalize_values_for_hash(values_yaml: str | None) -> Any:

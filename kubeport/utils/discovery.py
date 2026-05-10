@@ -7,6 +7,7 @@ These functions never persist discovered data to MariaDB.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -44,6 +45,9 @@ _SITE_DISCOVERY_ALLOWED_NAME_TOKENS = (
 	"socketio",
 )
 _POD_SUMMARY_LIMIT = 6
+_DISCOVERY_REQUEST_TIMEOUT_SECONDS = 10.0
+_DEFAULT_INGRESS_CLASS_ANNOTATION = "ingressclass.kubernetes.io/is-default-class"
+_INGRESS_CONTROLLER_TOKENS = ("ingress", "nginx", "traefik", "haproxy", "kong", "envoy")
 
 
 def discover_cluster_releases(cluster_name: str) -> list[dict[str, Any]]:
@@ -122,6 +126,154 @@ def discover_default_storage_class(cluster_name: str) -> str | None:
 	return None
 
 
+def discover_ingress_classes(cluster_name: str) -> list[dict[str, Any]]:
+	"""Return live IngressClass options for a cluster.
+
+	The returned rows are observed state only.  They are suitable for form
+	suggestions, not for persistence.
+	"""
+	from kubeport.utils.k8s_client import get_k8s_api_client
+
+	api_client = get_k8s_api_client(cluster_name)
+	networking_v1 = client.NetworkingV1Api(api_client=api_client)
+
+	try:
+		ingress_classes = networking_v1.list_ingress_class(
+			_request_timeout=_DISCOVERY_REQUEST_TIMEOUT_SECONDS
+		).items
+	except ApiException as exc:
+		raise RuntimeError(
+			f"Could not list IngressClasses on cluster '{cluster_name}': {exc.reason or exc}"
+		) from exc
+
+	rows: list[dict[str, Any]] = []
+	for ingress_class in ingress_classes:
+		metadata = getattr(ingress_class, "metadata", None)
+		name = getattr(metadata, "name", None) or ""
+		if not name:
+			continue
+		annotations = (getattr(metadata, "annotations", None) or {}) if metadata else {}
+		spec = getattr(ingress_class, "spec", None)
+		rows.append(
+			{
+				"name": str(name),
+				"controller": str(getattr(spec, "controller", None) or ""),
+				"is_default": str(annotations.get(_DEFAULT_INGRESS_CLASS_ANNOTATION, "")).lower() == "true",
+			}
+		)
+
+	return sorted(rows, key=lambda row: (not row.get("is_default"), row.get("name", "")))
+
+
+def discover_cluster_issuers(cluster_name: str) -> dict[str, Any]:
+	"""Return cert-manager ClusterIssuer discovery state.
+
+	``available`` means the cert-manager ClusterIssuer API was reachable.  A
+	cluster may have cert-manager installed with zero issuers, so callers should
+	not infer availability solely from the issuer list.
+	"""
+	from kubeport.utils.k8s_client import get_k8s_api_client
+
+	api_client = get_k8s_api_client(cluster_name)
+	custom_api = client.CustomObjectsApi(api_client=api_client)
+
+	try:
+		payload = custom_api.list_cluster_custom_object(
+			group="cert-manager.io",
+			version="v1",
+			plural="clusterissuers",
+			_request_timeout=_DISCOVERY_REQUEST_TIMEOUT_SECONDS,
+		)
+	except ApiException as exc:
+		if getattr(exc, "status", None) == 404:
+			return {
+				"available": False,
+				"issuers": [],
+			}
+		raise RuntimeError(
+			f"Could not list cert-manager ClusterIssuers on cluster '{cluster_name}': {exc.reason or exc}"
+		) from exc
+
+	rows: list[dict[str, Any]] = []
+	for item in payload.get("items", []) if isinstance(payload, dict) else []:
+		if not isinstance(item, dict):
+			continue
+		metadata = item.get("metadata") or {}
+		name = str(metadata.get("name") or "")
+		if not name:
+			continue
+		rows.append(
+			{
+				"name": name,
+				"ready": _cluster_issuer_is_ready(item),
+			}
+		)
+
+	return {
+		"available": True,
+		"issuers": sorted(rows, key=lambda row: (not row.get("ready"), row.get("name", ""))),
+	}
+
+
+def discover_ingress_controller_addresses(cluster_name: str) -> list[dict[str, Any]]:
+	"""Return candidate ingress-controller LoadBalancer addresses.
+
+	The scan is intentionally heuristic: there is no standard Kubernetes API
+	that maps an IngressClass to the Service exposing its controller.
+	"""
+	from kubeport.utils.k8s_client import get_k8s_api_client
+
+	api_client = get_k8s_api_client(cluster_name)
+	core_v1 = client.CoreV1Api(api_client=api_client)
+
+	try:
+		services = core_v1.list_service_for_all_namespaces(
+			_request_timeout=_DISCOVERY_REQUEST_TIMEOUT_SECONDS
+		).items
+	except ApiException as exc:
+		raise RuntimeError(
+			f"Could not list Services on cluster '{cluster_name}': {exc.reason or exc}"
+		) from exc
+
+	rows: list[dict[str, Any]] = []
+	for service in services:
+		spec = getattr(service, "spec", None)
+		if str(getattr(spec, "type", "") or "") != "LoadBalancer":
+			continue
+		addresses = _service_load_balancer_addresses(service)
+		if not addresses:
+			continue
+
+		metadata = getattr(service, "metadata", None)
+		name = str(getattr(metadata, "name", None) or "")
+		namespace = str(getattr(metadata, "namespace", None) or "default")
+		score = _score_ingress_controller_service(service)
+		for address in addresses:
+			rows.append(
+				{
+					"service": name,
+					"namespace": namespace,
+					"address": address,
+					"address_type": "ip" if _is_ip_address(address) else "hostname",
+					"is_likely_ingress_controller": score > 0,
+					"score": score,
+				}
+			)
+
+	return sorted(
+		rows, key=lambda row: (-int(row.get("score") or 0), row.get("namespace", ""), row.get("service", ""))
+	)
+
+
+def build_nip_io_hostname(release_name: str | None, address: str | None) -> str:
+	"""Return a local-development hostname for an IP-backed controller address."""
+	release_label = _hostname_label_from_release(release_name)
+	address = str(address or "").strip()
+	if not release_label or not _is_ip_address(address):
+		return ""
+	return f"{release_label}.{address}.nip.io"
+
+
 def _normalize_release_row(release: dict[str, Any]) -> dict[str, Any]:
 	chart = str(release.get("chart") or "")
 	chart_name, chart_version = _split_chart_name_and_version(chart)
@@ -140,6 +292,61 @@ def _normalize_release_row(release: dict[str, Any]) -> dict[str, Any]:
 		"updated": str(release.get("updated") or ""),
 		"is_frappe_bench": _is_frappe_chart(chart_name),
 	}
+
+
+def _cluster_issuer_is_ready(item: dict[str, Any]) -> bool:
+	status = item.get("status") if isinstance(item, dict) else {}
+	conditions = status.get("conditions", []) if isinstance(status, dict) else []
+	for condition in conditions:
+		if not isinstance(condition, dict):
+			continue
+		if condition.get("type") == "Ready":
+			return str(condition.get("status", "")).lower() == "true"
+	return False
+
+
+def _service_load_balancer_addresses(service: Any) -> list[str]:
+	status = getattr(service, "status", None)
+	load_balancer = getattr(status, "load_balancer", None)
+	ingress_rows = getattr(load_balancer, "ingress", None) or []
+	addresses: list[str] = []
+	for row in ingress_rows:
+		hostname = getattr(row, "hostname", None)
+		ip = getattr(row, "ip", None)
+		if hostname:
+			addresses.append(str(hostname))
+		elif ip:
+			addresses.append(str(ip))
+	return addresses
+
+
+def _score_ingress_controller_service(service: Any) -> int:
+	metadata = getattr(service, "metadata", None)
+	spec = getattr(service, "spec", None)
+	labels = (getattr(metadata, "labels", None) or {}) if metadata else {}
+	selector = (getattr(spec, "selector", None) or {}) if spec else {}
+	text = " ".join(
+		[
+			str(getattr(metadata, "namespace", "") or ""),
+			str(getattr(metadata, "name", "") or ""),
+			" ".join(f"{key}={value}" for key, value in labels.items()),
+			" ".join(f"{key}={value}" for key, value in selector.items()),
+		]
+	).lower()
+	return sum(100 for token in _INGRESS_CONTROLLER_TOKENS if token in text)
+
+
+def _is_ip_address(value: str | None) -> bool:
+	if not value:
+		return False
+	parts = str(value).strip().split(".")
+	return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
+
+
+def _hostname_label_from_release(release_name: str | None) -> str:
+	label = re.sub(r"[^a-z0-9-]+", "-", str(release_name or "").strip().lower())
+	label = label.strip("-")[:63].strip("-")
+	return label
 
 
 def _split_chart_name_and_version(chart: str) -> tuple[str, str]:

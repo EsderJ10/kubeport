@@ -318,6 +318,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		)
 		health = _check_ingress(obj, "tfg")
 		self.assertTrue(health.ready)
+		self.assertEqual(health.addresses, ["frappe.example.com"])
 
 	def test_attach_warning_events_appends_recent_warning_summary(self):
 		core_v1 = SimpleNamespace(

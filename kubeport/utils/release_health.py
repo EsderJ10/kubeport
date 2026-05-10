@@ -18,7 +18,7 @@ defines its own health contract.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import frappe
@@ -65,6 +65,7 @@ class ResourceHealth:
 	# site if it ever needs to land in ``helm_status_detail``.
 	message: str
 	pod_count: int = 0
+	addresses: list[str] = field(default_factory=list)
 
 	def to_dict(self) -> dict[str, Any]:
 		return {
@@ -75,6 +76,7 @@ class ResourceHealth:
 			"reason": self.reason,
 			"message": self.message,
 			"pod_count": self.pod_count,
+			"addresses": self.addresses,
 		}
 
 
@@ -523,6 +525,7 @@ def _check_service(
 			True,
 			"",
 			f"load balancer ready: {', '.join(ingress)}",
+			addresses=ingress,
 		)
 
 	if selector:
@@ -542,6 +545,7 @@ def _check_ingress(obj: Any, namespace: str) -> ResourceHealth:
 			True,
 			"",
 			f"load balancer ready: {', '.join(ingress)}",
+			addresses=ingress,
 		)
 
 	return ResourceHealth(
@@ -657,6 +661,7 @@ def _attach_warning_events(
 		health.reason,
 		message,
 		health.pod_count,
+		health.addresses,
 	)
 
 
