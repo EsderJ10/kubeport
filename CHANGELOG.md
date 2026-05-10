@@ -6,6 +6,111 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-10 — Documentation overhaul: industry-standard layout
+
+### Context
+
+The repository's documentation had grown organically. The shipped surface was
+a comprehensive `README.md`, an `AGENTS.md` of invariants, the architecture
+decision log here, and two reference docs under `docs/` (`control-plane-state.md`,
+`codebase-summary.md`). What it was missing, against the industry-standard
+layout for an open-source project, was a clear separation between an entry-point
+README, a contributor onboarding doc, a security disclosure policy, an
+architecture document with diagrams, and a user-facing operator guide. The
+`docs/codebase-summary.md` reference had also drifted — it predated the
+addition of `Kubernetes Command`, `Kubernetes Command Audit Log`,
+`api/observability.py`, `api/dashboard.py`, and `tasks/kubernetes_command_tasks.py`
+and listed 10 DocTypes when the actual count is 12 (plus the
+`Kubernetes Command Audit Log` audit row). `license.txt` still carried the
+unfilled `[year] [fullname]` placeholders. Three planning docs lived under
+`docs/plans/` alongside a manual smoke procedure (`docs/frappe-site-smoke.md`),
+mixing historical planning material with current reference material.
+
+### Decision
+
+- Restructured the documentation tree to match the industry-standard layout for
+  an OSS project:
+  - `README.md` is now a focused entry point — capability summary, architecture
+    sketch, install, getting-started, and a documentation map pointing at every
+    other doc by goal.
+  - Added `CONTRIBUTING.md` (development environment, branching and PR
+    conventions, commit-message style matching the existing `git log`, code
+    style table, test commands, the seven invariants every contributor must
+    respect, and a per-doc "update when" matrix).
+  - Added `SECURITY.md` (private disclosure policy, scope, trust model, and
+    hardening recommendations specific to a Frappe-app-as-control-plane).
+  - Added `docs/architecture.md` with C4 context / container diagrams in
+    Mermaid, a DocType relationship diagram, runtime sequence diagrams for the
+    deploy / create-site / reconciliation flows, and a layer-mutation
+    truth-table that makes the "desired vs observed" invariant auditable.
+  - Added `docs/operator-guide.md` covering every operator workflow end-to-end:
+    cluster connection, repo registration, Helm release lifecycle,
+    Service Bundle, Frappe Site lifecycle (create / migrate / cancel / drop),
+    backup / restore, discovery, operator tools, reconciliation, and the
+    pre-release smoke procedure (folded in from `docs/frappe-site-smoke.md`).
+  - Added `docs/thesis.md` framing the project: problem statement, prior-art
+    survey, five testable objectives, methodology, results vs. objectives,
+    declared limitations, and future work. This is the load-bearing
+    deliverable-context document.
+- Updated `docs/codebase-summary.md` to reflect actual code:
+  added `Kubernetes Command`, `Kubernetes Command Audit Log`, the missing
+  `api/observability.py` and `api/dashboard.py` modules, the missing
+  `tasks/kubernetes_command_tasks.py` module, and references to the
+  `kubeport/workspace/` and `kubeport/number_card/` fixture directories.
+- Updated `AGENTS.md` DocType table to list the two `Kubernetes Command`
+  DocTypes that were previously only mentioned in `control-plane-state.md`.
+- Updated `CLAUDE.md` documentation index to reflect the new layout.
+- Renamed `license.txt` → `LICENSE` (industry convention — capital, no
+  extension) and filled in the copyright placeholders with `2026 Los Favs`
+  (matching `app_publisher` in `hooks.py` and `authors` in `pyproject.toml`).
+- Moved `docs/plans/` → `docs/history/` and folded `docs/frappe-site-smoke.md`
+  into the same archive, with a `docs/history/README.md` that explicitly marks
+  the archive as non-authoritative and points readers at the current docs for
+  each topic.
+
+### Rejected alternatives
+
+- **Wholesale rewrite of `README.md`, `AGENTS.md`, `control-plane-state.md`,
+  and `codebase-summary.md`.** They are dense and accurate. Wholesale rewrites
+  would lose information without improving anything demonstrable. The work was
+  scoped to drift fixes plus restructuring around the new entry-point /
+  architecture / operator triad.
+- **A `CODE_OF_CONDUCT.md`.** Performative for a solo-author project; would
+  add maintenance surface without changing behaviour. Skipped — can be added
+  later when there are external contributors to govern.
+- **Generated API reference (Sphinx / mkdocs-material).** The whitelisted API
+  surface is small and already enumerated in `docs/codebase-summary.md` with
+  more useful per-endpoint commentary than auto-generated signatures would
+  provide. Generation tooling adds CI surface for negligible benefit.
+- **Splitting `CHANGELOG.md` into "decisions" and "release notes".**
+  The decision-log format already explicitly captures Context / Decision /
+  Rejected Alternatives / Implementation Details, which is the auditable
+  trail the project needs. A second release-notes file would duplicate without
+  adding signal.
+
+### Implementation details
+
+- New / restructured files:
+  `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` (renamed from
+  `license.txt`), `CLAUDE.md` (updated doc index), `AGENTS.md` (added two
+  `Kubernetes Command` DocType rows), `docs/architecture.md`,
+  `docs/operator-guide.md`, `docs/thesis.md`, `docs/codebase-summary.md`
+  (drift fixes), `docs/history/README.md`, `docs/history/plan-*.md` (moved
+  from `docs/plans/`), `docs/history/frappe-site-smoke.md` (moved from
+  `docs/`).
+- The architecture document uses Mermaid for C4 diagrams (rendered natively
+  by GitHub), so no external diagram tool is introduced. Sequence diagrams
+  cover deploy, Frappe Site create, and reconciliation tick — the three
+  flows that exercise every invariant.
+- The operator guide is opinionated about the order of operations (connect
+  cluster → register repo → deploy release → create site → backup) so a
+  reader can follow it linearly without cross-referencing.
+- `docs/thesis.md` states each of the five objectives as a testable claim and
+  evaluates each in §5 with concrete code-level evidence — so the deliverable's
+  "results vs. objectives" claim is auditable, not aspirational.
+
+---
+
 ## 2026-05-09 — Code-quality cleanup pass and CI test gating
 
 ### Context

@@ -9,33 +9,43 @@ Module-level architecture reference for the Kubeport repository. This document d
 ```
 kubeport/
 ├── api/              # Whitelisted read-only endpoints
-│   ├── __init__.py   # Namespace lookup, kubeconfig parsing/extraction
-│   ├── discovery.py  # Live release and site discovery
-│   ├── site_images.py  # DB-backed Kubeport Site Image catalog
-│   └── site.py       # Frappe Site job log and backup listing support
+│   ├── __init__.py        # Namespace lookup, kubeconfig parsing/extraction
+│   ├── discovery.py       # Live release and site discovery
+│   ├── observability.py   # Helm Release pod logs, events, rollout context
+│   ├── dashboard.py       # Kubeport workspace dashboard data
+│   ├── site_images.py     # DB-backed Kubeport Site Image catalog
+│   └── site.py            # Frappe Site job log and backup listing support
 ├── utils/            # Stateless integration helpers
-│   ├── k8s_client.py # Scoped Kubernetes API client builder
-│   ├── helm.py       # Helm CLI wrapper (subprocess, temp kubeconfig)
-│   ├── discovery.py  # Read-only cluster and site discovery logic
-│   └── k8s_resources.py  # Manifest parsing, CRUD, resource allowlist
+│   ├── k8s_client.py      # Scoped Kubernetes API client builder
+│   ├── helm.py            # Helm CLI wrapper (subprocess, temp kubeconfig)
+│   ├── discovery.py       # Read-only cluster and site discovery logic
+│   ├── observability.py   # Pod / event / rollout helpers for diagnostics
+│   ├── release_health.py  # Shared workload-readiness classifier
+│   ├── k8s_resources.py   # Manifest parsing, CRUD, resource allowlist
+│   └── constants.py       # Shared constants (resource kinds, labels)
 ├── tasks/            # Background jobs (all cluster-mutating work)
-│   ├── helm_tasks.py         # Repo sync, release deploy/uninstall
-│   ├── site_image_tasks.py   # Shipped site-image catalog sync
-│   ├── service_bundle_tasks.py  # Manifest apply/delete
-│   ├── site_tasks.py         # Frappe site creation via K8s Jobs
-│   └── reconciliation.py     # Scheduled drift detection
+│   ├── helm_tasks.py             # Repo sync, release deploy/uninstall/rollback
+│   ├── site_image_tasks.py       # Shipped site-image catalog sync
+│   ├── service_bundle_tasks.py   # Manifest apply/delete
+│   ├── site_tasks.py             # Frappe site lifecycle via K8s Jobs
+│   ├── kubernetes_command_tasks.py  # Operator-tools execute path
+│   └── reconciliation.py         # Scheduled drift detection + orphan-Job sweep
 ├── kubeport/doctype/  # Frappe DocType definitions and controllers
 │   ├── kubernetes_cluster/
 │   ├── helm_repository/
 │   ├── helm_chart/
 │   ├── helm_chart_version/
 │   ├── helm_release/
-│   ├── kubeport_site_image/
-│   ├── kubeport_site_image_app/
 │   ├── service_bundle/
 │   ├── frappe_site/
-│   └── frappe_site_backup/
-├── tests/            # Cross-module unit tests
+│   ├── frappe_site_backup/
+│   ├── kubeport_site_image/
+│   ├── kubeport_site_image_app/
+│   ├── kubernetes_command/
+│   └── kubernetes_command_audit_log/
+├── kubeport/workspace/kubeport_operations/  # Desk workspace (auto-installed)
+├── kubeport/number_card/                    # Workspace dashboard cards (fixtures)
+├── tests/            # Cross-module unit and integration tests
 ├── patches/          # Schema migration and cleanup
 └── hooks.py          # App configuration, scheduled jobs
 ```
@@ -144,6 +154,22 @@ Stores public GHCR Frappe/ERPNext runtime images available for Helm Release sele
 - Sync runs as a long-queue background job on install/migrate and daily scheduler. The sync only writes `is_curated=1` rows and skips repository:tag collisions with user rows (logged as a warning) so user data is never overwritten.
 - `is_default` is reserved for curated rows. Deletion is blocked when a Helm Release links to the row, and curated rows cannot be deleted (use `Deprecated`).
 
+### Kubernetes Command
+
+A deliberate operator-tools doctype for ad-hoc Get / List / Delete against a fixed allowlist of namespaced kinds.
+
+- Read access spans 8 kinds: `Pod`, `Job`, `Secret`, `ConfigMap`, `Service`, `Deployment`, `StatefulSet`, `PersistentVolumeClaim`.
+- Delete is restricted to `Pod`, `Job`, `ConfigMap` only — destructive changes to the dangerous quartet (Secret, PVC, Deployment, StatefulSet) must go through their dedicated controllers (`Helm Release`, `Service Bundle`, `Frappe Site`).
+- System Manager only. Delete requires `confirm_destructive` enforced both at validate (form save) and execute (background worker).
+- Execution is enqueued onto the `long` queue via `kubeport.tasks.kubernetes_command_tasks`.
+
+### Kubernetes Command Audit Log
+
+Append-only audit row written on every `Kubernetes Command` execute (success or failure).
+
+- System Manager has read access; the doctype is never written from the UI.
+- Decoupled from the source row — the audit trail survives `Kubernetes Command` row deletion.
+
 ---
 
 ## API Layer
@@ -180,6 +206,10 @@ Frappe Site form support:
 Read-only site-image catalog endpoint:
 
 - `list_site_images(include_deprecated=False)` — returns active catalog rows and included app metadata for Helm Release form rendering
+
+### `kubeport.api.dashboard`
+
+Backs the Kubeport Operations workspace dashboard. Read-only counters and stale-operation summaries; no cluster I/O — everything is sourced from desired-state DocTypes.
 
 ### `kubeport.api.observability`
 
@@ -284,6 +314,13 @@ Frappe site lifecycle operations via Kubernetes Jobs:
 - Job names are derived from the site name and operation token for uniqueness and traceability.
 - Credentials flow through per-Job Kubernetes Secrets (never plaintext env values), owner-referenced to the Job for automatic garbage collection.
 - Per-operation two-token concurrency guard: `operation_token` (rotated on each new action) and `operation_job_token` (snapshot captured when the Job is submitted, checked by reconciliation before any status write).
+
+### `kubernetes_command_tasks.py`
+
+Operator-tools execution path used by `Kubernetes Command`:
+
+- `execute_kubernetes_command(command_name, operation_token)` — re-checks the document's status and `confirm_destructive` flag before executing the requested Get / List / Delete against the allowlisted kinds.
+- Writes one `Kubernetes Command Audit Log` row per execute (success or failure), including the cluster, namespace, kind, name, operation, exit status, and operator.
 
 ### `reconciliation.py`
 
