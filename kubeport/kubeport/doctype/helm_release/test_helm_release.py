@@ -289,63 +289,76 @@ class UnitTestHelmRelease(UnitTestCase):
 	def test_render_bundled_database_values_noop_for_non_frappe_chart(self):
 		chart_doc = SimpleNamespace(chart_name="postgres")
 		self.assertEqual(
-			render_bundled_database_values("foo: bar\n", chart_doc, use_external_database=False),
+			render_bundled_database_values(
+				"foo: bar\n", chart_doc, use_external_database=False, release_name="rel-a"
+			),
 			"foo: bar\n",
 		)
 
 	def test_render_bundled_database_values_noop_when_user_chose_external_db(self):
 		chart_doc = SimpleNamespace(chart_name="erpnext")
 		self.assertEqual(
-			render_bundled_database_values("", chart_doc, use_external_database=True),
+			render_bundled_database_values("", chart_doc, use_external_database=True, release_name="rel-a"),
 			"",
 		)
 
-	def test_render_bundled_database_values_noop_when_dbhost_supplied(self):
-		# A user-supplied top-level dbHost signals external-DB intent even
-		# without ticking the toggle; defaulting mariadb.enabled would
-		# silently provision an unused MariaDB.
+	def test_render_bundled_database_values_preserves_user_supplied_dbhost(self):
+		# When the operator already pinned dbHost, we don't touch it — they
+		# may be pointing at an external DB even without ticking the toggle.
 		chart_doc = SimpleNamespace(chart_name="erpnext")
 		out = render_bundled_database_values(
-			"dbHost: my-mariadb.svc\n", chart_doc, use_external_database=False
+			"dbHost: my-mariadb.svc\n",
+			chart_doc,
+			use_external_database=False,
+			release_name="rel-a",
 		)
 		parsed = yaml.safe_load(out)
 		self.assertEqual(parsed["dbHost"], "my-mariadb.svc")
-		self.assertNotIn("mariadb", parsed)
 
-	def test_render_bundled_database_values_noop_when_user_set_mariadb_enabled(self):
+	def test_render_bundled_database_values_injects_sibling_dbhost_for_frappe_default(self):
+		# Default flow: chart values get dbHost=<release>-mariadb so the
+		# bench's common_site_config.json points at the sibling release the
+		# install/upgrade task is about to provision.
 		chart_doc = SimpleNamespace(chart_name="erpnext")
-		out = render_bundled_database_values(
-			"mariadb:\n  enabled: false\n", chart_doc, use_external_database=False
+		out = render_bundled_database_values("", chart_doc, use_external_database=False, release_name="rel-a")
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["dbHost"], "rel-a-mariadb")
+
+	def test_render_bundled_database_values_skips_when_release_name_missing(self):
+		# Form preview before the operator types a release name should not
+		# inject a half-formed "<empty>-mariadb" hostname; the deploy task
+		# always has the real name.
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		self.assertEqual(
+			render_bundled_database_values("", chart_doc, use_external_database=False, release_name=""),
+			"",
 		)
-		parsed = yaml.safe_load(out)
-		self.assertFalse(parsed["mariadb"]["enabled"])
 
-	def test_render_bundled_database_values_enables_mariadb_for_frappe_default(self):
-		chart_doc = SimpleNamespace(chart_name="erpnext")
-		out = render_bundled_database_values("", chart_doc, use_external_database=False)
-		parsed = yaml.safe_load(out)
-		self.assertTrue(parsed["mariadb"]["enabled"])
-
-	def test_render_bundled_database_values_preserves_existing_mariadb_subkeys(self):
+	def test_render_bundled_database_values_overrides_chart_default_mariadb_enabled(self):
+		# The frappe/erpnext chart ships values.yaml with vestigial
+		# `mariadb.enabled: false` (the chart has no mariadb subchart).
+		# Earlier we incorrectly treated that as "operator opted out" and
+		# refused to inject dbHost — so the bundled flow silently broke.
+		# The toggle is the source of truth, not the values blob.
 		chart_doc = SimpleNamespace(chart_name="erpnext")
 		out = render_bundled_database_values(
-			"mariadb:\n  auth:\n    rootPassword: stash\n",
+			"mariadb:\n  enabled: false\n",
 			chart_doc,
 			use_external_database=False,
+			release_name="rel-a",
 		)
 		parsed = yaml.safe_load(out)
-		self.assertTrue(parsed["mariadb"]["enabled"])
-		self.assertEqual(parsed["mariadb"]["auth"]["rootPassword"], "stash")
+		self.assertEqual(parsed["dbHost"], "rel-a-mariadb")
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
 	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
-	def test_prepare_release_values_pipeline_enables_bundled_mariadb_for_frappe_default(
+	def test_prepare_release_values_pipeline_injects_sibling_dbhost_for_frappe_default(
 		self, _mock_discover_default_storage_class, mock_get_value
 	):
 		"""Wiring guard: prepare_release_values must call render_bundled_database_values
-		so the Frappe-chart default flow ends up with mariadb.enabled=true. If a refactor
-		ever drops the call from the pipeline, this test catches it before the field
-		toggle silently stops working."""
+		so the Frappe-chart default flow ends up with dbHost=<release>-mariadb.  If a
+		refactor ever drops the call from the pipeline, this test catches it before
+		the install/upgrade task's sibling provisioning silently goes unused."""
 		mock_get_value.return_value = None
 		chart_doc = SimpleNamespace(chart_name="erpnext")
 		out = prepare_release_values(
@@ -353,13 +366,14 @@ class UnitTestHelmRelease(UnitTestCase):
 			chart_doc,
 			cluster_name="cluster-a",
 			use_external_database=False,
+			release_name="rel-a",
 		)
 		parsed = yaml.safe_load(out)
-		self.assertTrue(parsed["mariadb"]["enabled"])
+		self.assertEqual(parsed["dbHost"], "rel-a-mariadb")
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
 	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
-	def test_prepare_release_values_pipeline_skips_bundled_mariadb_when_external_db(
+	def test_prepare_release_values_pipeline_skips_dbhost_injection_for_external_db(
 		self, _mock_discover_default_storage_class, mock_get_value
 	):
 		mock_get_value.return_value = None
@@ -369,9 +383,10 @@ class UnitTestHelmRelease(UnitTestCase):
 			chart_doc,
 			cluster_name="cluster-a",
 			use_external_database=True,
+			release_name="rel-a",
 		)
 		parsed = yaml.safe_load(out) or {}
-		self.assertNotIn("mariadb", parsed)
+		self.assertNotIn("dbHost", parsed)
 
 	def test_calculate_release_spec_hash_changes_when_use_external_database_toggled(self):
 		hash_a = calculate_release_spec_hash(

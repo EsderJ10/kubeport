@@ -534,6 +534,7 @@ def prepare_release_values(
 		values_yaml,
 		chart_doc,
 		use_external_database=use_external_database,
+		release_name=release_name,
 	)
 	values_yaml = render_ingress_values(
 		values_yaml,
@@ -551,26 +552,32 @@ def prepare_release_values(
 	)
 
 
+def bundled_mariadb_release_name(release_name: str | None) -> str:
+	"""Stable name of the sibling Bitnami MariaDB release for a Frappe release."""
+	return f"{str(release_name or '').strip()}-mariadb"
+
+
 def render_bundled_database_values(
 	values_yaml: str | None,
 	chart_doc: Any,
 	*,
 	use_external_database: bool | int | None,
+	release_name: str | None,
 ) -> str | None:
-	"""Default ``mariadb.enabled=true`` for Frappe charts unless the user opted out.
+	"""Point a Frappe chart at the sibling Bitnami MariaDB Service Kubeport provisions.
 
-	The Frappe/ERPNext chart leaves ``mariadb.enabled`` off by default, which
-	is a footgun for first-time users: the bench installs cleanly but site
-	creation immediately fails with no database to connect to.  We flip the
-	default so the happy path "deploy chart, create site" works without any
-	values plumbing.
+	The Frappe/ERPNext Helm chart 8.x has no ``mariadb`` subchart dependency —
+	the value ``mariadb.enabled=true`` is unused by the chart.  Kubeport's
+	"bundled MariaDB" promise is delivered by deploying a separate Bitnami
+	MariaDB Helm release named ``<release>-mariadb`` from the install/upgrade
+	task.  This function only writes the *pointer*: ``dbHost: <release>-mariadb``
+	at the top of the Frappe chart's values, which is what the chart's
+	``common_site_config.json`` reads to wire the bench at the bundled DB.
 
 	No-op when:
-	- the chart is not a Frappe site chart (other charts have their own DB story);
-	- the user toggled "Use External Database" — they're on their own;
-	- the user already set ``mariadb.enabled`` (any value) — explicit wins;
-	- the user supplied a top-level ``dbHost`` — that signals external DB,
-	  bundled mariadb would be wasted.
+	- the chart is not a Frappe site chart;
+	- the user toggled "Use External Database" — they own ``dbHost`` themselves;
+	- the user already set a top-level ``dbHost`` — explicit wins.
 	"""
 	if not is_frappe_site_chart(chart_doc) or use_external_database:
 		return values_yaml
@@ -582,14 +589,14 @@ def render_bundled_database_values(
 	if str(values.get("dbHost") or "").strip():
 		return values_yaml
 
-	mariadb = values.get("mariadb")
-	if isinstance(mariadb, dict) and "enabled" in mariadb:
+	if not str(release_name or "").strip():
+		# Form preview before the operator types a release name — skip the
+		# injection rather than write a half-formed "<empty>-mariadb"
+		# hostname.  The deploy task always has the real name.
 		return values_yaml
 
 	rendered = dict(values)
-	mariadb_block = dict(mariadb) if isinstance(mariadb, dict) else {}
-	mariadb_block["enabled"] = True
-	rendered["mariadb"] = mariadb_block
+	rendered["dbHost"] = bundled_mariadb_release_name(release_name)
 	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
 
 
