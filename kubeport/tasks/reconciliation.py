@@ -178,6 +178,10 @@ def _reconcile_stale_helm_operations():
 			"chart_version",
 			"values",
 			"site_image",
+			"ingress_enabled",
+			"ingress_hostname",
+			"ingress_class_name",
+			"ingress_cluster_issuer",
 			"status",
 			"operation_token",
 			"operation_started_at",
@@ -221,6 +225,10 @@ def _reconcile_stale_helm_operations():
 					values_yaml=release.get("values"),
 					site_image=getattr(release, "site_image", None),
 					site_image_digest=_get_site_image_digest_for_hash(getattr(release, "site_image", None)),
+					ingress_enabled=getattr(release, "ingress_enabled", None),
+					ingress_hostname=getattr(release, "ingress_hostname", None),
+					ingress_class_name=getattr(release, "ingress_class_name", None),
+					ingress_cluster_issuer=getattr(release, "ingress_cluster_issuer", None),
 				)
 				fields.update(
 					{

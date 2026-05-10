@@ -61,6 +61,11 @@ def preview_release(name: str) -> dict[str, Any]:
 			chart_doc,
 			cluster_name=release.cluster,
 			site_image=getattr(release, "site_image", None),
+			ingress_enabled=getattr(release, "ingress_enabled", 0),
+			ingress_hostname=getattr(release, "ingress_hostname", None),
+			ingress_class_name=getattr(release, "ingress_class_name", None),
+			ingress_cluster_issuer=getattr(release, "ingress_cluster_issuer", None),
+			release_name=release.release_name,
 		)
 	except Exception as e:
 		return _error_payload(f"Failed to prepare values: {e}")

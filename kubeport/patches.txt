@@ -6,3 +6,4 @@
 # Patches added in this section will be executed after doctypes are migrated
 kubeport.patches.post_model_sync.rename_helm_release_docnames
 kubeport.patches.post_model_sync.rename_frappe_site_job_fields
+kubeport.patches.post_model_sync.recompute_helm_release_spec_hash
