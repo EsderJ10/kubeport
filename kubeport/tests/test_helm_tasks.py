@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from frappe.tests import UnitTestCase
 
+from kubeport.api.helm_diff import preview_release
 from kubeport.kubeport.doctype.helm_release.helm_release import calculate_release_spec_hash
 from kubeport.tasks.helm_tasks import (
 	_group_chart_inventory,
@@ -786,3 +787,162 @@ class UnitTestHelmTasks(UnitTestCase):
 			"bitnami/redis",
 			ignore_permissions=True,
 		)
+
+
+def _make_release_doc(values: str = "replicaCount: 1\n"):
+	release = SimpleNamespace(
+		name="cluster-a/tfg/bench-a",
+		release_name="bench-a",
+		chart="bitnami/nginx",
+		chart_version="1.0.0",
+		namespace="tfg",
+		cluster="cluster-a",
+		values=values,
+		site_image=None,
+		check_permission=lambda *_args, **_kwargs: None,
+	)
+	return release
+
+
+def _make_chart_doc():
+	return SimpleNamespace(
+		latest_version="1.0.0",
+		get_chart_reference=lambda: "bitnami/nginx",
+	)
+
+
+def _deployment(replicas: int, image: str = "nginx:1.25"):
+	return {
+		"apiVersion": "apps/v1",
+		"kind": "Deployment",
+		"metadata": {"name": "bench-a", "namespace": "tfg"},
+		"spec": {
+			"replicas": replicas,
+			"template": {"spec": {"containers": [{"name": "nginx", "image": image}]}},
+		},
+	}
+
+
+class UnitTestHelmDiffPreview(UnitTestCase):
+	@patch("kubeport.api.helm_diff.helm.get_manifest")
+	@patch("kubeport.api.helm_diff.helm.template")
+	@patch("kubeport.api.helm_diff.prepare_release_values")
+	@patch("kubeport.api.helm_diff.frappe.get_doc")
+	@patch("kubeport.api.helm_diff.frappe.only_for")
+	def test_preview_release_returns_empty_diff_when_live_matches_desired(
+		self,
+		_mock_only_for,
+		mock_get_doc,
+		mock_prepare_values,
+		mock_template,
+		mock_get_manifest,
+	):
+		mock_get_doc.side_effect = [_make_release_doc(), _make_chart_doc()]
+		mock_prepare_values.return_value = "replicaCount: 1\n"
+		manifest = [_deployment(replicas=1)]
+		mock_template.return_value = manifest
+		mock_get_manifest.return_value = manifest
+
+		payload = preview_release("cluster-a/tfg/bench-a")
+
+		self.assertEqual(payload["diff"], "")
+		self.assertEqual(payload["added"], 0)
+		self.assertEqual(payload["removed"], 0)
+		self.assertEqual(payload["changed"], 0)
+		self.assertEqual(payload["unchanged"], 1)
+		self.assertTrue(payload["live_present"])
+		self.assertEqual(payload["error"], "")
+
+	@patch("kubeport.api.helm_diff.helm.get_manifest")
+	@patch("kubeport.api.helm_diff.helm.template")
+	@patch("kubeport.api.helm_diff.prepare_release_values")
+	@patch("kubeport.api.helm_diff.frappe.get_doc")
+	@patch("kubeport.api.helm_diff.frappe.only_for")
+	def test_preview_release_reports_changed_resource_for_value_only_change(
+		self,
+		_mock_only_for,
+		mock_get_doc,
+		mock_prepare_values,
+		mock_template,
+		mock_get_manifest,
+	):
+		mock_get_doc.side_effect = [
+			_make_release_doc(values="replicaCount: 3\n"),
+			_make_chart_doc(),
+		]
+		mock_prepare_values.return_value = "replicaCount: 3\n"
+		mock_template.return_value = [_deployment(replicas=3)]
+		mock_get_manifest.return_value = [_deployment(replicas=1)]
+
+		payload = preview_release("cluster-a/tfg/bench-a")
+
+		self.assertEqual(payload["changed"], 1)
+		self.assertEqual(payload["added"], 0)
+		self.assertEqual(payload["removed"], 0)
+		self.assertEqual(payload["unchanged"], 0)
+		diff_lines = payload["diff"].splitlines()
+		self.assertTrue(any(line.startswith("-") and "replicas: 1" in line for line in diff_lines))
+		self.assertTrue(any(line.startswith("+") and "replicas: 3" in line for line in diff_lines))
+		self.assertTrue(payload["live_present"])
+
+	@patch("kubeport.api.helm_diff.helm.get_manifest")
+	@patch("kubeport.api.helm_diff.helm.template")
+	@patch("kubeport.api.helm_diff.prepare_release_values")
+	@patch("kubeport.api.helm_diff.frappe.get_doc")
+	@patch("kubeport.api.helm_diff.frappe.only_for")
+	def test_preview_release_reports_changed_image_for_chart_version_upgrade(
+		self,
+		_mock_only_for,
+		mock_get_doc,
+		mock_prepare_values,
+		mock_template,
+		mock_get_manifest,
+	):
+		release = _make_release_doc()
+		release.chart_version = "1.1.0"
+		mock_get_doc.side_effect = [release, _make_chart_doc()]
+		mock_prepare_values.return_value = "replicaCount: 1\n"
+		mock_template.return_value = [_deployment(replicas=1, image="nginx:1.27")]
+		mock_get_manifest.return_value = [_deployment(replicas=1, image="nginx:1.25")]
+
+		payload = preview_release("cluster-a/tfg/bench-a")
+
+		self.assertEqual(payload["changed"], 1)
+		diff_lines = payload["diff"].splitlines()
+		self.assertTrue(any(line.startswith("-") and "nginx:1.25" in line for line in diff_lines))
+		self.assertTrue(any(line.startswith("+") and "nginx:1.27" in line for line in diff_lines))
+		mock_template.assert_called_once_with(
+			release_name="bench-a",
+			chart_ref="bitnami/nginx",
+			namespace="tfg",
+			values_yaml="replicaCount: 1\n",
+			chart_version="1.1.0",
+		)
+
+	@patch("kubeport.api.helm_diff.helm.get_manifest")
+	@patch("kubeport.api.helm_diff.helm.template")
+	@patch("kubeport.api.helm_diff.prepare_release_values")
+	@patch("kubeport.api.helm_diff.frappe.get_doc")
+	@patch("kubeport.api.helm_diff.frappe.only_for")
+	def test_preview_release_marks_all_added_when_release_not_yet_deployed(
+		self,
+		_mock_only_for,
+		mock_get_doc,
+		mock_prepare_values,
+		mock_template,
+		mock_get_manifest,
+	):
+		mock_get_doc.side_effect = [_make_release_doc(), _make_chart_doc()]
+		mock_prepare_values.return_value = "replicaCount: 1\n"
+		mock_template.return_value = [_deployment(replicas=1)]
+		mock_get_manifest.side_effect = RuntimeError("Helm command failed: release: not found")
+
+		payload = preview_release("cluster-a/tfg/bench-a")
+
+		self.assertFalse(payload["live_present"])
+		self.assertEqual(payload["added"], 1)
+		self.assertEqual(payload["removed"], 0)
+		self.assertEqual(payload["changed"], 0)
+		diff_lines = payload["diff"].splitlines()
+		self.assertTrue(any(line.startswith("+") and "kind: Deployment" in line for line in diff_lines))
+		self.assertEqual(payload["error"], "")

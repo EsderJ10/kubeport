@@ -173,7 +173,7 @@ The codebase actively defends against imperfect cluster conditions:
 ### Platform Coverage
 
 - Service Bundle only supports a fixed allowlist of built-in resource kinds (17 kinds). CRDs and arbitrary custom resources are out of scope.
-- Helm rollback and history are available. Helm diff/preview remains out of scope.
+- Helm rollback, history, and a read-only diff preview (renders desired manifest with `helm template` and compares against `helm get manifest`) are available.
 
 ### Site Lifecycle
 

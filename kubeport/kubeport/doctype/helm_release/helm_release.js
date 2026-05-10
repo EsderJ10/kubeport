@@ -265,6 +265,11 @@ function kubeport_configure_release_actions(frm) {
     frm.set_df_property('deploy_release', 'label', deploy_label);
 
     frm.clear_custom_buttons();
+    if (!is_in_flight) {
+        frm.add_custom_button(__('Preview Diff'), () => {
+            kubeport_show_release_diff(frm);
+        });
+    }
     if (can_history) {
         frm.add_custom_button(__('Force Uninstall'), () => {
             kubeport_force_uninstall(frm);
@@ -304,6 +309,68 @@ function kubeport_force_uninstall(frm) {
         __('Force Uninstall'),
         __('Uninstall')
     );
+}
+
+function kubeport_show_release_diff(frm) {
+    if (frm.is_dirty()) {
+        frappe.throw(__('Save the document before previewing the diff.'));
+        return;
+    }
+
+    frappe.call({
+        method: 'kubeport.api.helm_diff.preview_release',
+        args: { name: frm.doc.name },
+        freeze: true,
+        freeze_message: __('Rendering desired manifest and comparing to live state...'),
+        callback: function(r) {
+            if (r.exc) return;
+            const payload = r.message || {};
+            const dialog = new frappe.ui.Dialog({
+                title: __('Preview Diff'),
+                size: 'large',
+                fields: [{
+                    fieldname: 'diff_html',
+                    fieldtype: 'HTML',
+                    options: kubeport_render_release_diff(payload)
+                }]
+            });
+            dialog.show();
+        }
+    });
+}
+
+function kubeport_render_release_diff(payload) {
+    const error = payload.error || '';
+    if (error) {
+        return `<div class="text-danger small">${frappe.utils.escape_html(error)}</div>`;
+    }
+
+    const summary = [
+        `<span class="text-muted small">${__('Added')}: ${cint(payload.added)}</span>`,
+        `<span class="text-muted small">${__('Removed')}: ${cint(payload.removed)}</span>`,
+        `<span class="text-muted small">${__('Changed')}: ${cint(payload.changed)}</span>`,
+        `<span class="text-muted small">${__('Unchanged')}: ${cint(payload.unchanged)}</span>`
+    ].join(' &middot; ');
+
+    const live_note = payload.live_present
+        ? ''
+        : `<div class="text-muted small" style="margin-bottom: 8px;">
+                ${__('No Helm release exists yet on the cluster — every resource will be created.')}
+           </div>`;
+
+    const diff = payload.diff || '';
+    const body = diff
+        ? `<pre style="max-height: 480px; overflow: auto; white-space: pre;
+                       background: var(--fg-color); color: var(--text-color);
+                       border: 1px solid var(--border-color); border-radius: 4px;
+                       padding: 8px; font-size: 12px;">${frappe.utils.escape_html(diff)}</pre>`
+        : `<div class="text-muted small">${__('No differences — the cluster matches the saved desired state.')}</div>`;
+
+    return `
+        <div style="margin-bottom: 8px;">${summary}</div>
+        ${live_note}
+        ${body}
+    `;
 }
 
 function kubeport_show_release_history(frm) {

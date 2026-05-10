@@ -338,6 +338,58 @@ def get_manifest(
 	return [doc for doc in documents if isinstance(doc, dict) and doc.get("kind")]
 
 
+def template(
+	release_name: str,
+	chart_ref: str,
+	namespace: str,
+	values_yaml: str | None = None,
+	chart_version: str | None = None,
+) -> list[dict]:
+	"""Render the chart locally without contacting the cluster.
+
+	Equivalent to ``helm template <release> <chart_ref> -n <namespace>``.
+	Returns the same parsed list-of-resources shape as ``get_manifest`` so
+	callers can diff the two without re-parsing.
+
+	``helm template`` is a local-only operation per the Helm docs — it does
+	not require kubeconfig and is safe to call from the web thread.  The
+	caller is still responsible for any cluster-side reads.
+	"""
+	cmd = [
+		"helm",
+		"template",
+		release_name,
+		chart_ref,
+		"--namespace",
+		namespace,
+	]
+	if chart_version:
+		cmd.extend(["--version", chart_version])
+
+	if values_yaml:
+		values_fd, values_path = tempfile.mkstemp(suffix=".yaml", prefix="kubeport_values_")
+		try:
+			os.write(values_fd, values_yaml.encode("utf-8"))
+			os.close(values_fd)
+			cmd.extend(["--values", values_path])
+			output = _run_helm(cmd, timeout=_HELM_READ_TIMEOUT_SECONDS)
+		finally:
+			if os.path.exists(values_path):
+				os.unlink(values_path)
+	else:
+		output = _run_helm(cmd, timeout=_HELM_READ_TIMEOUT_SECONDS)
+
+	if not output or not output.strip():
+		return []
+
+	try:
+		documents = list(yaml.safe_load_all(output))
+	except yaml.YAMLError as e:
+		frappe.throw(f"Helm returned a template that could not be parsed: {e}")
+
+	return [doc for doc in documents if isinstance(doc, dict) and doc.get("kind")]
+
+
 def get_values(
 	release_name: str,
 	namespace: str,
