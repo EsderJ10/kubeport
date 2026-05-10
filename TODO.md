@@ -195,7 +195,7 @@
 
 ---
 
-### TODO-07 — `feat/eval-scaling`
+### TODO-07 — `feat/eval-scaling` ✅ DONE 2026-05-10 — c4bbc37
 
 **Goal**: Characterise how Kubeport scales with N persisted rows.
 
