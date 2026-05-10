@@ -188,8 +188,7 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Operator Documentation
 
-- No documented guide for running Kubeport inside Kubernetes with required service-account RBAC and Helm binary packaging.
-- No production hardening guidance (resource limits, monitoring, backup).
+- `docs/deploy.md` covers in-cluster vs. out-of-cluster topology, the bench-image Helm packaging snippet, the verb-resource RBAC matrix, resource-limit baselines, the internal-metrics endpoints, and the control-plane backup procedure. Kustomized least-privilege manifests at `deploy/rbac/` (with a `make rbac-smoke` target) are the remaining piece, tracked as TODO-17.
 
 ---
 
@@ -200,5 +199,5 @@ The remaining work is depth work — the core plumbing is in place:
 1. **Broader health modeling**: add application-level health probes and CRD-specific health where those signals have clear semantics.
 2. **Backup depth**: add scheduled backups, retention policy, object-store backends, encryption, cross-cluster restore, and restore-to-different-site-name when the storage model is expanded.
 3. **Testing coverage**: integration tests for repo sync, chart metadata, and cross-DocType workflows.
-4. **Operator documentation**: RBAC requirements, Helm binary packaging, deployment guide, production hardening.
+4. **Operator documentation**: kustomized least-privilege RBAC manifests at `deploy/rbac/` with a `make rbac-smoke` target (TODO-17). The narrative deploy guide (topology, bench-image packaging, RBAC matrix, sizing, monitoring, control-plane backup) is at `docs/deploy.md`.
 5. **Wider chart support**: controlled expansion of bench discovery beyond `erpnext`-only chart identification.
