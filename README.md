@@ -29,6 +29,7 @@ Start with the document that matches what you want to do.
 | Use Kubeport end-to-end (operator workflows) | [`docs/operator-guide.md`](docs/operator-guide.md) |
 | Understand the architecture (C4 diagrams, sequences, invariants) | [`docs/architecture.md`](docs/architecture.md) |
 | See current capability surface, robustness defences, open gaps | [`docs/control-plane-state.md`](docs/control-plane-state.md) |
+| See the tolerated faults, defences, and recovery upper bounds | [`docs/fault-model.md`](docs/fault-model.md) |
 | Find a specific module / DocType / API | [`docs/codebase-summary.md`](docs/codebase-summary.md) |
 | Read the empirical evaluation (functional, reliability, baseline, scaling) | [`docs/evaluation.md`](docs/evaluation.md) |
 | Run the end-to-end evaluation harness | [`eval/README.md`](eval/README.md) |
