@@ -58,6 +58,7 @@ def _apply_bundle_task_impl(bundle_name: str, operation_token: str):
 			{"bundle_name": bundle_name, "status": "Deployed"},
 			doctype="Service Bundle",
 			docname=bundle_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -75,6 +76,7 @@ def _apply_bundle_task_impl(bundle_name: str, operation_token: str):
 			{"bundle_name": bundle_name, "status": "Failed"},
 			doctype="Service Bundle",
 			docname=bundle_name,
+			after_commit=True,
 		)
 
 
@@ -113,6 +115,7 @@ def _delete_bundle_task_impl(bundle_name: str, operation_token: str):
 			{"bundle_name": bundle_name, "status": "Draft"},
 			doctype="Service Bundle",
 			docname=bundle_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -130,6 +133,7 @@ def _delete_bundle_task_impl(bundle_name: str, operation_token: str):
 			{"bundle_name": bundle_name, "status": "Failed"},
 			doctype="Service Bundle",
 			docname=bundle_name,
+			after_commit=True,
 		)
 
 

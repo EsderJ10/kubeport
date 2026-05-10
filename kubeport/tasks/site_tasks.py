@@ -547,6 +547,7 @@ def _backup_site_task_impl(site_docname: str, backup_docname: str, operation_tok
 			{"site_docname": site_docname, "backup_docname": backup_docname, "status": "In Progress"},
 			doctype="Frappe Site Backup",
 			docname=backup_docname,
+			after_commit=True,
 		)
 		return True
 
@@ -560,6 +561,7 @@ def _backup_site_task_impl(site_docname: str, backup_docname: str, operation_tok
 			{"site_docname": site_docname, "status": "Active"},
 			doctype="Frappe Site",
 			docname=site_docname,
+			after_commit=True,
 		)
 
 	_run_site_op(
@@ -619,6 +621,7 @@ def _restore_site_task_impl(site_docname: str, backup_docname: str, operation_to
 			{"site_docname": site_docname, "backup_docname": backup_docname, "status": "Restoring"},
 			doctype="Frappe Site Backup",
 			docname=backup_docname,
+			after_commit=True,
 		)
 		return True
 
@@ -844,6 +847,7 @@ def _run_site_op(
 				{"site_docname": site_docname, "status": config.expected_status, "job_name": job_name},
 				doctype="Frappe Site",
 				docname=site_docname,
+				after_commit=True,
 			)
 		elif not record_job(doc, release, job_name, operation_token, namespace):
 			_cleanup_op_resources(api_client, namespace, job_name, creds_secret_name)
@@ -875,6 +879,7 @@ def _run_site_op(
 				{"site_docname": site_docname, "status": "Failed"},
 				doctype="Frappe Site",
 				docname=site_docname,
+				after_commit=True,
 			)
 
 
@@ -1817,6 +1822,7 @@ def _fail_backup_row(backup_docname: str, operation_token: str, detail: str) -> 
 		{"backup_docname": backup_docname, "status": "Failed"},
 		doctype="Frappe Site Backup",
 		docname=backup_docname,
+		after_commit=True,
 	)
 	return True
 
@@ -1850,6 +1856,7 @@ def _fail_restore_submission(
 			{"site_docname": site_docname, "status": "Failed"},
 			doctype="Frappe Site",
 			docname=site_docname,
+			after_commit=True,
 		)
 	if _backup_operation_matches(backup_docname, operation_token, ("Restoring",)):
 		frappe.db.set_value(
@@ -1867,4 +1874,5 @@ def _fail_restore_submission(
 		{"site_docname": site_docname, "backup_docname": backup_docname, "status": "Available"},
 		doctype="Frappe Site Backup",
 		docname=backup_docname,
+		after_commit=True,
 	)

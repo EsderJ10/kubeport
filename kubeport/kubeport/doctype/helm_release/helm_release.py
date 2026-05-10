@@ -293,22 +293,31 @@ class HelmRelease(Document):
 		"""
 		from kubeport.utils.release_health import walk
 
+		# Drop the request's open transaction before shelling out to helm and
+		# the kubernetes API.  Without this, the row's read-snapshot keeps
+		# this connection in a state that can collide with reconciliation's
+		# UPDATE on the same Helm Release row, surfacing as the "Server was
+		# too busy" QueryTimeoutError popup on a slow cluster.
+		is_frappe_site_chart = _release_uses_frappe_site_chart(self)
+		release_docname = self.name
+		frappe.db.commit()
+
 		try:
 			return {
-				"rows": [r.to_dict() for r in walk(self.name)],
+				"rows": [r.to_dict() for r in walk(release_docname)],
 				"error": "",
-				"is_frappe_site_chart": _release_uses_frappe_site_chart(self),
+				"is_frappe_site_chart": is_frappe_site_chart,
 			}
 		except Exception as e:
 			frappe.logger("kubeport").warning(
 				"Could not read Helm Release health for '%s': %s",
-				self.name,
+				release_docname,
 				e,
 			)
 			return {
 				"rows": [],
 				"error": _format_observed_state_error(e),
-				"is_frappe_site_chart": _release_uses_frappe_site_chart(self),
+				"is_frappe_site_chart": is_frappe_site_chart,
 			}
 
 	@frappe.whitelist()
@@ -359,11 +368,20 @@ class HelmRelease(Document):
 		"""Return live Helm revision history for this release."""
 		from kubeport.utils import helm
 
+		# Same rationale as ``get_release_health``: drop the implicit request
+		# transaction before shelling out so the held connection cannot
+		# collide with reconciliation writes on this same row.
+		release_name = self.release_name
+		namespace = self.namespace or "default"
+		cluster_name = self.cluster
+		release_docname = self.name
+		frappe.db.commit()
+
 		try:
 			history = helm.history(
-				release_name=self.release_name,
-				namespace=self.namespace or "default",
-				cluster_name=self.cluster,
+				release_name=release_name,
+				namespace=namespace,
+				cluster_name=cluster_name,
 			)
 			return {
 				"rows": history if isinstance(history, list) else [],
@@ -372,7 +390,7 @@ class HelmRelease(Document):
 		except Exception as e:
 			frappe.logger("kubeport").warning(
 				"Could not read Helm Release history for '%s': %s",
-				self.name,
+				release_docname,
 				e,
 			)
 			return {

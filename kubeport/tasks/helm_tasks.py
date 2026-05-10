@@ -86,6 +86,7 @@ def _add_and_sync_repo_impl(repo_name: str, sync_token: str):
 			{"repo_name": repo_name, "status": "Synced"},
 			doctype="Helm Repository",
 			docname=repo_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -102,6 +103,7 @@ def _add_and_sync_repo_impl(repo_name: str, sync_token: str):
 			{"repo_name": repo_name, "status": "Error"},
 			doctype="Helm Repository",
 			docname=repo_name,
+			after_commit=True,
 		)
 
 
@@ -147,6 +149,7 @@ def _sync_repo_charts_impl(repo_name: str, sync_token: str):
 			{"repo_name": repo_name, "status": "Synced"},
 			doctype="Helm Repository",
 			docname=repo_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -163,6 +166,7 @@ def _sync_repo_charts_impl(repo_name: str, sync_token: str):
 			{"repo_name": repo_name, "status": "Error"},
 			doctype="Helm Repository",
 			docname=repo_name,
+			after_commit=True,
 		)
 
 
@@ -350,6 +354,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -378,6 +383,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 
@@ -504,6 +510,7 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -532,6 +539,7 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 
@@ -609,6 +617,7 @@ def _uninstall_release_impl(release_name: str, operation_token: str):
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 
@@ -751,6 +760,7 @@ def _finalize_uninstall_success(
 		},
 		doctype="Helm Release",
 		docname=release_docname,
+		after_commit=True,
 	)
 
 

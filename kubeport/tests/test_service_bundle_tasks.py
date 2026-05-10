@@ -65,6 +65,7 @@ class UnitTestServiceBundleTasks(UnitTestCase):
 			{"bundle_name": "bundle-a", "status": "Deployed"},
 			doctype="Service Bundle",
 			docname="bundle-a",
+			after_commit=True,
 		)
 
 	@patch("kubeport.tasks.service_bundle_tasks.frappe.logger")
