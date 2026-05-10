@@ -151,8 +151,8 @@ These are deliberate scope decisions, not bugs:
 - **`Service Bundle` only supports built-in Kubernetes resource kinds.** CRDs, arbitrary custom resources, and admission-webhook concerns are out of scope.
 - **Postgres-backed benches are not supported.** The `db_type` field is locked to `mariadb`; the postgres code paths were intentionally removed (no forward-compatibility shim).
 - **Site image registry scope is public GHCR.** No `imagePullSecret` UI is exposed in v1.
-- **Backup storage is namespace-local PVCs.** Object-store backends, encryption, retention policies, scheduled backups, and restore-to-different-site-name are out of scope.
-- **No production hardening guide is shipped.** RBAC requirements, resource limits, and monitoring guidance are listed as future work in [`docs/control-plane-state.md`](control-plane-state.md).
+- **Backup storage is namespace-local PVCs.** Cron-based scheduled backups and per-site count/age retention shipped in v1; object-store backends, encryption at rest, cross-cluster restore, and restore-to-different-site-name remain out of scope.
+- **A narrative deployment guide ships in v1** ([`docs/deploy.md`](deploy.md)) covering topology, the Helm-CLI packaging snippet, the verb-resource RBAC matrix, resource-limit baselines, the internal-metrics endpoints, and the control-plane backup procedure; the kustomized least-privilege RBAC tree at [`deploy/rbac/`](../deploy/rbac/) is validated by `make rbac-smoke`.
 
 ---
 
@@ -161,10 +161,9 @@ These are deliberate scope decisions, not bugs:
 The remaining work is depth work; the core plumbing is in place.
 
 1. **Broader health modelling**: add application-level HTTP probes and CRD-aware health where signals have clear semantics.
-2. **Backup depth**: scheduled backups, retention policies, object-store backends, encryption, cross-cluster restore, restore-to-different-site-name.
+2. **Backup depth**: cron-based scheduled backups and per-site count/age retention landed in v1; remaining work is object-store backends, encryption at rest, cross-cluster restore, and restore-to-different-site-name (the latter blocked on a richer storage-path model).
 3. **Wider chart support**: controlled expansion of bench discovery beyond `erpnext`.
-4. **Operator hardening guide**: RBAC manifests, Helm binary packaging, deployment topology, monitoring.
-5. **Cross-DocType integration tests**: broader workflow coverage to complement the strong per-module coverage already in place.
+4. **Cross-DocType integration tests**: broader workflow coverage to complement the strong per-module coverage already in place.
 
 ---
 

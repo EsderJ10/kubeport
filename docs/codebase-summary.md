@@ -106,6 +106,8 @@ Stores desired state for a Helm-managed workload deployment.
 - Prepares deployable starter values for ERPNext/Frappe charts by injecting the cluster default worker StorageClass, with `local-path` access modes adjusted to `ReadWriteOnce`.
 - Can link to a `Kubeport Site Image` for official ERPNext/Frappe bench charts. The selected catalog image is desired state and is rendered into Helm values during deploy as `image.repository`, digest-aware `image.tag`, and `image.pullPolicy=IfNotPresent`.
 - Blocks conflicting manual `values.image.*` overrides while a Site Image is selected so image intent stays unambiguous. The desired spec hash includes the selected image row and digest for pending-change detection.
+- Bundles a per-release Bitnami MariaDB sibling for Frappe charts by default. Install/upgrade enqueues `_ensure_bundled_mariadb_release` (pins `oci://registry-1.docker.io/bitnamicharts/mariadb@25.1.1`) and renders `dbHost: <release-name>-mariadb` into the parent values; uninstall runs `_uninstall_bundled_mariadb_release`. The `use_external_database` checkbox opts out (no sibling installed; operator owns `dbHost`).
+- Renders structured ingress (`ingress_enabled`, `ingress_hostname`, `ingress_class_name`, `ingress_cluster_issuer`) into `ingress.*` for Frappe charts. cert-manager TLS is opt-in via `ingress_cluster_issuer`. `render_ingress_values` calls `_has_advanced_ingress_override` to decide whether the user's raw YAML is the escape hatch (multi-host, custom path types, custom annotations beyond `cert-manager.io/cluster-issuer`, or non-`{enabled, className, hosts, annotations, tls}` keys) or a simple block to be replaced by the structured rendering. All four form fields participate in the spec hash so toggling ingress flips `pending_changes`.
 - Queues deploy (`helm upgrade --install`), rollback, and uninstall through background jobs.
 - Tracks release lifecycle state (`Draft`, `In Progress`, `Deployed`, `Degraded`, `Failed`, `Uninstalling`).
 - Tracks desired spec hash, last-applied spec hash, last-applied chart version, operation type, and operation start time. `pending_changes` is set when saved desired state differs from the last successful apply.
@@ -132,6 +134,7 @@ Stores desired state for a Frappe site to be created on a running bench.
 - Stores site name, admin password, database credentials, and apps to install.
 - Only `mariadb` is a supported `db_type`; the field is locked to that single value.
 - Background jobs discover a running bench pod, dynamically extract its container image and sites PVC mount, and submit a Kubernetes Job running the appropriate `bench` command. A single `_build_op_job_manifest` builder is reused across create, delete, and migrate; only the command and per-operation env differ.
+- `_preflight_db_topology` runs synchronously on **Create Site** to refuse the click when the DB wiring obviously will not work. For bundled-MariaDB releases it requires `<release-name>-mariadb` to exist in the namespace; for external-DB releases it requires the operator to have supplied root credentials on the row. Green pre-flight is necessary but not sufficient — the worker still runs the full resolution chain — but a red pre-flight surfaces the failure on the UI thread instead of letting the Job submit and fail seconds later.
 - Reconciliation verifies site existence via exec-based discovery (checks for `site_config.json`) rather than trusting Job exit codes — avoids false negatives when `--install-app` triggers non-fatal warnings.
 - Uses per-run `operation_token` (concurrency control) and `operation_job_name` / `operation_job_token` (reconciliation identity) fields across site lifecycle operations.
 
@@ -288,9 +291,10 @@ Helm repository and release operations:
 - `add_and_sync_repo` — register repo with Helm, sync chart inventory
 - `sync_repo_charts` — re-register repo, refresh index, sync charts with per-run token check
 - `sync_all_repos` — daily scheduler entry point, enqueues `sync_repo_charts` for each repo
-- `install_or_upgrade_release` — idempotent `helm upgrade --install` with operation-token stale-job guards, shared health classification, and last-applied spec writeback
+- `install_or_upgrade_release` — idempotent `helm upgrade --install` with operation-token stale-job guards, shared health classification, and last-applied spec writeback. Calls `_ensure_bundled_mariadb_release` first when the chart matches `is_frappe_site_chart()` and `use_external_database` is unchecked.
 - `rollback_release` — `helm rollback` with stale-job guard; successful rollback updates saved desired values/chart version to the selected live revision
-- `uninstall_release` — `helm uninstall` with stale-job guard; Helm "release not found" is treated as successful cleanup and returns the row to `Draft`, clearing last-applied metadata
+- `uninstall_release` — `helm uninstall` with stale-job guard; Helm "release not found" is treated as successful cleanup and returns the row to `Draft`, clearing last-applied metadata. Calls `_uninstall_bundled_mariadb_release` when the parent had bundled MariaDB.
+- `_ensure_bundled_mariadb_release` / `_uninstall_bundled_mariadb_release` — install/uninstall the Bitnami MariaDB sibling release `<parent>-mariadb` (chart `oci://registry-1.docker.io/bitnamicharts/mariadb` pinned at `_BUNDLED_MARIADB_CHART_VERSION = "25.1.1"`). Kubeport does not invent a values snippet for users — the helper renders a minimal values YAML pinning the Bitnami sibling secret name so the parent chart can resolve `<release>-mariadb` and `mariadb-root-password` by Bitnami convention.
 
 Chart sync rebuilds full version inventory from `helm search repo --versions`, groups by chart name, deduplicates versions, prunes charts that disappeared upstream, and clears cached default values when the latest version changes.
 

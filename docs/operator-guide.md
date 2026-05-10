@@ -13,7 +13,7 @@ For installation see the [`README.md`](../README.md). For the architecture behin
 - Network reachability from the bench host (or pod) to the Kubernetes API server you plan to register.
 - Operator's Frappe user has the `System Manager` role.
 
-All workflows below assume the operator has the Kubeport workspace open in the Desk (`/app/kubeport-operations`).
+All workflows below assume the operator has the Kubeport workspace open in the Desk (`/app/kubeport-operations`). The workspace landing surface embeds the `Kubeport Overview` Dashboard: four red/amber number cards (Degraded Helm Releases, Failed Frappe Sites, Failed Backups, Stale Operations) that should read zero, three status-distribution donuts (Helm Release, Frappe Site, Service Bundle), a daily Helm-operations line chart, and four blue/teal internal-observability cards (Reconcile Ticks, Stale Ops Recovered, Orphan Jobs Swept, Helm p95 Latency). Quick-access shortcuts to every Kubeport DocType sit below.
 
 ---
 
@@ -105,11 +105,20 @@ By default the Frappe/ERPNext chart deploys with `ingress.enabled=false`, so the
 
 These fields apply only to Frappe charts (matched by chart name containing "frappe" or "erpnext"). For other charts, configure ingress via the raw `Values` YAML.
 
-**Escape hatch.** If the raw `Values` YAML already contains an `ingress` key, Kubeport leaves it alone — the form fields are a convenience layer, not a lock-in. Use this for advanced configurations like multi-host SAN certs, custom annotations, or alternate path types.
+**Escape hatch.** Kubeport classifies the user's `ingress` block as **advanced** when it has more than one host, a path other than `/` with `pathType: ImplementationSpecific`, custom annotations beyond `cert-manager.io/cluster-issuer`, or any top-level key beyond `{enabled, className, hosts, annotations, tls}`. Advanced overrides preserve the raw YAML untouched — that is your hatch for multi-host SAN certs, custom path types, or extra annotations. Simple or empty `ingress:` blocks (chart defaults, leftover snippets) are replaced by the structured rendering, so the form fields stay authoritative for the common case.
 
 Ingress suggestions are live, read-only cluster discovery. They are not persisted anywhere except the Helm Release fields you explicitly save, and the fields remain editable when nothing is detected.
 
 After saving with ingress changes, **Pending Changes** lights up. Click **Preview Diff** before deploying to see the `Ingress/<release>` resource being added (or its `tls` block changing) in the desired vs live diff. After deployment, the Release Status area shows **Reachable at** once the live Ingress reports a load-balancer address; until then it shows that Kubeport is waiting for the address.
+
+### 3.5 Database (Frappe charts): bundled MariaDB vs external
+
+The Frappe/ERPNext chart ships with `dbHost` empty, so a freshly deployed bench cannot create sites until something wires a database. Kubeport defaults to closing that gap for you:
+
+- **Bundled MariaDB (default).** Leave **Use External Database** unchecked on the Helm Release form. On install/upgrade, Kubeport also installs a sibling release named `<release-name>-mariadb` in the same namespace (Bitnami's MariaDB chart, pinned to a known-good version) and renders `dbHost: <release-name>-mariadb` into the parent release's values. Uninstalling the parent uninstalls the sibling. You do **not** need to fill in `DB Root Password` or `DB Root Secret` on `Frappe Site` — `Create Site` auto-wires the chart's `<release>-mariadb` Secret containing `mariadb-root-password`.
+- **External database.** Tick **Use External Database** when you operate a MariaDB outside the release (e.g., a managed RDS-style instance, a shared cluster MariaDB, or an existing cluster service). Kubeport will not install a sibling and will not touch `dbHost` for you — you must set `dbHost` (and any related connection values) in the raw `Values` YAML, and you must supply `DB Root Password` or `DB Root Secret` on every `Frappe Site` row that uses this bench.
+
+`Create Site` runs a synchronous pre-flight check before enqueueing the Job: bundled topology is rejected if the chart did not produce the `<release>-mariadb` Service or root Secret, and external topology is rejected if you forgot to supply credentials. The error message tells you exactly what to fix.
 
 ---
 
@@ -137,7 +146,7 @@ A `Frappe Site` row is desired state for one Frappe site on a `Helm Release` ben
 1. Open **Frappe Site** → **New**.
 2. Pick `Bench Release` (the `Helm Release` row).
 3. Fill in `Site Name` (must be a hostname-style label: lowercase alphanumerics, `.`, `-`, `_`, starting and ending alphanumeric).
-4. Fill in `Admin Password` and either `DB Root Password` (plaintext) or `DB Root Secret` (a Kubernetes Secret reference).
+4. Fill in `Admin Password`. **DB Root Password** / **DB Root Secret** are optional when the bench uses bundled MariaDB (the default — Kubeport auto-wires the chart's root Secret) and **required** when the bench has **Use External Database** ticked. See §3.5 for the bundled-vs-external split.
 5. Optional: list `Apps` to install (`erpnext`, `hrms`, etc.).
 6. Save and click **Create Site**.
 7. Status transitions: `Draft → In Progress → Active | Failed`.

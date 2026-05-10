@@ -6,6 +6,321 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-10 — Bundled Bitnami MariaDB orchestration for Frappe releases
+
+### Context
+
+The official Frappe / ERPNext Helm chart ships with `dbHost` empty: a
+freshly deployed release brings up the gunicorn / nginx / scheduler /
+worker / valkey workloads but has no database, so the very first
+`bench new-site` call inside the bench fails with a connection error.
+The pre-existing operator workflow was "deploy your own MariaDB
+elsewhere, copy its host into `values.dbHost`, copy its root credentials
+into every `Frappe Site` row." That fails the *deploys-out-of-the-box*
+promise the rest of the project is built around — discovery is live,
+ingress can be one toggle, the bench image is digest-pinned, but
+spinning up a working ERPNext stack still required the operator to
+run a parallel database provisioning workflow before they could click
+**Create Site**.
+
+### Decision
+
+When the chart matches `is_frappe_site_chart()` and the new
+`use_external_database` checkbox on `Helm Release` is unchecked
+(default), Kubeport's install/upgrade worker also installs a sibling
+Helm release named `<release-name>-mariadb` in the same namespace,
+using Bitnami's MariaDB OCI chart pinned at
+`oci://registry-1.docker.io/bitnamicharts/mariadb` version `25.1.1`.
+The parent release's rendered values get `dbHost: <release-name>-mariadb`
+so the chart resolves to the sibling Service. Uninstalling the parent
+uninstalls the sibling. The operator can opt out by ticking **Use
+External Database**, in which case Kubeport installs no sibling and
+will not touch `dbHost` — the operator keeps full control of the wiring.
+
+`Frappe Site._preflight_db_topology` runs synchronously on **Create
+Site** to refuse the click when the wiring obviously won't work:
+bundled topology requires the `<release-name>-mariadb` Service and root
+Secret to exist; external topology requires the operator to have
+supplied root credentials on the row. The pre-flight is a fast,
+synchronous Service / Secret lookup — green is necessary but not
+sufficient (the worker still resolves dynamically), but red reliably
+means the happy path is broken, so we surface that on the UI thread
+instead of letting a Job submit and fail seconds later.
+
+The chart pin matters: a Bitnami breaking change would silently break
+every bundled-MariaDB Frappe release on the next install/upgrade tick.
+The pin is documented at the top of `helm_tasks.py` and bumps go
+through code review with `helm show chart … --version <new>` evidence.
+
+A separate fix wraps this work end-to-end: Kubeport's helm subprocess
+calls now `frappe.db.commit()` before shelling out, so the bundled
+sibling's install never trips MariaDB's `commands out of sync` /
+"Connection is busy" error during the request-thread render path that
+materialises chart values from the database.
+
+### Rejected alternatives
+
+- **A subchart dependency in a Kubeport-owned chart wrapper.**
+  Couples Kubeport's release schedule to the upstream Frappe chart's
+  release schedule; every Frappe chart bump would require us to
+  rebuild and re-publish the wrapper. Sibling-release orchestration
+  is a thinner integration with the same end result.
+- **One shared cluster-wide MariaDB.** Multi-tenancy nightmare:
+  one release's runaway query would freeze every other release's
+  bench; backups would have to dance around shared schemas;
+  blast-radius widens at every level.
+- **Skip orchestration; document a "deploy MariaDB first" runbook.**
+  Status quo before this work. The friction is paid by every operator
+  on every fresh release; documenting it does not reduce it.
+- **Sibling release in a different namespace.** Adds a cross-namespace
+  Service-discovery problem on top, plus extra RBAC surface for the
+  control plane. Same-namespace siblings reuse the parent release's
+  RBAC and tear-down semantics.
+- **Auto-detect by parsing chart values for an existing `dbHost`.**
+  Brittle (charts vary in shape), and gives no answer for the
+  external-DB case (the operator may not yet have filled in the
+  field). An explicit checkbox is more honest.
+
+### Implementation details
+
+- `kubeport/tasks/helm_tasks.py`:
+  - `_BUNDLED_MARIADB_CHART_REF = "oci://registry-1.docker.io/bitnamicharts/mariadb"`
+    and `_BUNDLED_MARIADB_CHART_VERSION = "25.1.1"` pin the upstream
+    chart for reproducibility.
+  - `_ensure_bundled_mariadb_release(parent_release_name, …)` and
+    `_uninstall_bundled_mariadb_release(parent_release_name, …)`
+    wrap `helm.install_or_upgrade` / `helm.uninstall` for the
+    sibling release. `_bundled_mariadb_values()` renders a minimal
+    values YAML pinning the Bitnami sibling secret name so the
+    parent chart can reach the sibling's `<release>-mariadb` Secret
+    by Bitnami convention rather than depending on
+    `<sibling>-mariadb-mariadb` or other chart-version-specific paths.
+  - `install_or_upgrade_release` calls `_ensure_bundled_mariadb_release`
+    when `is_frappe_site_chart()` and `use_external_database` is
+    unchecked; `uninstall_release` calls
+    `_uninstall_bundled_mariadb_release` symmetrically and tolerates
+    "release: not found" as already-clean.
+- `kubeport/kubeport/doctype/helm_release/helm_release.json`: new
+  Database section with `use_external_database` (Check, default `0`).
+  `prepare_release_values` renders `dbHost: <release-name>-mariadb`
+  via `bundled_mariadb_release_name()` when the chart is Frappe and
+  the operator has not opted out. The user's `Values` YAML wins —
+  any pre-existing `dbHost` in raw values is left alone.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`:
+  `_preflight_db_topology` runs at the head of `create_site`. Bundled
+  flow uses `can_resolve_db_host_for_release` plus
+  `_resolve_db_root_secret_for_release`; external flow requires
+  `db_root_password` or `db_root_secret` on the Frappe Site row.
+- `kubeport/tasks/site_tasks.py`: per-Frappe-Site DB_HOST resolution
+  is scoped to the parent release's namespace and respects the
+  bundled-vs-external split. Stale `_resolve_db_host_for_release`
+  reads no longer leak across releases. Job pre-clean now retries
+  on a transient, releasing prior `kubeport-bench-creds` Secrets
+  before submitting the new Job.
+- `kubeport/tests/test_helm_tasks.py`: covers ensure/uninstall happy
+  path, non-Frappe-chart skip, external-DB opt-out skip, "release
+  not found" tolerance on uninstall, and other-error logging.
+- `kubeport/utils/helm.py` / call sites in
+  `kubeport/api/helm_diff.py` and the doctype controller:
+  `frappe.db.commit()` runs before each helm subprocess call from
+  the request thread. The cluster-mutating tasks already commit
+  before `enqueue` so this only patches the read-side helm shell-outs
+  (`helm template`, `helm get manifest`).
+- `docs/operator-guide.md` §3.5 (Database — bundled vs external) and
+  the §5.1 Create-a-site step now document the toggle and its
+  effect on Frappe Site fields.
+
+---
+
+## 2026-05-10 — Ingress UX: read-only discovery hints and "advanced override" escape hatch
+
+### Context
+
+The structured ingress fields shipped earlier in the day let operators
+turn ingress on with four form fields, but the form gave no live signal
+about *what* to type. New operators stared at an empty `Ingress Class`
+and `cert-manager ClusterIssuer` not knowing whether the cluster had a
+default `IngressClass`, whether cert-manager was even installed, or
+what hostname to use on a `kind` / `k3d` cluster with no DNS zone. A
+secondary issue surfaced in testing: an empty / chart-default
+`ingress:` block in the user's raw `Values` YAML was leaking through
+and silently overriding the structured fields, while a non-trivial
+multi-host or custom-annotation block was being clobbered by them —
+the authoritative split between "structured form fields" and "raw
+YAML escape hatch" was not consistent and depended on which path
+materialised values first.
+
+### Decision
+
+Add live, read-only ingress discovery to the Helm Release form via a
+single whitelisted endpoint `kubeport.api.discovery.get_ingress_suggestions(cluster_name, release_name)`
+that returns `{ingress_classes, default_ingress_class, cluster_issuers,
+default_cluster_issuer, controller_addresses, suggested_hostname,
+capabilities, errors}` in one round-trip. The form uses it to populate
+non-persisted suggestions:
+
+1. **Ingress Class** — the cluster's default `IngressClass` (the one
+   annotated `ingressclass.kubernetes.io/is-default-class: "true"`),
+   or the only detected class when there is exactly one.
+2. **cert-manager ClusterIssuer** — a ready `ClusterIssuer` when
+   cert-manager is detected on the cluster. Empty when cert-manager
+   is absent or no issuer is in `Ready: True` state.
+3. **Suggested hostname** — when the chosen ingress controller exposes
+   a LoadBalancer service with an external IP, the form proposes
+   `<release-name>.<ip>.nip.io`. Useful on `kind` / `k3d` / minikube
+   without a real DNS zone.
+
+Suggestions are pulled live, are never persisted to MariaDB, and the
+fields stay editable when nothing is detected so a fresh-cluster setup
+is not blocked by missing hints.
+
+The authoritative split between structured fields and raw YAML is
+re-stated as an explicit "advanced override" rule. `render_ingress_values()`
+runs the user's YAML through `_has_advanced_ingress_override()`,
+which classifies an `ingress` block as advanced if it carries any
+key beyond `{enabled, className, hosts, annotations, tls}`, has more
+than one host, has any path other than the structured-default
+`/ ImplementationSpecific`, or has annotations beyond
+`cert-manager.io/cluster-issuer`. Advanced overrides preserve the
+user's YAML untouched (the multi-host SAN-cert escape hatch). Simple
+or empty `ingress:` blocks (chart defaults, leftover snippets) are
+replaced by the structured rendering so the form fields remain the
+source of truth.
+
+### Rejected alternatives
+
+- **Persist the discovered hints into MariaDB so they appear without
+  the cluster being reachable.** The hints would go stale (an
+  `IngressClass` deleted in the cluster would still appear in the
+  form), and Kubeport's defining invariant is that observed state
+  is never persisted.
+- **Block save when no `IngressClass` is detected.** Over-strict —
+  operators on dev clusters with no `IngressClass` still need a
+  way to set `Enable Ingress = false` and move on.
+- **"Any `ingress` key wins" rule.** Tempting because it is one
+  line of code, but it makes the structured fields useless for any
+  release whose chart defaults already include a stub `ingress:`
+  block (most do). The advanced-override classifier is more code
+  but matches operator intent.
+- **Three-way merge between raw YAML and structured fields.** YAML
+  merging gets ambiguous fast and would defeat the "form fields are
+  the source of truth for the simple case" goal.
+- **Skip the LoadBalancer IP → nip.io hint.** It is the difference
+  between "click Save and it just works on `kind`" and "go look up
+  what nip.io is." Cheap to render and easy to ignore.
+
+### Implementation details
+
+- `kubeport/api/discovery.py`: one new whitelisted endpoint
+  `get_ingress_suggestions(cluster_name, release_name)` returning the
+  full payload above. Internal helpers `_pick_default_ingress_class`,
+  `_pick_default_cluster_issuer`, and `_suggest_hostname` shape the
+  defaults. `_discover_cluster_capabilities` swallows per-scope
+  errors into the `errors[]` payload so a missing CRD or RBAC denial
+  on (e.g.) `ClusterIssuer` does not blank out the whole response.
+- `kubeport/utils/discovery.py`: shared probes
+  `discover_ingress_classes(cluster_name)`,
+  `discover_ingress_controller_addresses(cluster_name)`, and
+  `discover_cluster_issuers(cluster_name)` (cert-manager listing
+  with a missing-CRD soft-fallback via apiextensions).
+- `kubeport/kubeport/doctype/helm_release/helm_release.js`: on-load
+  and on-cluster-change call the suggestions endpoint, populate
+  empty fields, and render a small "Detected: …" inline note next
+  to each field; suggestions never overwrite a non-empty field.
+- `kubeport/kubeport/doctype/helm_release/helm_release.py`:
+  `render_ingress_values()` calls `_has_advanced_ingress_override()`
+  on the user's `ingress` block; on advanced overrides it returns
+  the YAML unmodified. Helper `_is_single_root_ingress_host()` pins
+  the structured default shape (single host, single path `/` with
+  `pathType: ImplementationSpecific`).
+- `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.js`
+  surfaces ingress detection in the live discovery panel so the
+  operator can sanity-check the cluster from the cluster row before
+  ever opening a Helm Release form.
+- `docs/operator-guide.md` §3.4 (Ingress) updated to document the
+  read-only discovery hints and the advanced-override escape hatch.
+
+---
+
+## 2026-05-10 — Dedup reconciliation log noise and harden scaling-seed harness
+
+### Context
+
+A release whose chart was permanently broken (typo in a chart
+reference, removed upstream chart version, stuck PVC) caused the
+5-minute reconciler to call `frappe.log_error` with the same
+title-and-message every tick, forever. Frappe writes one
+`Error Log` row per call, so a single broken release produced 288
+log rows per day with no signal added past the first one. The error
+log's rotation never kept up.
+
+In a parallel issue, the eval/scaling-seed harness used a non-seeded
+`frappe.utils.now()` for backup timestamp generation in
+`eval/scaling/seed.py`, which made deterministic-replay scenarios
+non-deterministic on date boundaries.
+
+### Decision
+
+A new `_TickErrorLog` helper holds a per-tick set of dedup `bucket`
+keys and routes every reconciler `frappe.log_error` call through
+`emit(bucket, *, title, message, warn_msg=None)`. The first occurrence
+of a bucket per tick writes the Error Log row as before; subsequent
+occurrences in the same tick log a single `frappe.logger("kubeport").warning`
+line instead so the recurring root cause is still visible in the
+worker log without multiplying database rows. A fresh `_TickErrorLog`
+is constructed at the top of each top-level reconcile function so
+ticks never share dedup state.
+
+Buckets are stable strings of the form `"<scope>::<cluster>::<error class>"`,
+chosen so a single misconfigured release / bench / cluster collapses
+to one bucket regardless of how many rows enumerate it inside the
+tick. Helm `release: not found` errors get their own bucket suffix
+(`release-not-found`) via `_bucket_for_error()` so they never hide
+genuinely new error classes.
+
+The scaling-seed harness now seeds backup timestamps off a fixture
+clock derived from the seed's deterministic RNG instead of the wall
+clock, so identical seeds produce identical row contents across runs.
+
+### Rejected alternatives
+
+- **Rate-limit `frappe.log_error` globally.** Too coarse: would mask
+  unrelated errors firing in the same window from completely different
+  components.
+- **Drop the error to a debug log.** Reconciler errors are operator-
+  actionable; relegating them would hide real issues behind the
+  noise we were trying to suppress.
+- **Per-release suppression with a TTL window.** Tempting, but adds
+  state with a TTL that has to be reasoned about across worker
+  restarts. Per-tick is stateless and simpler.
+- **Hash the message instead of choosing a bucket key.** Two semantically
+  identical errors with different exception messages would fall into
+  different hash buckets and both log; an explicit
+  `<scope>::<cluster>::<error class>` bucket collapses them as
+  intended.
+
+### Implementation details
+
+- `kubeport/tasks/reconciliation.py`: new `_TickErrorLog` class with
+  `emit(bucket, *, title, message, warn_msg=None) -> bool` plus a
+  `_bucket_for_error(error: Exception) -> str` helper that gives Helm
+  "release not found" its own bucket suffix. Instantiated at the top
+  of each top-level reconcile function (`reconcile_all_releases`,
+  `reconcile_site_backups`); per-row loops thread the instance into
+  every error path that previously called `frappe.log_error` directly.
+- `kubeport/hooks.py`: scheduled-job entrypoints unchanged externally
+  but the per-tick collector lifetime matches a single tick.
+- `kubeport/tests/test_reconciliation.py`: regression tests pin the
+  per-tick dedup behaviour (same bucket twice in one tick → one
+  Error Log row plus a warning; same bucket in two consecutive ticks
+  → two Error Log rows).
+- `eval/scaling/seed.py` and `eval/scaling/_inproc.py`:
+  `now()` is replaced by a seeded clock helper. Existing scaling
+  scenarios reseed once per scenario start so cross-scenario state
+  bleed is eliminated.
+
+---
+
 ## 2026-05-10 — Operator workspace reflects the Overview Dashboard
 
 ### Context
