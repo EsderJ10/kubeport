@@ -6,6 +6,73 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-10 — Helm Release diff preview
+
+### Context
+
+`Helm Release` operators had no way to see what `helm upgrade --install`
+would actually change before clicking Deploy.  The capability was already
+listed as out of scope in `docs/control-plane-state.md` §Platform Coverage,
+and TODO-18 (P5) calls for closing it: a "Preview" surface that renders
+the desired manifest with `helm template` and diffs it against the live
+release manifest.
+
+### Decision
+
+Add a read-only whitelisted endpoint `kubeport.api.helm_diff.preview_release`
+plus a "Preview Diff" toolbar button on the Helm Release form.  Both
+sides of the diff are read-only Helm operations — `helm template` is
+local-only per the Helm 3 docs (no cluster contact) and `helm get
+manifest` is a read-only API call — so the endpoint is safe to invoke
+from the web thread without violating the async-first invariant.
+
+The endpoint reuses `prepare_release_values` from the Helm Release
+controller so the rendered desired state matches exactly what
+`install_or_upgrade_release` would apply (including site-image rendering
+and starter-value injection).  Both manifests are indexed by
+`(kind, namespace, name)`, canonicalised with `yaml.safe_dump(sort_keys=True)`,
+and run through `difflib.unified_diff` per resource.  A summary
+({added, removed, changed, unchanged, live_present}) accompanies the
+diff text so the form can show counters even when the diff is empty.
+
+### Rejected alternatives
+
+- **Background job for the diff.**  Both helm subcalls are read-only and
+  capped by the existing `_HELM_READ_TIMEOUT_SECONDS=30` ceiling; routing
+  them through `frappe.enqueue` would add latency without changing the
+  safety profile.
+- **External `helm-diff` plugin.**  Adds a system dependency and a second
+  CLI to package; a `difflib`-based per-resource diff matches the use
+  case (operator preview, not strict three-way merge) without it.
+- **Form button beside Deploy.**  Would require a new DocType field
+  rendered as a button.  Toolbar `add_custom_button` matches the existing
+  Force Uninstall / Show History pattern and keeps the doctype JSON
+  unchanged.
+
+### Implementation details
+
+- New `helm.template(release_name, chart_ref, namespace, values_yaml,
+  chart_version)` wrapper in `kubeport/utils/helm.py`.  Mirrors the
+  `get_manifest` parsed-list shape; no kubeconfig because `helm template`
+  does not contact the cluster.
+- New `kubeport/api/helm_diff.py` with `preview_release(name) -> dict`
+  (System Manager only).  Returns
+  `{diff, added, removed, changed, unchanged, live_present, error}`.
+  Treats "release: not found" from `helm get manifest` as `live_present:
+  False` and lets the diff present every desired resource as added.
+- Toolbar `Preview Diff` button in `helm_release.js` opens a modal with
+  a counters summary and the unified diff.  Hidden while an operation
+  is in flight; blocks if the form is dirty.
+- Tests in `kubeport/tests/test_helm_tasks.py` cover four scenarios:
+  identical desired/live (empty diff, `unchanged` only), value-only
+  change, chart-version-driven image change (also asserts the version
+  propagates to `helm.template` kwargs), and live-release missing
+  (`live_present: false`, all desired classified as `added`).
+- `docs/control-plane-state.md` §Platform Coverage line updated — diff
+  preview is no longer listed as out of scope.
+
+---
+
 ## 2026-05-10 — Internal observability: counters, helm-latency histogram, and correlation IDs
 
 ### Context

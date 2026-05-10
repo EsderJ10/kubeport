@@ -473,7 +473,7 @@
 
 These close gaps already named in `docs/control-plane-state.md` §Open Gaps. **Pick one or two**, do them well, list the others as future work.
 
-### TODO-18 — `feat/helm-diff-preview` (recommended pick)
+### TODO-18 — `feat/helm-diff-preview` ✅ DONE 2026-05-10 — 84c9f56
 
 **Goal**: A "Preview" button on `Helm Release` form that shows the diff between live state and the next render before deploying.
 
