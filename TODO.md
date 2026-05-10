@@ -397,7 +397,7 @@
 
 ---
 
-### TODO-15 — `feat/chaos-ci`
+### TODO-15 — `feat/chaos-ci` ✅ DONE 2026-05-10 — 68c6224
 
 **Goal**: One CI job that empirically demonstrates recovery under a realistic fault.
 
