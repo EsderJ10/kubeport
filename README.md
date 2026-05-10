@@ -30,6 +30,7 @@ Start with the document that matches what you want to do.
 | Understand the architecture (C4 diagrams, sequences, invariants) | [`docs/architecture.md`](docs/architecture.md) |
 | See current capability surface, robustness defences, open gaps | [`docs/control-plane-state.md`](docs/control-plane-state.md) |
 | Find a specific module / DocType / API | [`docs/codebase-summary.md`](docs/codebase-summary.md) |
+| Read the empirical evaluation (functional, reliability, baseline, scaling) | [`docs/evaluation.md`](docs/evaluation.md) |
 | Run the end-to-end evaluation harness | [`eval/README.md`](eval/README.md) |
 | Contribute (setup, lint, test, PR conventions) | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Architecture decision history | [`CHANGELOG.md`](CHANGELOG.md) |

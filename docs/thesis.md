@@ -2,7 +2,7 @@
 
 This document frames the repository as the technical artefact of a project. It states the problem, surveys the prior art, defines the objectives, summarises the methodology, and reports the achieved results against those objectives.
 
-The remaining documents in the repository (`README.md`, `docs/architecture.md`, `docs/operator-guide.md`, `docs/control-plane-state.md`, `docs/codebase-summary.md`, `CHANGELOG.md`) are the technical evidence supporting the claims made here.
+The remaining documents in the repository (`README.md`, `docs/architecture.md`, `docs/operator-guide.md`, `docs/control-plane-state.md`, `docs/codebase-summary.md`, `docs/evaluation.md`, `CHANGELOG.md`) are the technical evidence supporting the claims made here.
 
 ---
 
@@ -89,6 +89,8 @@ This produced a product whose capability surface (cluster connectivity → Helm 
 | O4 | Frappe site lifecycle | **Met** | `Frappe Site` orchestrates `bench new-site`, `bench drop-site`, `bench migrate`, `bench backup`, `bench restore` through Kubernetes Jobs cloned from a live bench workload pod; `Frappe Site Backup` is a standalone DocType so backup metadata can outlive the source site row; ground-truth bench probes verify outcomes rather than trusting Job exit codes. |
 | O5 | Platform-engineering invariants | **Met** | Discovery code path is read-only and never persists to MariaDB; every cluster mutation goes through `frappe.enqueue(... queue="long")`; background workers carry per-run operation / sync tokens that are re-checked before any state write; a 5-minute reconciliation loop detects drift and recovers stale operations; an orphan-Job sweep removes Jobs no row references. |
 
+The empirical numbers behind each "Met" claim are summarised in §6 below and developed in full in [`docs/evaluation.md`](evaluation.md).
+
 The robustness properties table in [`docs/control-plane-state.md`](control-plane-state.md) lists the specific defences implemented for each invariant, including:
 
 - per-run operation tokens with re-check before writes,
@@ -101,7 +103,23 @@ The robustness properties table in [`docs/control-plane-state.md`](control-plane
 
 ---
 
-## 6. Limitations
+## 6. Evaluación
+
+This section is the per-objective summary of the empirical evaluation. Each row pairs an objective from §3 with the measured number that grounds the corresponding "Met" claim in §5; the source column points at the JSON report under [`eval/results/`](../eval/results/) that produced the number. The full chapter — methodology, per-axis tables, fault-by-fault MTTRs, scaling regression — is in [`docs/evaluation.md`](evaluation.md).
+
+| # | Objective | Measured result | Source |
+|---|---|---|---|
+| O1 | Cluster connectivity (3 auth modes) | Golden-path `setup_cluster_doc` phase passes end-to-end against a real k3d cluster, exercising the kubeconfig auth path through the `Kubernetes Cluster` DocType. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
+| O2 | Helm release lifecycle | Golden-path phases `setup_helm_repo`, `verify_chart`, `create_release`, `deploy_release` all pass; release reaches `Deployed` and stays there across the rest of the run. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
+| O3 | Raw manifest deployment (Service Bundle) | Service Bundle apply / delete state-transition cases pass in the unit test suite. Not part of the operator-facing golden-path harness. | `kubeport/tests/test_reconciliation.py` |
+| O4 | Frappe site lifecycle | Golden-path phases `create_site`, `migrate_site`, `backup_site`, `restore_site`, `drop_site` all pass; ground-truth bench probes verify each transition. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
+| O5 | Platform-engineering invariants | All four documented robustness defences recover within the 30-min stale-op bound (1800 s): `worker_kill_mid_helm_upgrade` MTTR 2.30 s, `job_ttl_expired_before_reconcile` 6.68 s, `pod_exec_timeout_during_site_probe` 9.63 s (1 deferred tick), `corrupt_archive_size_sidecar` 22.34 s with archive removed from PVC. Reconciliation tick scales sublinearly to 1000 rows-per-kind (mean 10.46 s, power-law slope ≈ 0.745) — ≈ 28× under the scheduled 5-min cadence. The comparative baseline (raw `kubectl` + `helm`, same workflow) requires 24 distinct shell commands and 13 operator interventions; Kubeport elides both. | [`eval/results/sample-faults.json`](../eval/results/sample-faults.json) (`make eval-faults`); [`eval/results/sample-scaling.json`](../eval/results/sample-scaling.json) (`make eval-scaling`); [`eval/results/sample-baseline.json`](../eval/results/sample-baseline.json) and [`eval/results/comparison.md`](../eval/results/comparison.md) (`make eval-baseline`). |
+
+Every "Met" status in §5 is now anchored to a measurement in this table or the chapter it links to; the previous formulation asserted readiness without evidence.
+
+---
+
+## 7. Limitations
 
 These are deliberate scope decisions, not bugs:
 
@@ -114,7 +132,7 @@ These are deliberate scope decisions, not bugs:
 
 ---
 
-## 7. Future Work
+## 8. Future Work
 
 The remaining work is depth work; the core plumbing is in place.
 
@@ -126,7 +144,7 @@ The remaining work is depth work; the core plumbing is in place.
 
 ---
 
-## 8. References (Repository-Internal)
+## 9. References (Repository-Internal)
 
 | Document | Role |
 |---|---|
@@ -135,6 +153,7 @@ The remaining work is depth work; the core plumbing is in place.
 | [`docs/operator-guide.md`](operator-guide.md) | How to use Kubeport end-to-end. |
 | [`docs/control-plane-state.md`](control-plane-state.md) | Capability and robustness inventory; open gaps. |
 | [`docs/codebase-summary.md`](codebase-summary.md) | Module-level architecture reference. |
+| [`docs/evaluation.md`](evaluation.md) | Empirical evaluation chapter — functional, reliability, baseline, scaling. |
 | [`AGENTS.md`](../AGENTS.md) | Authoritative invariants and implementation patterns. |
 | [`CHANGELOG.md`](../CHANGELOG.md) | Architecture decision log (what / why / rejected alternatives). |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Development setup, lint and test workflow. |
@@ -143,7 +162,7 @@ The remaining work is depth work; the core plumbing is in place.
 
 ---
 
-## 9. Project Components
+## 10. Project Components
 
 This thesis describes the backend artefact (Kubeport). The complete TFG deliverable comprises three repositories:
 
