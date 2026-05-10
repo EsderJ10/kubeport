@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -16,12 +16,14 @@ from kubeport.tasks.reconciliation import (
 	_finalize_site_status,
 	_job_belongs_to_backup,
 	_job_belongs_to_site,
+	_prune_backup_retention,
 	_reconcile_frappe_site_backups,
 	_reconcile_frappe_sites,
 	_reconcile_helm_releases,
 	_reconcile_service_bundles,
 	_reconcile_site_backup,
 	_reconcile_stale_helm_operations,
+	_run_scheduled_backups,
 	_summarize_unrunnable_pod,
 	_sweep_orphan_site_jobs,
 	reconcile_all_releases,
@@ -52,14 +54,20 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_reconcile_frappe_sites.assert_called_once_with()
 		mock_sweep_orphan_site_jobs.assert_called_once_with()
 
+	@patch("kubeport.tasks.reconciliation._prune_backup_retention")
+	@patch("kubeport.tasks.reconciliation._run_scheduled_backups")
 	@patch("kubeport.tasks.reconciliation._reconcile_frappe_site_backups")
 	def test_reconcile_site_backups_delegates_to_frappe_site_backups(
 		self,
 		mock_reconcile_frappe_site_backups,
+		mock_run_scheduled_backups,
+		mock_prune_backup_retention,
 	):
 		reconcile_site_backups()
 
 		mock_reconcile_frappe_site_backups.assert_called_once_with()
+		mock_run_scheduled_backups.assert_called_once_with()
+		mock_prune_backup_retention.assert_called_once_with()
 
 	def test_summarize_unrunnable_pod_returns_terminated_exit_code_with_reason(self):
 		pod = SimpleNamespace(
@@ -2243,3 +2251,313 @@ class UnitTestReconcileSiteBackupProbe(UnitTestCase):
 		args = mock_finalize.call_args
 		self.assertEqual(args.args[1:4], ("In Progress", "Available", ""))
 		self.assertEqual(args.kwargs.get("size_bytes"), 4096)
+
+
+class UnitTestRunScheduledBackups(UnitTestCase):
+	"""Cron-driven enqueue path for the scheduled-backup tick.
+
+	Mocks Frappe ORM helpers so the unit test runs hermetically and does not
+	require a live test site.  Validates: due-vs-not-due decision, the
+	last_run advance happens before the enqueue, the in-flight guard skips
+	without rolling back the marker, and the manual-vs-scheduler race is
+	covered by the post-marker re-check.
+	"""
+
+	def _site_row(self, **overrides):
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		defaults = {
+			"name": "rel-a/demo",
+			"backup_schedule": "0 2 * * *",
+			"backup_schedule_last_run": now - timedelta(days=2),
+			"creation": now - timedelta(days=10),
+		}
+		defaults.update(overrides)
+		return SimpleNamespace(**defaults)
+
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.get_doc")
+	@patch("frappe.db.set_value")
+	@patch("frappe.db.get_value")
+	@patch("frappe.get_all")
+	def test_due_schedule_advances_marker_then_enqueues(
+		self,
+		mock_get_all,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_get_doc,
+		mock_now,
+	):
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		row = self._site_row()
+		mock_get_all.return_value = [row]
+		mock_db_get_value.return_value = {
+			"status": "Active",
+			"backup_schedule_last_run": row.backup_schedule_last_run,
+		}
+		site_doc = MagicMock()
+		site_doc.status = "Active"
+		site_doc._has_in_flight_backup.return_value = False
+		mock_get_doc.return_value = site_doc
+
+		_run_scheduled_backups()
+
+		mock_db_set_value.assert_called_once_with("Frappe Site", row.name, "backup_schedule_last_run", now)
+		site_doc._enqueue_backup.assert_called_once_with(triggered_by="Administrator")
+
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.db.set_value")
+	@patch("frappe.get_all")
+	def test_not_due_skips_without_touching_marker(
+		self,
+		mock_get_all,
+		mock_db_set_value,
+		mock_now,
+	):
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		# last_run was at 02:00 today — next slot is tomorrow 02:00 — not due.
+		row = self._site_row(backup_schedule_last_run=datetime(2026, 5, 10, 2, 0, 0))
+		mock_get_all.return_value = [row]
+
+		_run_scheduled_backups()
+
+		mock_db_set_value.assert_not_called()
+
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.get_doc")
+	@patch("frappe.db.set_value")
+	@patch("frappe.db.get_value")
+	@patch("frappe.get_all")
+	def test_in_flight_backup_skips_without_enqueue_but_advances_marker(
+		self,
+		mock_get_all,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_get_doc,
+		mock_now,
+	):
+		"""If the operator clicked Backup Now between the get_all and the
+		re-check, the scheduler advances the marker (so the same slot does
+		not double-fire next tick) but does not enqueue a duplicate."""
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		row = self._site_row()
+		mock_get_all.return_value = [row]
+		mock_db_get_value.return_value = {
+			"status": "Active",
+			"backup_schedule_last_run": row.backup_schedule_last_run,
+		}
+		site_doc = MagicMock()
+		site_doc.status = "Active"
+		site_doc._has_in_flight_backup.return_value = True
+		mock_get_doc.return_value = site_doc
+
+		_run_scheduled_backups()
+
+		mock_db_set_value.assert_called_once()
+		site_doc._enqueue_backup.assert_not_called()
+
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.db.set_value")
+	@patch("frappe.db.get_value")
+	@patch("frappe.get_all")
+	def test_concurrent_marker_advance_skips_second_tick(
+		self,
+		mock_get_all,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_now,
+	):
+		"""If another tick has already advanced ``backup_schedule_last_run``
+		past the row's read value, the second tick must not re-fire the same
+		slot."""
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		row = self._site_row()
+		mock_get_all.return_value = [row]
+		# Re-check sees the marker has already moved forward.
+		mock_db_get_value.return_value = {
+			"status": "Active",
+			"backup_schedule_last_run": now - timedelta(minutes=2),
+		}
+
+		_run_scheduled_backups()
+
+		mock_db_set_value.assert_not_called()
+
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.db.set_value")
+	@patch("frappe.db.get_value")
+	@patch("frappe.get_all")
+	def test_status_no_longer_active_skips(
+		self,
+		mock_get_all,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_now,
+	):
+		"""Status moved to In Progress / Failed / Deleting between read and
+		re-check — do not enqueue."""
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		mock_get_all.return_value = [self._site_row()]
+		mock_db_get_value.return_value = {
+			"status": "In Progress",
+			"backup_schedule_last_run": None,
+		}
+
+		_run_scheduled_backups()
+
+		mock_db_set_value.assert_not_called()
+
+	@patch("frappe.get_all")
+	def test_no_scheduled_sites_returns_quickly(self, mock_get_all):
+		mock_get_all.return_value = []
+
+		_run_scheduled_backups()
+
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.db.set_value")
+	@patch("frappe.db.get_value")
+	@patch("frappe.get_all")
+	def test_long_downtime_triggers_one_catchup_not_a_flood(
+		self,
+		mock_get_all,
+		mock_db_get_value,
+		mock_db_set_value,
+		mock_now,
+	):
+		"""After a 30-day outage with a daily cron, one tick must enqueue
+		exactly one backup, not 30."""
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		# last_run 30 days ago.
+		row = self._site_row(backup_schedule_last_run=now - timedelta(days=30))
+		mock_get_all.return_value = [row]
+		mock_db_get_value.return_value = {
+			"status": "Active",
+			"backup_schedule_last_run": row.backup_schedule_last_run,
+		}
+		site_doc = MagicMock()
+		site_doc.status = "Active"
+		site_doc._has_in_flight_backup.return_value = False
+		with patch("frappe.get_doc", return_value=site_doc):
+			_run_scheduled_backups()
+
+		# Exactly one marker advance, exactly one enqueue.
+		self.assertEqual(mock_db_set_value.call_count, 1)
+		self.assertEqual(site_doc._enqueue_backup.call_count, 1)
+
+
+class UnitTestPruneBackupRetention(UnitTestCase):
+	"""Retention pruning: count cap and age cap on Available rows only."""
+
+	@patch("frappe.delete_doc")
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.get_all")
+	def test_count_cap_trashes_oldest_beyond_n(
+		self,
+		mock_get_all,
+		mock_now,
+		mock_delete_doc,
+	):
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		# First call returns the configured sites, subsequent calls return
+		# the per-site Available rows (newest first).
+		mock_get_all.side_effect = [
+			[
+				SimpleNamespace(
+					name="rel-a/demo",
+					backup_retention_count=2,
+					backup_retention_days=0,
+				),
+			],
+			[
+				SimpleNamespace(name="b1", creation=now - timedelta(days=1)),
+				SimpleNamespace(name="b2", creation=now - timedelta(days=2)),
+				SimpleNamespace(name="b3", creation=now - timedelta(days=3)),
+				SimpleNamespace(name="b4", creation=now - timedelta(days=4)),
+			],
+		]
+
+		_prune_backup_retention()
+
+		# Newest two retained, the older two trashed.
+		self.assertEqual(mock_delete_doc.call_count, 2)
+		trashed = {c.args[1] for c in mock_delete_doc.call_args_list}
+		self.assertEqual(trashed, {"b3", "b4"})
+
+	@patch("frappe.delete_doc")
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.get_all")
+	def test_age_cap_trashes_anything_older_than_cutoff(
+		self,
+		mock_get_all,
+		mock_now,
+		mock_delete_doc,
+	):
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		mock_get_all.side_effect = [
+			[
+				SimpleNamespace(
+					name="rel-a/demo",
+					backup_retention_count=0,
+					backup_retention_days=7,
+				),
+			],
+			[
+				SimpleNamespace(name="b1", creation=now - timedelta(days=1)),
+				SimpleNamespace(name="b2", creation=now - timedelta(days=8)),
+				SimpleNamespace(name="b3", creation=now - timedelta(days=30)),
+			],
+		]
+
+		_prune_backup_retention()
+
+		trashed = {c.args[1] for c in mock_delete_doc.call_args_list}
+		self.assertEqual(trashed, {"b2", "b3"})
+
+	@patch("frappe.delete_doc")
+	@patch("frappe.utils.now_datetime")
+	@patch("frappe.get_all")
+	def test_count_and_age_combine_via_union(
+		self,
+		mock_get_all,
+		mock_now,
+		mock_delete_doc,
+	):
+		"""When both caps are set, a row that violates either is trashed."""
+		now = datetime(2026, 5, 10, 12, 0, 0)
+		mock_now.return_value = now
+		mock_get_all.side_effect = [
+			[
+				SimpleNamespace(
+					name="rel-a/demo",
+					backup_retention_count=3,
+					backup_retention_days=7,
+				),
+			],
+			[
+				SimpleNamespace(name="b1", creation=now - timedelta(days=1)),
+				SimpleNamespace(name="b2", creation=now - timedelta(days=2)),
+				SimpleNamespace(name="b3", creation=now - timedelta(days=10)),  # over age cap
+				SimpleNamespace(name="b4", creation=now - timedelta(days=15)),  # over count and age
+			],
+		]
+
+		_prune_backup_retention()
+
+		trashed = {c.args[1] for c in mock_delete_doc.call_args_list}
+		self.assertEqual(trashed, {"b3", "b4"})
+
+	@patch("frappe.delete_doc")
+	@patch("frappe.get_all")
+	def test_no_configured_sites_does_nothing(self, mock_get_all, mock_delete_doc):
+		mock_get_all.return_value = []
+
+		_prune_backup_retention()
+
+		mock_delete_doc.assert_not_called()

@@ -51,6 +51,10 @@ class FrappeSite(Document):
 		from frappe.types import DF
 
 		admin_password: DF.Password
+		backup_retention_count: DF.Int
+		backup_retention_days: DF.Int
+		backup_schedule: DF.Data | None
+		backup_schedule_last_run: DF.Datetime | None
 		bench_release: DF.Link
 		cluster: DF.Data | None
 		operation_job_name: DF.Data | None
@@ -97,6 +101,7 @@ class FrappeSite(Document):
 			)
 
 		self._validate_install_apps()
+		self._validate_backup_schedule()
 
 	def _validate_site_name(self):
 		if not self.site_name:
@@ -121,6 +126,28 @@ class FrappeSite(Document):
 					"App names must start with a lowercase letter and contain only "
 					"lowercase letters, digits, underscores, or hyphens."
 				)
+
+	def _validate_backup_schedule(self):
+		if self.backup_schedule:
+			schedule = self.backup_schedule.strip()
+			# Reject blank-after-strip so an operator typing whitespace doesn't
+			# silently disable the schedule while leaving the field non-empty.
+			if not schedule:
+				frappe.throw("Backup Schedule must be a five-field cron expression or blank.")
+			from croniter import croniter
+
+			if not croniter.is_valid(schedule):
+				frappe.throw(
+					f"Invalid Backup Schedule '{schedule}'. "
+					"Use a five-field cron expression, e.g. '0 2 * * *' for daily at 02:00."
+				)
+			# Persist the stripped form so the croniter base computation can
+			# round-trip without surprise whitespace.
+			self.backup_schedule = schedule
+		if (self.backup_retention_count or 0) < 0:
+			frappe.throw("Retention: Max Backups must be 0 or positive.")
+		if (self.backup_retention_days or 0) < 0:
+			frappe.throw("Retention: Max Age must be 0 or positive.")
 
 	@frappe.whitelist()
 	def create_site(self):
@@ -262,6 +289,22 @@ class FrappeSite(Document):
 		if self._has_in_flight_backup():
 			frappe.throw("A backup or restore operation is already in progress for this site.")
 
+		backup_docname = self._enqueue_backup(triggered_by=frappe.session.user)
+		frappe.msgprint(
+			f"Backup for '{self.site_name}' has been queued.",
+			alert=True,
+			indicator="blue",
+		)
+		return {"backup_docname": backup_docname}
+
+	def _enqueue_backup(self, *, triggered_by: str) -> str:
+		"""Insert the backup row, flip the site to In Progress, and enqueue the worker.
+
+		Shared by the manual ``backup_site`` button and the scheduled-backup
+		path in ``kubeport/tasks/reconciliation.py``.  Callers are responsible
+		for the upstream guards (status == Active, no in-flight backup); this
+		helper focuses on the ordered side effects.
+		"""
 		release = frappe.get_doc("Helm Release", self.bench_release)
 		operation_token = secrets.token_hex(16)
 		backup_doc = frappe.get_doc(
@@ -277,7 +320,7 @@ class FrappeSite(Document):
 				"status": "Pending",
 				"storage_backend": "pvc",
 				"operation_token": operation_token,
-				"triggered_by": frappe.session.user,
+				"triggered_by": triggered_by,
 			}
 		)
 		backup_doc.insert(ignore_permissions=True)
@@ -301,12 +344,7 @@ class FrappeSite(Document):
 			queue="long",
 			enqueue_after_commit=True,
 		)
-		frappe.msgprint(
-			f"Backup for '{self.site_name}' has been queued.",
-			alert=True,
-			indicator="blue",
-		)
-		return {"backup_docname": backup_doc.name}
+		return backup_doc.name
 
 	@frappe.whitelist()
 	def restore_site(self, backup_docname: str, confirm_destructive: bool = False) -> dict:
