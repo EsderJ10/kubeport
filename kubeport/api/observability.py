@@ -1,8 +1,9 @@
 """
-Read-only observability endpoints for Helm Release form drilldowns.
+Read-only observability endpoints for Helm Release and Frappe Site form drilldowns.
 
-Every endpoint resolves cluster identity from the Helm Release row.  Client
-input is limited to the resource currently shown in the readiness table.
+Every endpoint resolves cluster identity from the persisted row (the Helm
+Release directly, or the Frappe Site's linked bench release).  Client input
+is limited to the resource currently shown in the readiness table.
 """
 
 from __future__ import annotations
@@ -179,6 +180,172 @@ def _get_release_scope(release_docname: str) -> dict[str, Any]:
 		frappe.throw(f"Helm Release '{release_docname}' is missing cluster information.")
 	if not scope.get("release_name"):
 		frappe.throw(f"Helm Release '{release_docname}' is missing release name information.")
+	return scope
+
+
+@frappe.whitelist()
+def get_site_resource_logs(
+	site_docname: str,
+	kind: str,
+	name: str,
+	pod_name: str | None = None,
+	container: str | None = None,
+	tail_lines: int = 200,
+	previous: bool = False,
+	namespace: str | None = None,
+) -> dict[str, Any]:
+	"""Return capped logs for one selected pod backing a Frappe Site bench resource."""
+	release = _get_release_scope_from_site(site_docname)
+	cluster = str(release["cluster"])
+	resource_namespace = str(namespace or release.get("namespace") or "default")
+
+	try:
+		_assert_release_resource_member(
+			release=release,
+			kind=kind,
+			name=name,
+			namespace=resource_namespace,
+			allowed_kinds=_LOG_KINDS,
+		)
+		pods = list_pods_for_resource(cluster, resource_namespace, kind, name)
+		selected_pod = _select_pod_name(pods, pod_name)
+	except ValueError as e:
+		frappe.throw(str(e))
+	except Exception as e:
+		return {
+			"kind": kind,
+			"name": name,
+			"namespace": resource_namespace,
+			"selected_pod": "",
+			"pods": [],
+			"logs_by_pod": {},
+			"errors_by_pod": {},
+			"error": _format_observed_state_error(e),
+		}
+
+	logs_by_pod: dict[str, str] = {}
+	errors_by_pod: dict[str, str] = {}
+	if selected_pod:
+		try:
+			logs_by_pod[selected_pod] = get_pod_logs(
+				cluster=cluster,
+				namespace=resource_namespace,
+				pod=selected_pod,
+				container=container,
+				tail_lines=tail_lines,
+				previous=previous,
+			)
+		except Exception as e:
+			logs_by_pod[selected_pod] = ""
+			errors_by_pod[selected_pod] = str(e)
+
+	return {
+		"kind": kind,
+		"name": name,
+		"namespace": resource_namespace,
+		"selected_pod": selected_pod,
+		"pods": pods,
+		"logs_by_pod": logs_by_pod,
+		"errors_by_pod": errors_by_pod,
+		"error": "" if pods else "No pods were found for this resource.",
+	}
+
+
+@frappe.whitelist()
+def get_site_resource_events(
+	site_docname: str,
+	kind: str,
+	name: str,
+	limit: int = 20,
+	namespace: str | None = None,
+) -> dict[str, Any]:
+	"""Return recent Kubernetes events scoped to one Frappe Site bench resource."""
+	release = _get_release_scope_from_site(site_docname)
+	resource_namespace = str(namespace or release.get("namespace") or "default")
+	try:
+		_assert_release_resource_member(
+			release=release,
+			kind=kind,
+			name=name,
+			namespace=resource_namespace,
+			allowed_kinds=_EVENT_KINDS,
+		)
+		rows = list_resource_events(
+			cluster=str(release["cluster"]),
+			namespace=resource_namespace,
+			kind=kind,
+			name=name,
+			limit=limit,
+		)
+		return {"rows": rows, "error": ""}
+	except ValueError as e:
+		frappe.throw(str(e))
+	except Exception as e:
+		return {"rows": [], "error": _format_observed_state_error(e)}
+
+
+@frappe.whitelist()
+def get_site_resource_rollout(
+	site_docname: str,
+	kind: str,
+	name: str,
+	limit: int = 10,
+	namespace: str | None = None,
+) -> dict[str, Any]:
+	"""Return rollout context for a Frappe Site bench workload resource."""
+	release = _get_release_scope_from_site(site_docname)
+	resource_namespace = str(namespace or release.get("namespace") or "default")
+	try:
+		_assert_release_resource_member(
+			release=release,
+			kind=kind,
+			name=name,
+			namespace=resource_namespace,
+			allowed_kinds=_ROLLOUT_KINDS,
+		)
+		rows = get_rollout_history(
+			cluster=str(release["cluster"]),
+			namespace=resource_namespace,
+			kind=kind,
+			name=name,
+			limit=limit,
+		)
+		return {"rows": rows, "error": ""}
+	except ValueError as e:
+		frappe.throw(str(e))
+	except Exception as e:
+		return {"rows": [], "error": _format_observed_state_error(e)}
+
+
+def _get_release_scope_from_site(site_docname: str) -> dict[str, Any]:
+	frappe.only_for("System Manager")
+	site_docname = str(site_docname or "").strip()
+	if not site_docname:
+		frappe.throw("Frappe Site document name is required.")
+
+	site = frappe.get_doc("Frappe Site", site_docname)
+	if not site:
+		frappe.throw(f"Frappe Site '{site_docname}' was not found.")
+	site.check_permission("read")
+
+	bench_release = getattr(site, "bench_release", None)
+	if not bench_release:
+		frappe.throw(f"Frappe Site '{site_docname}' has no bench release.")
+
+	release = frappe.get_doc("Helm Release", bench_release)
+	if not release:
+		frappe.throw(f"Bench release '{bench_release}' was not found.")
+	release.check_permission("read")
+
+	scope = {
+		"cluster": getattr(release, "cluster", None),
+		"namespace": getattr(release, "namespace", None),
+		"release_name": getattr(release, "release_name", None),
+	}
+	if not scope.get("cluster"):
+		frappe.throw(f"Bench release '{bench_release}' is missing cluster information.")
+	if not scope.get("release_name"):
+		frappe.throw(f"Bench release '{bench_release}' is missing release name information.")
 	return scope
 
 
