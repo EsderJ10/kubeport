@@ -60,6 +60,7 @@ bench --site <site> run-tests --app kubeport --doctype <DocType>
 | `AGENTS.md` | Authoritative invariants and implementation patterns |
 | `CONTRIBUTING.md` | Dev setup, lint/test workflow, PR conventions |
 | `SECURITY.md` | Disclosure policy and trust-boundary notes |
+| `docs/threat-model.md` | Trust-boundary diagram, STRIDE catalogue, endpoint × boundary mapping |
 | `docs/thesis.md` | Project framing: problem, SOTA, objectives, results, future work |
 | `docs/architecture.md` | C4 diagrams, runtime sequences, design invariants |
 | `docs/operator-guide.md` | End-to-end operator workflows + smoke procedure |

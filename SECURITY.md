@@ -32,6 +32,8 @@ Out of scope:
 
 ## Trust model and known boundaries
 
+For the per-boundary STRIDE catalogue, the endpoint × boundary mapping, and the justification of the destructive-operation allowlist, see [`docs/threat-model.md`](docs/threat-model.md).
+
 Kubeport is designed to be operated by users holding the Frappe `System Manager` role. The following are deliberate trust boundaries operators should be aware of:
 
 - **Cluster credentials** stored in `Kubernetes Cluster` rows (kubeconfig content, bearer tokens, CA certificates) live in MariaDB. Anyone who can read those rows from the database can act as the cluster.

@@ -37,6 +37,7 @@ Start with the document that matches what you want to do.
 | Contribute (setup, lint, test, PR conventions) | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Architecture decision history | [`CHANGELOG.md`](CHANGELOG.md) |
 | Report a security issue | [`SECURITY.md`](SECURITY.md) |
+| See the trust-boundary analysis (STRIDE per boundary, endpoint mapping) | [`docs/threat-model.md`](docs/threat-model.md) |
 | Detailed invariants and patterns for AI / human contributors | [`AGENTS.md`](AGENTS.md) |
 
 ---
