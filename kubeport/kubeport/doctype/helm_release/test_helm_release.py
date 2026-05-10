@@ -235,7 +235,9 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_discover_default_storage_class.assert_called_once_with("cluster-a")
 
 	@patch("kubeport.utils.discovery.discover_default_storage_class")
-	def test_render_chart_starter_values_leaves_non_site_charts_raw(self, mock_discover_default_storage_class):
+	def test_render_chart_starter_values_leaves_non_site_charts_raw(
+		self, mock_discover_default_storage_class
+	):
 		chart_doc = SimpleNamespace(chart_name="nginx")
 
 		values_yaml = render_chart_starter_values(

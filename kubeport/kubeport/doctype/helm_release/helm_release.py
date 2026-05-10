@@ -290,13 +290,16 @@ class HelmRelease(Document):
 			chart_ref = chart_doc.get_chart_reference()
 			values = show_values(chart_ref, version=version)
 
-		return prepare_release_values(
-			values,
-			chart_doc,
-			cluster_name=self.cluster,
-			site_image=getattr(self, "site_image", None),
-			allow_site_image_override=True,
-		) or ""
+		return (
+			prepare_release_values(
+				values,
+				chart_doc,
+				cluster_name=self.cluster,
+				site_image=getattr(self, "site_image", None),
+				allow_site_image_override=True,
+			)
+			or ""
+		)
 
 	@frappe.whitelist()
 	def get_release_history(self) -> dict[str, Any]:
@@ -496,9 +499,8 @@ def render_chart_starter_values(
 		)
 
 	worker["storageClass"] = default_storage_class
-	if (
-		default_storage_class in _RWO_ONLY_STORAGE_CLASSES
-		and _should_force_rwo_access_modes(worker.get("accessModes"))
+	if default_storage_class in _RWO_ONLY_STORAGE_CLASSES and _should_force_rwo_access_modes(
+		worker.get("accessModes")
 	):
 		worker["accessModes"] = ["ReadWriteOnce"]
 
