@@ -108,6 +108,10 @@ class UnitTestSiteHelpers(UnitTestCase):
 		self.assertIn("--mariadb-user-host-login-scope='%'", cmd)
 		self.assertNotIn("--no-mariadb-socket", cmd)
 
+	def test_bench_new_site_command_passes_db_host(self):
+		cmd = _bench_new_site_command("s1", [], force=False)
+		self.assertIn('--db-host="$DB_HOST"', cmd)
+
 	def test_build_env_admin_password_always_references_creds_secret(self):
 		env = _build_env(
 			site_name="s1",

@@ -948,6 +948,7 @@ def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool
 		'"$SITE_NAME"',
 		"--mariadb-user-host-login-scope='%'",
 		'--db-type="$DB_TYPE"',
+		'--db-host="$DB_HOST"',
 		'--mariadb-root-username="$DB_ROOT_USER"',
 		'--mariadb-root-password="$DB_ROOT_PASSWORD"',
 		'--admin-password="$ADMIN_PASSWORD"',
