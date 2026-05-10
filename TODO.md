@@ -502,7 +502,7 @@ These close gaps already named in `docs/control-plane-state.md` §Open Gaps. **P
 
 ---
 
-### TODO-20 — `feat/scheduled-backups` ✅ DONE 2026-05-10
+### TODO-20 — `feat/scheduled-backups` ✅ DONE 2026-05-10 — a1f1d26
 
 **Goal**: Operator-scheduled backups via cron on `Frappe Site`.
 
