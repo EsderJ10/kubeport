@@ -269,7 +269,7 @@
 
 ---
 
-### TODO-10 — `docs/threat-model`
+### TODO-10 — `docs/threat-model` ✅ DONE 2026-05-10 — e9b1735
 
 **Goal**: A full trust-boundary analysis. Currently `SECURITY.md` exists but no boundary map.
 
