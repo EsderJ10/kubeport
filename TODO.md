@@ -324,7 +324,7 @@
 
 ## P3 — CS-MAJOR-GRADE DIFFERENTIATORS
 
-### TODO-12 — `test/property-fsm-frappe-site`
+### TODO-12 — `test/property-fsm-frappe-site` ✅ DONE 2026-05-10 — a1ac296
 
 **Goal**: Hypothesis-based property tests for the `Frappe Site` finite state machine.
 
