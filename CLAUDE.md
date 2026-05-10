@@ -9,11 +9,17 @@ Kubeport is a Frappe app that acts as a Kubernetes control plane. **Desired stat
 ## Commands
 
 ```bash
-# Formatting and linting
+# Formatting and linting (host install)
 ruff format                  # Python formatting (tabs, double quotes, 110 chars)
 ruff                         # Python linting
 prettier                     # JS/CSS formatting
 eslint                       # JavaScript linting
+
+# Containerised lint (no host install — uses docker-compose.lint.yml)
+make fmt                     # format in place
+make lint                    # report findings
+make fix                     # auto-fix + format
+make lint-check              # exact CI dry-run
 
 # Pre-commit (required)
 cd apps/kubeport && pre-commit install
