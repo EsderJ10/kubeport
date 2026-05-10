@@ -423,7 +423,17 @@ class UnitTestHelmRelease(UnitTestCase):
 
 	def test_render_ingress_values_preserves_enabled_user_supplied_ingress(self):
 		chart_doc = SimpleNamespace(chart_name="erpnext")
-		raw = "ingress:\n  enabled: true\n  hosts:\n    - host: custom.example.com\n"
+		raw = (
+			"ingress:\n"
+			"  enabled: true\n"
+			"  annotations:\n"
+			"    nginx.ingress.kubernetes.io/proxy-body-size: 50m\n"
+			"  hosts:\n"
+			"    - host: custom.example.com\n"
+			"      paths:\n"
+			"        - path: /custom\n"
+			"          pathType: Prefix\n"
+		)
 
 		out = render_ingress_values(
 			raw,
@@ -436,6 +446,33 @@ class UnitTestHelmRelease(UnitTestCase):
 		)
 
 		self.assertEqual(out, raw)
+
+	def test_render_ingress_values_replaces_stale_simple_enabled_ingress(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		raw = (
+			"ingress:\n"
+			"  enabled: true\n"
+			"  className: nginx\n"
+			"  hosts:\n"
+			"    - host: erp.local\n"
+			"      paths:\n"
+			"        - path: /\n"
+			"          pathType: ImplementationSpecific\n"
+		)
+
+		out = render_ingress_values(
+			raw,
+			chart_doc,
+			ingress_enabled=1,
+			hostname="test-ingress.172.23.0.2.nip.io",
+			class_name="traefik",
+			cluster_issuer="",
+			release_name="bench-a",
+		)
+
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["ingress"]["hosts"][0]["host"], "test-ingress.172.23.0.2.nip.io")
+		self.assertEqual(parsed["ingress"]["className"], "traefik")
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
 	def test_render_ingress_values_throws_when_hostname_blank(self, mock_throw):
