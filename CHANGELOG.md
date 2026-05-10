@@ -6,6 +6,79 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-10 — Operator workspace reflects the Overview Dashboard
+
+### Context
+
+The `Kubeport Operations` workspace exposed eight number cards and a
+shortcut to the `Kubeport Overview` Dashboard, but none of the
+dashboard's four charts (three status donuts + a daily operations line
+chart) ever rendered on the workspace itself. Operators had to click
+through to a separate Dashboard page to see status distribution, which
+defeats the point of an at-a-glance landing surface.
+
+A second issue surfaced during the audit: every existing number card in
+`content[]` used `"type":"card"` with `"data":{"card_name":"…"}`. That
+block type renders Frappe's "Card" widget (a list of links), not a
+Number Card. The cards on the deployed workspace only appeared because
+Frappe falls back to the workspace's `number_cards[]` array when the
+content block fails to resolve — they were not actually being driven by
+the layout.
+
+### Decision
+
+Rewrite the workspace `content[]` to (a) embed all four dashboard
+charts as `chart` blocks, (b) correct number-card blocks to
+`"type":"number_card"` so the layout drives rendering, and (c) add a
+short paragraph subtitle under each section header for the polish that
+distinguishes a landing surface from a debug grid.
+
+Section flow, top to bottom:
+
+1. **Fleet Health** — four red/amber number cards that should read
+   zero (Degraded Helm Releases, Failed Frappe Sites, Failed Backups,
+   Stale Operations).
+2. **Status Distribution** — two donuts side-by-side (Helm Release,
+   Frappe Site) and one full-width donut (Service Bundle). Service
+   Bundle is full-width to avoid the asymmetric "lone half-donut next
+   to empty space" layout.
+3. **Operations Activity** — full-width line chart of Helm Release
+   operations per day.
+4. **Internal Observability** — four blue/teal number cards (Reconcile
+   Ticks, Stale Ops Recovered, Orphan Jobs Swept, Helm p95 Latency).
+5. **Quick Access** — `Kubeport Overview` shortcut promoted to first
+   tile, then DocType list shortcuts grouped by frequency of use.
+
+The four charts are also added to the workspace's `charts[]` array so
+Frappe's chart registry binds them to this workspace at sync time.
+
+### Rejected alternatives
+
+- **Keep the workspace card-only and rely on the separate Overview
+  Dashboard.** Two surfaces showing partially overlapping data — the
+  cost of one extra click is paid every operator session, and the
+  Dashboard's chart registry already exists.
+- **Three donuts at `col=4` each on one row.** Forbidden by the
+  workspace chart block (`min_width: 6` in `chart.js`).
+- **Three donuts stacked at `col=12`.** Vertically tall and visually
+  monotonous — burying the Operations line chart below three full-width
+  donuts pushes Internal Observability off the first viewport.
+- **Drop the donuts entirely and show only the line chart.** The
+  status donuts are the most-glanced widget on the Overview Dashboard;
+  cutting them would have been a regression in information density.
+
+### Implementation details
+
+- `kubeport/kubeport/workspace/kubeport_operations/kubeport_operations.json`
+  — content blocks rewritten; `charts[]` populated with the four
+  dashboard charts; `modified` bumped.
+- No DocType, API, or task changes — this is a pure fixture/layout
+  edit. The dashboard charts and number cards referenced are unchanged
+  and continue to live in `kubeport/kubeport/dashboard_chart/` and
+  `kubeport/kubeport/number_card/`.
+
+---
+
 ## 2026-05-10 — Helm Release ingress fields (Frappe charts)
 
 ### Context
