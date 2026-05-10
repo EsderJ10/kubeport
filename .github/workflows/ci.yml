@@ -31,11 +31,6 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
-    # First-cycle bench-in-CI bring-up is fragile (Python 3.14 wheel availability,
-    # bench flag drift, service-container timing).  Allow this job to fail without
-    # blocking PRs until a green run is observed; remove this line afterwards to
-    # enforce gating.
-    continue-on-error: true
 
     services:
       mariadb:
