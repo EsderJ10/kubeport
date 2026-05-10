@@ -1,54 +1,54 @@
-# Security Policy
+# Política de seguridad
 
-## Reporting a vulnerability
+## Comunicar una vulnerabilidad
 
-If you believe you have found a security vulnerability in Kubeport, **do not open a public GitHub issue**. Instead, send a private report to the project maintainer:
+Si crees haber encontrado una vulnerabilidad de seguridad en Kubeport, **no abras un issue público en GitHub**. En su lugar, envía un informe privado al mantenedor del proyecto:
 
 - Email: `jcorfer910@g.educaand.es`
-- Subject line: `[Kubeport security] <short description>`
+- Asunto: `[Kubeport security] <descripción breve>`
 
-Please include:
+Por favor, incluye:
 
-- A clear description of the vulnerability.
-- A reproduction (commands, DocType operations, manifest snippets, or cluster conditions).
-- The affected version (commit SHA or tag).
-- The impact you observed and any suggested mitigation.
+- Una descripción clara de la vulnerabilidad.
+- Una reproducción (comandos, operaciones de DocType, fragmentos de manifiesto o condiciones del clúster).
+- La versión afectada (SHA del commit o etiqueta).
+- El impacto observado y cualquier mitigación sugerida.
 
-You should expect an acknowledgement within a few business days. Coordinated disclosure is preferred — please give the maintainer a reasonable window to release a fix before publishing details.
+Puedes esperar un acuse de recibo en pocos días hábiles. Se prefiere la divulgación coordinada — por favor, da al mantenedor un plazo razonable para publicar una corrección antes de hacer públicos los detalles.
 
-## Scope
+## Alcance
 
-In scope:
+En alcance:
 
-- The Kubeport Frappe app itself (`kubeport/` package, hooks, DocTypes, API endpoints, background tasks, scheduled jobs).
-- The publish-site-image workflow (`.github/workflows/publish-site-image.yml`) and the catalogue script (`scripts/update_site_catalog.py`).
-- The default site-image catalogue (`kubeport/site_images/catalog.json`).
+- La propia aplicación Frappe de Kubeport (paquete `kubeport/`, hooks, DocTypes, endpoints de API, tareas en segundo plano, trabajos programados).
+- El flujo de trabajo de publicación de imágenes de site (`.github/workflows/publish-site-image.yml`) y el script de catálogo (`scripts/update_site_catalog.py`).
+- El catálogo predeterminado de imágenes de site (`kubeport/site_images/catalog.json`).
 
-Out of scope:
+Fuera de alcance:
 
-- Vulnerabilities in upstream Frappe / ERPNext, the Kubernetes Python client, the Helm CLI, or other dependencies — please report those to their respective maintainers.
-- Cluster misconfiguration in the operator's own environment (RBAC, network policies, image-pull credentials).
-- Denial-of-service via legitimately authenticated System Manager actions.
+- Vulnerabilidades en Frappe / ERPNext, el cliente Python de Kubernetes, la CLI de Helm u otras dependencias — repórtalas a sus respectivos mantenedores.
+- Configuración incorrecta del clúster en el entorno propio del operador (RBAC, políticas de red, credenciales de extracción de imágenes).
+- Denegación de servicio mediante acciones legítimamente autenticadas de System Manager.
 
-## Trust model and known boundaries
+## Modelo de confianza y fronteras conocidas
 
-For the per-boundary STRIDE catalogue, the endpoint × boundary mapping, and the justification of the destructive-operation allowlist, see [`docs/threat-model.md`](docs/threat-model.md).
+Para el catálogo STRIDE por frontera, el mapeo endpoint × frontera y la justificación de la lista de operaciones destructivas permitidas, consulta [`docs/threat-model.md`](docs/threat-model.md).
 
-Kubeport is designed to be operated by users holding the Frappe `System Manager` role. The following are deliberate trust boundaries operators should be aware of:
+Kubeport está diseñado para ser operado por usuarios con el rol `System Manager` de Frappe. Las siguientes son fronteras de confianza deliberadas que los operadores deben conocer:
 
-- **Cluster credentials** stored in `Kubernetes Cluster` rows (kubeconfig content, bearer tokens, CA certificates) live in MariaDB. Anyone who can read those rows from the database can act as the cluster.
-- **Bearer-token auth** without a CA certificate is rejected by default. The dev-only TLS bypass is explicitly named "dev-only" — never enable it in production.
-- **Helm operations** are executed by an out-of-process `helm` binary on the bench host. Compromising that binary or its `PATH` compromises the control plane.
-- **`Service Bundle`** validates manifests against a fixed allowlist of built-in resource kinds. CRDs and arbitrary custom resources are intentionally not supported.
-- **`Kubernetes Command`** is the only doctype that exposes ad-hoc cluster operations. Delete is restricted to `Pod`, `Job`, and `ConfigMap`; destructive changes to `Secret`, `PVC`, `Deployment`, and `StatefulSet` must go through their dedicated controllers.
-- **`Kubernetes Command Audit Log`** is append-only and survives row deletion. Rotate / archive it according to your retention policy.
-- **Site image catalogue** rows can be `is_curated=1` (owned by the daily catalogue sync) or `is_curated=0` (user-registered). The curated set is digest-pinned. User rows may be created without a digest and then deploy by tag — that is an explicit operator choice.
-- **Frappe Site credentials** flow into Kubernetes through per-Job Secrets that are owner-referenced to the Job (so they GC with the Job's TTL). They are never written to plaintext env vars on the Pod spec.
+- **Las credenciales del clúster** almacenadas en las filas de `Kubernetes Cluster` (contenido del kubeconfig, tokens de portador, certificados CA) residen en MariaDB. Cualquier persona que pueda leer esas filas desde la base de datos puede actuar como el clúster.
+- **La autenticación por token de portador** sin certificado CA se rechaza por defecto. El bypass TLS exclusivo para desarrollo está explícitamente nombrado como "solo para desarrollo" — nunca lo actives en producción.
+- **Las operaciones de Helm** son ejecutadas por un binario `helm` externo al proceso en el host de bench. Comprometer ese binario o su `PATH` compromete el plano de control.
+- **`Service Bundle`** valida los manifiestos contra una lista fija de tipos de recursos integrados. Los CRDs y los recursos personalizados arbitrarios no están soportados de forma intencionada.
+- **`Kubernetes Command`** es el único doctype que expone operaciones ad-hoc sobre el clúster. La eliminación está restringida a `Pod`, `Job` y `ConfigMap`; los cambios destructivos sobre `Secret`, `PVC`, `Deployment` y `StatefulSet` deben pasar por sus controladores dedicados.
+- **`Kubernetes Command Audit Log`** es de solo adición y sobrevive a la eliminación de filas. Rótalo y archívalo según tu política de retención.
+- **Las filas del catálogo de imágenes de site** pueden ser `is_curated=1` (gestionadas por la sincronización diaria del catálogo) o `is_curated=0` (registradas por el usuario). El conjunto curado está anclado por digest. Las filas de usuario pueden crearse sin digest y desplegarse por etiqueta — esa es una elección explícita del operador.
+- **Las credenciales de Frappe Site** fluyen hacia Kubernetes a través de Secrets por Job referenciados como propietarios del Job (de modo que se eliminan con el TTL del Job). Nunca se escriben como variables de entorno en texto plano en la especificación del Pod.
 
-## Hardening recommendations
+## Recomendaciones de hardening
 
-- Restrict who holds the `System Manager` role to operators who are authorised to manage the connected clusters.
-- Run the bench under a dedicated Kubernetes service account whose RBAC is the minimum required by Kubeport's tasks (Helm releases, Jobs in target namespaces, the resource kinds in the `Service Bundle` allowlist, exec into bench pods).
-- Mount only the kubeconfigs / tokens needed by the bench; do not co-locate unrelated cluster credentials in MariaDB.
-- Keep the Helm binary on `PATH` pinned to a known version; consider packaging it with the bench image to avoid supply-chain drift.
-- Monitor the `Kubernetes Command Audit Log` for unexpected delete activity.
+- Restringe el rol `System Manager` únicamente a los operadores autorizados a gestionar los clústeres conectados.
+- Ejecuta el bench bajo una cuenta de servicio de Kubernetes dedicada cuyo RBAC sea el mínimo requerido por las tareas de Kubeport (releases de Helm, Jobs en los namespaces objetivo, los tipos de recursos de la lista permitida de `Service Bundle`, exec en pods de bench).
+- Monta únicamente los kubeconfigs / tokens que necesite el bench; no coloques credenciales de clústeres no relacionados en MariaDB.
+- Mantén el binario de Helm en `PATH` anclado a una versión conocida; considera empaquetarlo con la imagen de bench para evitar la deriva en la cadena de suministro.
+- Monitoriza el `Kubernetes Command Audit Log` en busca de actividad de eliminación inesperada.
