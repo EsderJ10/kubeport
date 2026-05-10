@@ -133,6 +133,7 @@ frappe.ui.form.on('Helm Release', {
                 frappe.call({
                     doc: frm.doc,
                     method: 'uninstall_release',
+                    args: { force: 0, confirmation: '' },
                     callback: function(r) {
                         if (!r.exc) frm.reload_doc();
                     }
