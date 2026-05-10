@@ -289,7 +289,7 @@
 
 ---
 
-### TODO-11 — `docs/sota-bibliography`
+### TODO-11 — `docs/sota-bibliography` ✅ DONE 2026-05-10 — 5f38eea
 
 **Goal**: Replace the 6-row product table in `docs/thesis.md` §2 with a real CS-research SOTA section + bibliography.
 
