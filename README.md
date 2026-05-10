@@ -1,108 +1,106 @@
 # Kubeport
 
-Una aplicación Frappe que convierte un bench de Frappe / ERPNext en un plano de control de Kubernetes.
+A Frappe app that turns a Frappe / ERPNext bench into a Kubernetes control plane.
 
-Los operadores se conectan a clústeres, registran repositorios de Helm, declaran releases de Helm, aplican manifiestos de Kubernetes en bruto y orquestan el ciclo de vida de sites de Frappe (`bench new-site`, `migrate`, `backup`, `restore`, `drop-site`) — todo desde la misma interfaz Desk que ya utilizan, con los invariantes operacionales normalmente asociados a las herramientas de ingeniería de plataformas: descubrimiento de solo lectura, ejecución en trabajos en segundo plano, verificación contra el estado real y un bucle de reconciliación de deriva cada 5 minutos.
+Operators connect to clusters, register Helm repositories, declare Helm releases, apply raw Kubernetes manifests, and orchestrate Frappe site lifecycle (`bench new-site`, `migrate`, `backup`, `restore`, `drop-site`) — all from the same Desk UI they already use, with the operational invariants normally associated with platform-engineering tooling: read-only discovery, background-job execution, ground-truth verification, and a 5-minute drift reconciliation loop.
 
-> Invariante definitorio: **el estado deseado vive en MariaDB a través de DocTypes de Frappe; el estado observado siempre se consulta en vivo desde el clúster.** El descubrimiento nunca persiste en la base de datos. Toda mutación del clúster se ejecuta fuera del hilo de la petición.
-
----
-
-## Contexto del proyecto
-
-Kubeport es el artefacto backend de un proyecto final (TFG, 2026). Se entrega junto con dos repositorios hermanos:
-
-- **Landing page** — [`1DAW-victorjim551/lp-KubePort`](https://github.com/1DAW-victorjim551/lp-KubePort) (desplegada en [`1daw-victorjim551.github.io/lp-KubePort`](https://1daw-victorjim551.github.io/lp-KubePort/)), desarrollada por Víctor Jiménez.
-- **Paraguas del proyecto** — [`EsderJ10/tfg`](https://github.com/EsderJ10/tfg): contenedor de desarrollo, notas de diseño, seguimiento de tareas.
-
-Para el encuadre académico (problema, estado del arte, objetivos, resultados) consulta [`docs/thesis.md`](docs/thesis.md).
+> Defining invariant: **desired state lives in MariaDB through Frappe DocTypes; observed state is always queried live from the cluster.** Discovery never persists to the database. Every cluster mutation runs out of the request thread.
 
 ---
 
-## Mapa de documentación
+## Project context
 
-Empieza por el documento que se ajuste a lo que quieres hacer.
+Kubeport is the backend artefact of a final project (TFG, 2026). It is delivered alongside two sibling repos:
 
-| Objetivo | Leer |
+- **Landing page** — [`1DAW-victorjim551/lp-KubePort`](https://github.com/1DAW-victorjim551/lp-KubePort) (deployed at [`1daw-victorjim551.github.io/lp-KubePort`](https://1daw-victorjim551.github.io/lp-KubePort/)), authored by Víctor Jiménez.
+- **Project umbrella** — [`EsderJ10/tfg`](https://github.com/EsderJ10/tfg): dev-container, design notes, task tracker.
+
+For the academic framing (problem, state of the art, objectives, results) see [`docs/thesis.md`](docs/thesis.md).
+
+---
+
+## Documentation map
+
+Start with the document that matches what you want to do.
+
+| Goal | Read |
 |---|---|
-| Entender qué es Kubeport y por qué se construyó | [`docs/thesis.md`](docs/thesis.md) |
-| Desplegar Kubeport para uso no relacionado con el desarrollo (topología, RBAC, dimensionamiento, monitorización, copia de seguridad del plano de control) | [`docs/deploy.md`](docs/deploy.md) |
-| Aplicar los manifiestos RBAC dentro del clúster | [`deploy/rbac/README.md`](deploy/rbac/README.md) |
-| Usar Kubeport de extremo a extremo (flujos de trabajo del operador) | [`docs/operator-guide.md`](docs/operator-guide.md) |
-| Entender la arquitectura (diagramas C4, secuencias, invariantes) | [`docs/architecture.md`](docs/architecture.md) |
-| Ver la superficie de capacidades actual, defensas de robustez y brechas abiertas | [`docs/control-plane-state.md`](docs/control-plane-state.md) |
-| Ver los fallos tolerados, defensas y límites superiores de recuperación | [`docs/fault-model.md`](docs/fault-model.md) |
-| Encontrar un módulo / DocType / API específico | [`docs/codebase-summary.md`](docs/codebase-summary.md) |
-| Leer la evaluación empírica (funcional, fiabilidad, línea base, escalado) | [`docs/evaluation.md`](docs/evaluation.md) |
-| Buscar una cita de la tesis en BibTeX | [`docs/references.bib`](docs/references.bib) |
-| Ejecutar el conjunto de evaluación de extremo a extremo | [`eval/README.md`](eval/README.md) |
-| Contribuir (configuración, lint, tests, convenciones de PR) | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
-| Historial de decisiones de arquitectura | [`CHANGELOG.md`](CHANGELOG.md) |
-| Reportar un problema de seguridad | [`SECURITY.md`](SECURITY.md) |
-| Ver el análisis de fronteras de confianza (STRIDE por frontera, mapeo de endpoints) | [`docs/threat-model.md`](docs/threat-model.md) |
-| Invariantes y patrones detallados para contribuidores humanos o de IA | [`AGENTS.md`](AGENTS.md) |
+| Understand what Kubeport is and why it was built | [`docs/thesis.md`](docs/thesis.md) |
+| Deploy Kubeport for non-development use (topology, RBAC, sizing, monitoring, control-plane backup) | [`docs/deploy.md`](docs/deploy.md) |
+| Apply the in-cluster RBAC manifests | [`deploy/rbac/README.md`](deploy/rbac/README.md) |
+| Use Kubeport end-to-end (operator workflows) | [`docs/operator-guide.md`](docs/operator-guide.md) |
+| Understand the architecture (C4 diagrams, sequences, invariants) | [`docs/architecture.md`](docs/architecture.md) |
+| See current capability surface, robustness defences, open gaps | [`docs/control-plane-state.md`](docs/control-plane-state.md) |
+| See the tolerated faults, defences, and recovery upper bounds | [`docs/fault-model.md`](docs/fault-model.md) |
+| Find a specific module / DocType / API | [`docs/codebase-summary.md`](docs/codebase-summary.md) |
+| Read the empirical evaluation (functional, reliability, baseline, scaling) | [`docs/evaluation.md`](docs/evaluation.md) |
+| Look up a thesis citation in BibTeX | [`docs/references.bib`](docs/references.bib) |
+| Run the end-to-end evaluation harness | [`eval/README.md`](eval/README.md) |
+| Contribute (setup, lint, test, PR conventions) | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+| Architecture decision history | [`CHANGELOG.md`](CHANGELOG.md) |
+| Report a security issue | [`SECURITY.md`](SECURITY.md) |
+| See the trust-boundary analysis (STRIDE per boundary, endpoint mapping) | [`docs/threat-model.md`](docs/threat-model.md) |
+| Detailed invariants and patterns for AI / human contributors | [`AGENTS.md`](AGENTS.md) |
 
 ---
 
-## Capacidades
+## Capabilities
 
-- **Conectividad con clústeres** — autenticación mediante kubeconfig, token de portador o cuenta de servicio dentro del clúster. Importación de kubeconfig desde el navegador con normalización automática del endpoint para entornos de desarrollo en contenedores.
-- **Catálogo de charts de Helm** — registra repositorios y sincroniza el inventario de charts y versiones en segundo plano; `values.yaml` predeterminado en caché; actualización diaria.
-- **Catálogo de imágenes de site** — imágenes públicas de Frappe / ERPNext en GHCR. Las filas curadas están ancladas por digest y se actualizan automáticamente mediante `.github/workflows/publish-site-image.yml` en cada etiqueta `v*`. Los operadores también pueden registrar sus propias imágenes.
-- **Gestión de releases de Helm** — declara el estado deseado con alcance a `clúster/namespace/nombre_release`; despliegue, actualización, rollback y desinstalación idempotentes a través de trabajos en segundo plano; desglose en vivo de la preparación de cargas de trabajo con logs de pods, eventos y contexto de rollout.
-- **Despliegue de manifiestos en bruto** — `Service Bundle` valida los manifiestos contra una lista permitida de 17 tipos de recursos integrados y los aplica / elimina mediante apply en el lado del servidor.
-- **Ciclo de vida de sites de Frappe** — `Frappe Site` orquesta `bench new-site`, `bench migrate`, `bench backup`, `bench restore`, `bench drop-site` a través de Jobs de Kubernetes clonados desde un pod de workload bench en vivo. `Frappe Site Backup` es un DocType independiente para que los metadatos de copia de seguridad puedan sobrevivir a la fila del site origen.
-- **Descubrimiento en vivo** — enumeración de solo lectura de releases de Helm y sites de Frappe en cualquier clúster registrado. El descubrimiento nunca persiste en MariaDB.
-- **Reconciliación** — barrido programado cada 5 minutos que compara el estado deseado y el observado, recupera la deriva transitoria, finaliza las filas en vuelo mediante sondas de estado real y barre Jobs huérfanos.
-- **Herramientas del operador** — `Kubernetes Command` para operaciones ad-hoc de Get / List / Delete contra una lista permitida; `Kubernetes Command Audit Log` para un historial de ejecuciones de solo adición.
+- **Cluster connectivity** — kubeconfig, bearer-token, or in-cluster service-account auth. Browser-side kubeconfig import with automatic endpoint normalisation for containerised dev setups.
+- **Helm chart catalogue** — register repos and synchronise chart / version inventory in the background; cached default `values.yaml`; daily refresh.
+- **Site image catalogue** — public GHCR Frappe / ERPNext runtime images. Curated rows are digest-pinned and bumped automatically by `.github/workflows/publish-site-image.yml` on every `v*` tag. Operators can also register their own images.
+- **Helm release management** — declare desired state scoped to `cluster/namespace/release_name`; idempotent deploy, upgrade, rollback, uninstall through background jobs; live workload-readiness drilldown with pod logs, events, and rollout context.
+- **Raw manifest deployment** — `Service Bundle` validates manifests against an allowlist of 17 built-in resource kinds and applies / deletes them via server-side apply.
+- **Frappe site lifecycle** — `Frappe Site` orchestrates `bench new-site`, `bench migrate`, `bench backup`, `bench restore`, `bench drop-site` through Kubernetes Jobs cloned from a live bench workload pod. `Frappe Site Backup` is a standalone DocType so backup metadata can outlive the source site row.
+- **Live discovery** — read-only enumeration of Helm releases and Frappe sites in any registered cluster. Discovery never persists to MariaDB.
+- **Reconciliation** — 5-minute scheduled sweep compares desired and observed state, recovers transient drift, finalises in-flight rows via ground-truth probes, and sweeps orphan Jobs.
+- **Operator tools** — `Kubernetes Command` for ad-hoc Get / List / Delete against an allowlist; `Kubernetes Command Audit Log` for an append-only execute history.
 
-Para el inventario completo de robustez consulta [`docs/control-plane-state.md`](docs/control-plane-state.md).
+For the full robustness inventory see [`docs/control-plane-state.md`](docs/control-plane-state.md).
 
 ---
 
-## Arquitectura de un vistazo
+## Architecture at a glance
 
 ```
-┌───────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────┐
 │                    Frappe Desk                        │
-│        (Formularios, Eventos en Tiempo Real,          │
-│             Descubrimiento en Cliente)                │
+│   (Forms, Realtime Events, Client-Side Discovery)     │
 ├──────────────┬───────────────────┬────────────────────┤
-│   Capa API   │   Capa DocType    │   Capa de Tareas   │
-│  (consultas  │  (estado deseado  │(trabajos en segundo│
-│ solo lectura)│    en MariaDB)    │ plano, estructuras |
-│              |                   |      cluster)      |
+│  API Layer   │  DocType Layer    │   Task Layer       │
+│  (read-only  │  (desired state   │   (background jobs,│
+│   queries)   │   in MariaDB)     │    cluster writes) │
 ├──────────────┴───────────────────┴────────────────────┤
-│                  Capa de Utilidades                   │
-│ (cliente K8s, wrapper CLI Helm, descubrimiento, obs.) │
+│                  Utility Layer                        │
+│ (K8s client, Helm CLI wrapper, discovery, observ.)    │
 ├───────────────────────────────────────────────────────┤
-│           Clúster Kubernetes (estado en vivo)         │
+│           Kubernetes Cluster (live state)             │
 └───────────────────────────────────────────────────────┘
 ```
 
-| Capa | Ruta | Responsabilidad |
+| Layer | Path | Responsibility |
 |---|---|---|
-| DocTypes | `kubeport/kubeport/doctype/` | Documentos de estado deseado respaldados por MariaDB |
-| API | `kubeport/api/` | Endpoints públicos de solo lectura para formularios |
-| Utilidades | `kubeport/utils/` | Helpers de integración sin estado para K8s y Helm |
-| Tareas | `kubeport/tasks/` | Trabajos en segundo plano para todo el trabajo que muta el clúster |
-| Tests | `kubeport/tests/`, `doctype/*/test_*.py` | Tests unitarios y de integración |
-| Parches | `kubeport/patches/` | Migración de esquema y limpieza |
+| DocTypes | `kubeport/kubeport/doctype/` | Desired-state documents backed by MariaDB |
+| API | `kubeport/api/` | Whitelisted, read-only endpoints for forms |
+| Utilities | `kubeport/utils/` | Stateless K8s and Helm integration helpers |
+| Tasks | `kubeport/tasks/` | Background jobs for all cluster-mutating work |
+| Tests | `kubeport/tests/`, `doctype/*/test_*.py` | Unit and integration tests |
+| Patches | `kubeport/patches/` | Schema migration and cleanup |
 
-Para diagramas C4 y secuencias en tiempo de ejecución consulta [`docs/architecture.md`](docs/architecture.md).
+For C4 diagrams and runtime sequences see [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
-## Instalación
+## Installation
 
-### Requisitos previos
+### Prerequisites
 
-- Un [Frappe Bench](https://frappeframework.com/docs/user/en/bench) en funcionamiento (Frappe 16, MariaDB, Redis).
+- A running [Frappe Bench](https://frappeframework.com/docs/user/en/bench) (Frappe 16, MariaDB, Redis).
 - Python 3.14+.
-- [Helm 3](https://helm.sh/docs/intro/install/) en el `PATH` del host del bench.
-- Acceso de red desde el host del bench (o pod) a un clúster de Kubernetes (kubeconfig, token de portador o cuenta de servicio dentro del clúster).
+- [Helm 3](https://helm.sh/docs/intro/install/) on the bench host's `PATH`.
+- Network reach from the bench host (or pod) to a Kubernetes cluster (kubeconfig, bearer token, or in-cluster service account).
 
-### Instalar
+### Install
 
 ```bash
 cd $PATH_TO_YOUR_BENCH
@@ -111,37 +109,37 @@ bench install-app kubeport
 bench --site <site> migrate
 ```
 
-El primer `bench install-app` encola la sincronización del catálogo curado de imágenes de site en la cola `long`. El bucle de reconciliación de 5 minutos se registra automáticamente mediante `hooks.py`.
+The first `bench install-app` enqueues the curated site-image catalogue sync onto the `long` queue. The 5-minute reconciliation loop is registered automatically by `hooks.py`.
 
-Para despliegues fuera del entorno de desarrollo (topología dentro o fuera del clúster, fragmento de empaquetado Helm de la imagen de bench, RBAC dentro del clúster, límites de recursos, monitorización y copia de seguridad del plano de control), sigue [`docs/deploy.md`](docs/deploy.md).
+For non-development deployments (in-cluster vs. out-of-cluster topology, the bench-image Helm packaging snippet, in-cluster RBAC, resource limits, monitoring, and control-plane backup), follow [`docs/deploy.md`](docs/deploy.md).
 
-Para el flujo de trabajo con contenedor de desarrollo compatible consulta [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
----
-
-## Primeros pasos
-
-1. Abre el Desk y navega al espacio de trabajo **Kubeport Operations**.
-2. **Conecta un clúster** → crea una fila `Kubernetes Cluster` en tu modo de autenticación preferido y ejecuta **Test Connection**.
-3. **Registra un repositorio Helm** → crea una fila `Helm Repository`; el catálogo de charts se sincroniza en segundo plano.
-4. **Despliega una release** → crea una fila `Helm Release`, elige un chart, edita los valores (opcionalmente elige una imagen de site para charts de ERPNext / Frappe) y haz clic en **Deploy**.
-5. **Crea un site de Frappe** → desde una `Helm Release` de un bench ERPNext, crea una fila `Frappe Site` y haz clic en **Create Site**.
-
-Las instrucciones paso a paso para cada flujo de trabajo están en [`docs/operator-guide.md`](docs/operator-guide.md), incluyendo copia de seguridad / restauración, cancelación, desinstalación forzada y el procedimiento manual de verificación para validación previa a la publicación.
+For the supported dev-container workflow see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ---
 
-## Desarrollo
+## Getting started
 
-### Estilo de código
+1. Open the Desk and navigate to the **Kubeport Operations** workspace.
+2. **Connect a cluster** → create a `Kubernetes Cluster` row in your preferred auth mode and run **Test Connection**.
+3. **Register a Helm repo** → create a `Helm Repository` row; the chart catalogue syncs in the background.
+4. **Deploy a release** → create a `Helm Release` row, pick a chart, edit values (optionally pick a Site Image for ERPNext / Frappe charts), click **Deploy**.
+5. **Create a Frappe site** → from a `Helm Release` of an ERPNext bench, create a `Frappe Site` row and click **Create Site**.
 
-| Aspecto | Regla | Herramienta |
+Step-by-step instructions for every workflow are in [`docs/operator-guide.md`](docs/operator-guide.md), including back up / restore, cancellation, force uninstall, and the manual smoke-test procedure for pre-release validation.
+
+---
+
+## Development
+
+### Code style
+
+| Concern | Rule | Tool |
 |---|---|---|
-| Formato Python | tabuladores, comillas dobles, líneas de 110 caracteres | `ruff format` |
-| Linting Python | configuración en `pyproject.toml` del repositorio | `ruff` |
-| Formato JS / CSS | valores predeterminados del repositorio | `prettier` |
-| Linting JS | `.eslintrc` del repositorio | `eslint` |
-| Anotaciones de tipo | obligatorias en todos los métodos `@frappe.whitelist()` | aplicado mediante `hooks.py` |
+| Python formatting | tabs, double quotes, 110-char lines | `ruff format` |
+| Python linting | repo `pyproject.toml` config | `ruff` |
+| JS / CSS formatting | repo defaults | `prettier` |
+| JS linting | repo `.eslintrc` | `eslint` |
+| Type annotations | required on every `@frappe.whitelist()` method | enforced via `hooks.py` |
 
 ### Pre-commit
 
@@ -150,17 +148,17 @@ cd apps/kubeport
 pre-commit install
 ```
 
-### Tests
+### Testing
 
 ```bash
 bench --site <site> run-tests --app kubeport
 bench --site <site> run-tests --app kubeport --doctype "Helm Release"
 ```
 
-CI ejecuta la misma suite más `ruff format --check` y `ruff check` en cada PR (`.github/workflows/ci.yml`). Para más detalles consulta [`CONTRIBUTING.md`](CONTRIBUTING.md).
+CI runs the same suite plus `ruff format --check` and `ruff check` on every PR (`.github/workflows/ci.yml`). For details see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ---
 
-## Licencia
+## License
 
 [MIT](LICENSE).
