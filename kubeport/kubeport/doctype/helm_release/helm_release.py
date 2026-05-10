@@ -344,7 +344,7 @@ class HelmRelease(Document):
 				ingress_hostname=getattr(self, "ingress_hostname", None),
 				ingress_class_name=getattr(self, "ingress_class_name", None),
 				ingress_cluster_issuer=getattr(self, "ingress_cluster_issuer", None),
-				release_name=self.release_name,
+				release_name=getattr(self, "release_name", None),
 			)
 			or ""
 		)
