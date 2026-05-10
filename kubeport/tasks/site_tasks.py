@@ -20,6 +20,7 @@ Design rationale (direct Job submission, not Helm upgrade):
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -789,6 +790,13 @@ def _run_site_op(
 
 		bench_cmd = build_command(doc)
 		container_env = build_env(doc, creds_secret_name)
+		_inject_resolved_db_host(
+			core_v1=core_v1,
+			namespace=namespace,
+			release_name=release_name,
+			ref_spec=ref_spec,
+			container_env=container_env,
+		)
 		job_manifest = _build_op_job_manifest(
 			job_name=job_name,
 			namespace=namespace,
@@ -943,6 +951,7 @@ def _merge_env(
 def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool) -> str:
 	"""Build the ``bench new-site`` shell command string."""
 	parts = [
+		'test -n "$DB_HOST" || { echo "DB_HOST is not set; cannot create site"; exit 1; };',
 		"bench",
 		"new-site",
 		'"$SITE_NAME"',
@@ -958,6 +967,159 @@ def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool
 	if force:
 		parts.append("--force")
 	return " ".join(parts)
+
+
+def _inject_resolved_db_host(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	release_name: str,
+	ref_spec: dict[str, Any],
+	container_env: list[dict[str, Any]],
+) -> None:
+	db_host = (
+		_resolve_db_host_from_env_entries(ref_spec.get("container_env") or [])
+		or _resolve_db_host_from_env_refs(core_v1, namespace, ref_spec.get("container_env") or [])
+		or _resolve_db_host_from_env_from(core_v1, namespace, ref_spec.get("container_env_from") or [])
+		or _resolve_db_host_from_configmap_mounts(core_v1, namespace, ref_spec)
+		or _resolve_db_host_from_services(core_v1, namespace, release_name)
+	)
+	if db_host:
+		container_env.append({"name": "DB_HOST", "value": db_host})
+
+
+def _resolve_db_host_from_env_entries(env_entries: list[dict[str, Any]]) -> str:
+	for entry in env_entries:
+		if entry.get("name") == "DB_HOST" and entry.get("value"):
+			return str(entry.get("value") or "")
+	return ""
+
+
+def _resolve_db_host_from_env_refs(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	env_entries: list[dict[str, Any]],
+) -> str:
+	for entry in env_entries:
+		if entry.get("name") != "DB_HOST":
+			continue
+		config_map_ref = (
+			(entry.get("valueFrom") or {}).get("configMapKeyRef")
+			or (entry.get("value_from") or {}).get("config_map_key_ref")
+			or {}
+		)
+		name = config_map_ref.get("name")
+		key = config_map_ref.get("key")
+		if name and key:
+			value = _read_config_map_key(core_v1, namespace, name, key)
+			if value:
+				return value
+	return ""
+
+
+def _resolve_db_host_from_env_from(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	env_from: list[dict[str, Any]],
+) -> str:
+	for entry in env_from:
+		config_map_ref = entry.get("configMapRef") or entry.get("config_map_ref") or {}
+		name = config_map_ref.get("name")
+		if not name:
+			continue
+		value = _read_config_map_key(core_v1, namespace, name, "DB_HOST")
+		if value:
+			return value
+	return ""
+
+
+def _resolve_db_host_from_configmap_mounts(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	ref_spec: dict[str, Any],
+) -> str:
+	config_map_volumes = {
+		volume.get("name"): (volume.get("configMap") or volume.get("config_map") or {})
+		for volume in ref_spec.get("volumes") or []
+		if volume.get("configMap") or volume.get("config_map")
+	}
+	for mount in ref_spec.get("volume_mounts") or []:
+		mount_path = str(mount.get("mountPath") or mount.get("mount_path") or "")
+		if not mount_path.startswith(FRAPPE_BENCH_SITES_PATH):
+			continue
+		config_map = config_map_volumes.get(mount.get("name")) or {}
+		name = config_map.get("name")
+		if not name:
+			continue
+		for key in _config_map_candidate_keys(config_map, mount_path):
+			value = _db_host_from_common_site_config(_read_config_map_key(core_v1, namespace, name, key))
+			if value:
+				return value
+	return ""
+
+
+def _config_map_candidate_keys(config_map: dict[str, Any], mount_path: str) -> list[str]:
+	keys: list[str] = []
+	for item in config_map.get("items") or []:
+		key = item.get("key")
+		path = item.get("path")
+		if key and (path == "common_site_config.json" or mount_path.endswith(str(path or ""))):
+			keys.append(str(key))
+	if not keys:
+		keys.append("common_site_config.json")
+	return keys
+
+
+def _db_host_from_common_site_config(raw_config: str) -> str:
+	if not raw_config:
+		return ""
+	try:
+		parsed = json.loads(raw_config)
+	except Exception:
+		return ""
+	if not isinstance(parsed, dict):
+		return ""
+	return str(parsed.get("db_host") or parsed.get("db_host_name") or "")
+
+
+def _resolve_db_host_from_services(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	release_name: str,
+) -> str:
+	try:
+		services = core_v1.list_namespaced_service(namespace=namespace, _request_timeout=10).items
+	except Exception:
+		return ""
+	candidates: list[str] = []
+	release_name = str(release_name or "")
+	for service in services:
+		name = str(getattr(getattr(service, "metadata", None), "name", "") or "")
+		if not name:
+			continue
+		normalized = name.lower()
+		if "mariadb" not in normalized and "mysql" not in normalized:
+			continue
+		if release_name and release_name in name:
+			candidates.insert(0, name)
+		else:
+			candidates.append(name)
+	return candidates[0] if candidates else ""
+
+
+def _read_config_map_key(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	name: str,
+	key: str,
+) -> str:
+	try:
+		config_map = core_v1.read_namespaced_config_map(name=name, namespace=namespace, _request_timeout=10)
+	except Exception:
+		return ""
+	data = getattr(config_map, "data", None) or {}
+	if not isinstance(data, dict):
+		return ""
+	return str(data.get(key) or "")
 
 
 def _bench_drop_site_command(site_name: str) -> str:

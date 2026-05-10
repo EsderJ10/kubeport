@@ -23,6 +23,7 @@ from kubeport.tasks.site_tasks import (
 	_build_op_job_manifest,
 	_clone_reference_pod_spec,
 	_fail_restore_submission,
+	_inject_resolved_db_host,
 	_job_name,
 	_merge_env,
 	_parse_install_apps,
@@ -97,6 +98,10 @@ class UnitTestSiteHelpers(UnitTestCase):
 		cmd_unforced = _bench_new_site_command("s1", ["erpnext"], force=False)
 		self.assertIn("--force", cmd_forced)
 		self.assertNotIn("--force", cmd_unforced)
+
+	def test_bench_new_site_command_requires_db_host(self):
+		cmd = _bench_new_site_command("s1", [], force=False)
+		self.assertIn('test -n "$DB_HOST"', cmd)
 
 	def test_bench_command_quotes_install_apps(self):
 		cmd = _bench_new_site_command("s1", ["erpnext", "payments"], force=False)
@@ -198,6 +203,64 @@ class UnitTestSiteHelpers(UnitTestCase):
 		self.assertEqual(site_name["value"], "new")
 		# base entries with non-conflicting names are preserved
 		self.assertTrue(any(e["name"] == "EXTRA" for e in merged))
+
+	def test_inject_resolved_db_host_prefers_reference_env(self):
+		env = []
+		_inject_resolved_db_host(
+			core_v1=MagicMock(),
+			namespace="bench-ns",
+			release_name="bench-a",
+			ref_spec={"container_env": [{"name": "DB_HOST", "value": "bench-a-mariadb"}]},
+			container_env=env,
+		)
+
+		self.assertEqual(env, [{"name": "DB_HOST", "value": "bench-a-mariadb"}])
+
+	def test_inject_resolved_db_host_reads_common_site_config_configmap(self):
+		core_v1 = MagicMock()
+		core_v1.read_namespaced_config_map.return_value = SimpleNamespace(
+			data={"common_site_config.json": '{"db_host": "bench-a-mariadb"}'}
+		)
+		env = []
+
+		_inject_resolved_db_host(
+			core_v1=core_v1,
+			namespace="bench-ns",
+			release_name="bench-a",
+			ref_spec={
+				"container_env": [],
+				"volume_mounts": [
+					{
+						"name": "config",
+						"mountPath": "/home/frappe/frappe-bench/sites/common_site_config.json",
+					}
+				],
+				"volumes": [{"name": "config", "configMap": {"name": "bench-a-config"}}],
+			},
+			container_env=env,
+		)
+
+		self.assertEqual(env, [{"name": "DB_HOST", "value": "bench-a-mariadb"}])
+
+	def test_inject_resolved_db_host_falls_back_to_mariadb_service(self):
+		core_v1 = MagicMock()
+		core_v1.list_namespaced_service.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(metadata=SimpleNamespace(name="bench-a-redis")),
+				SimpleNamespace(metadata=SimpleNamespace(name="bench-a-mariadb")),
+			]
+		)
+		env = []
+
+		_inject_resolved_db_host(
+			core_v1=core_v1,
+			namespace="bench-ns",
+			release_name="bench-a",
+			ref_spec={"container_env": [], "container_env_from": [], "volume_mounts": [], "volumes": []},
+			container_env=env,
+		)
+
+		self.assertEqual(env, [{"name": "DB_HOST", "value": "bench-a-mariadb"}])
 
 
 class UnitTestClonePodSpec(UnitTestCase):
