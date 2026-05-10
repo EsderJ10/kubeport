@@ -65,7 +65,13 @@ RUN helm version --short
 
 Pin `HELM_VERSION` explicitly. Kubeport only invokes the stable Helm 3.x
 subset (`helm repo`, `helm search`, `helm upgrade --install`, `helm
-uninstall`, `helm get manifest`, `helm history`, `helm rollback`).
+uninstall`, `helm get manifest`, `helm template`, `helm history`,
+`helm rollback`). The bench host (or pod) must have outbound network
+reach to OCI registries — by default Frappe/ERPNext releases also
+install a sibling Bitnami MariaDB chart pulled from
+`oci://registry-1.docker.io/bitnamicharts/mariadb`. Operators who
+prefer to wire an external database can tick **Use External Database**
+on each Helm Release row to opt out (see the operator guide §3.5).
 
 ### Python dependency matrix
 

@@ -268,6 +268,8 @@ sequenceDiagram
 
 Health classification combines `helm status` with a workload-readiness walk over `helm get manifest` (Deployment / StatefulSet / DaemonSet / Pod / Job / PVC / Service / Ingress) — the same classifier is reused by the reconciliation loop in §5.3.
 
+The **render values** step inside the worker is more than a copy of the user's YAML. For Frappe/ERPNext charts the worker first installs (or upgrades) a sibling Bitnami MariaDB release named `<release-name>-mariadb` and renders `dbHost: <release-name>-mariadb` into the parent's values, then folds in the cluster's default `StorageClass`, the optional structured `ingress.*` block, and the selected `Site Image` (`image.repository`, digest-aware `image.tag`, `image.pullPolicy`). The user-supplied YAML wins over every Frappe-specific helper — a pre-existing `ingress` key disables structured ingress rendering, and ticking **Use External Database** on the Helm Release skips sibling-MariaDB entirely. Uninstalling the parent uninstalls the sibling.
+
 ### 5.2 Creating a Frappe Site
 
 ```mermaid

@@ -30,6 +30,7 @@ Start with the document that matches what you want to do.
 | Apply the in-cluster RBAC manifests | [`deploy/rbac/README.md`](deploy/rbac/README.md) |
 | Use Kubeport end-to-end (operator workflows) | [`docs/operator-guide.md`](docs/operator-guide.md) |
 | Understand the architecture (C4 diagrams, sequences, invariants) | [`docs/architecture.md`](docs/architecture.md) |
+| See the final data model (DocType map, identity scoping, child relations) | [`docs/architecture.md#4-doctype-map-components`](docs/architecture.md#4-doctype-map-components) |
 | See current capability surface, robustness defences, open gaps | [`docs/control-plane-state.md`](docs/control-plane-state.md) |
 | See the tolerated faults, defences, and recovery upper bounds | [`docs/fault-model.md`](docs/fault-model.md) |
 | Find a specific module / DocType / API | [`docs/codebase-summary.md`](docs/codebase-summary.md) |
@@ -49,12 +50,15 @@ Start with the document that matches what you want to do.
 - **Cluster connectivity** — kubeconfig, bearer-token, or in-cluster service-account auth. Browser-side kubeconfig import with automatic endpoint normalisation for containerised dev setups.
 - **Helm chart catalogue** — register repos and synchronise chart / version inventory in the background; cached default `values.yaml`; daily refresh.
 - **Site image catalogue** — public GHCR Frappe / ERPNext runtime images. Curated rows are digest-pinned and bumped automatically by `.github/workflows/publish-site-image.yml` on every `v*` tag. Operators can also register their own images.
-- **Helm release management** — declare desired state scoped to `cluster/namespace/release_name`; idempotent deploy, upgrade, rollback, uninstall through background jobs; live workload-readiness drilldown with pod logs, events, and rollout context.
+- **Helm release management** — declare desired state scoped to `cluster/namespace/release_name`; idempotent deploy, upgrade, rollback, uninstall through background jobs; read-only `helm template`-vs-`helm get manifest` diff preview before deploy; live workload-readiness drilldown with pod logs, events, and rollout context.
+- **Bundled MariaDB by default** — Frappe/ERPNext releases get a per-release Bitnami MariaDB sibling (`<release-name>-mariadb`, pinned chart version) installed and uninstalled alongside the parent, so `bench new-site` works out of the box. **Use External Database** opts out for operators who already run a managed MariaDB.
+- **Structured ingress for Frappe charts** — four form fields render `ingress.*` values (hostname, IngressClass, optional cert-manager `ClusterIssuer` for TLS) without leaving the Helm Release form. Live, read-only discovery hints suggest the cluster's default IngressClass and a ready ClusterIssuer; pre-existing `ingress` keys in the raw `values` YAML disable structured rendering as the escape hatch.
 - **Raw manifest deployment** — `Service Bundle` validates manifests against an allowlist of 17 built-in resource kinds and applies / deletes them via server-side apply.
-- **Frappe site lifecycle** — `Frappe Site` orchestrates `bench new-site`, `bench migrate`, `bench backup`, `bench restore`, `bench drop-site` through Kubernetes Jobs cloned from a live bench workload pod. `Frappe Site Backup` is a standalone DocType so backup metadata can outlive the source site row.
+- **Frappe site lifecycle** — `Frappe Site` orchestrates `bench new-site`, `bench migrate`, `bench backup`, `bench restore`, `bench drop-site` through Kubernetes Jobs cloned from a live bench workload pod. Optional cron-based **scheduled backups** with per-site count and age retention. `Frappe Site Backup` is a standalone DocType so backup metadata can outlive the source site row.
 - **Live discovery** — read-only enumeration of Helm releases and Frappe sites in any registered cluster. Discovery never persists to MariaDB.
 - **Reconciliation** — 5-minute scheduled sweep compares desired and observed state, recovers transient drift, finalises in-flight rows via ground-truth probes, and sweeps orphan Jobs.
 - **Operator tools** — `Kubernetes Command` for ad-hoc Get / List / Delete against an allowlist; `Kubernetes Command Audit Log` for an append-only execute history.
+- **Operations workspace** — landing surface embeds the `Kubeport Overview` Dashboard: status donuts, daily Helm-operations line chart, fleet-health red/amber number cards (degraded releases, failed sites, failed backups, stale operations), and internal-observability counters (reconcile ticks, stale-ops recovered, orphan jobs swept, helm p95 latency).
 
 For the full robustness inventory see [`docs/control-plane-state.md`](docs/control-plane-state.md).
 
