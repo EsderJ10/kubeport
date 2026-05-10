@@ -69,7 +69,7 @@
 
 ---
 
-### TODO-02 — `fix/reconcile-service-bundles-test`
+### TODO-02 — `fix/reconcile-service-bundles-test` ✅ DONE 2026-05-10 — a592928
 
 **Goal**: Make the failing reconcile-service-bundles test pass.
 
@@ -88,7 +88,7 @@
 
 ---
 
-### TODO-03 — `chore/strip-known-failures-disclaimer`
+### TODO-03 — `chore/strip-known-failures-disclaimer` ✅ DONE 2026-05-10 — 61eca03
 
 **Goal**: Remove the "Pre-existing test failures" disclaimer once TODO-01 and TODO-02 are merged.
 

@@ -202,4 +202,3 @@ The remaining work is depth work — the core plumbing is in place:
 3. **Testing coverage**: integration tests for repo sync, chart metadata, and cross-DocType workflows.
 4. **Operator documentation**: RBAC requirements, Helm binary packaging, deployment guide, production hardening.
 5. **Wider chart support**: controlled expansion of bench discovery beyond `erpnext`-only chart identification.
-6. **Pre-existing test failures**: `test_k8s_client` (Python 3.14 / kubernetes-client API call signature drift) and `test_reconcile_service_bundles` require investigation independent of the Frappe Site feature.
