@@ -209,6 +209,7 @@ Weakest coverage: Frappe Site job submission end-to-end, `Helm Repository` sync 
 - Keep `README.md` aligned with the actual shipped feature set, not aspirational plans.
 - Use `docs/control-plane-state.md` for current capabilities, open gaps, and robustness notes.
 - Use `docs/codebase-summary.md` for module-level architecture summaries.
+- Use `docs/architecture.md` §3 for the eight numbered safety / liveness / eventual-consistency properties that govern the codebase, and `docs/fault-model.md` for the catalogue of tolerated faults, defences, and recovery upper bounds. Any change that adds a new defence, weakens an existing one, or shifts a recovery bound must update both files in the same commit.
 - When a change affects discovery, background-task behavior, or desired-state semantics, update docs in the same commit.
 
 ---
