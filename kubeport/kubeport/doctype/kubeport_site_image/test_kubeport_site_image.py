@@ -91,9 +91,7 @@ class UnitTestKubeportSiteImage(UnitTestCase):
 
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.get_all")
 	@patch("kubeport.kubeport.doctype.kubeport_site_image.kubeport_site_image.frappe.throw")
-	def test_on_trash_blocks_user_row_deletion_when_helm_release_links(
-		self, mock_throw, mock_get_all
-	):
+	def test_on_trash_blocks_user_row_deletion_when_helm_release_links(self, mock_throw, mock_get_all):
 		mock_get_all.return_value = [{"name": "cluster-a/default/bench-a"}]
 		mock_throw.side_effect = RuntimeError("linked to Helm Release")
 		doc = _make_doc(is_curated=0)

@@ -169,12 +169,10 @@ class UnitTestKubernetesCommandTasks(UnitTestCase):
 
 		cmd = self._make_cmd(action="Get")
 		mock_get_doc.return_value = cmd
-		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.return_value = (
-			SimpleNamespace(
-				metadata=SimpleNamespace(name="kubeport-backups", namespace="demo"),
-				status=SimpleNamespace(phase="Bound"),
-				spec=SimpleNamespace(access_modes=["ReadWriteMany"]),
-			)
+		mock_core_v1.return_value.read_namespaced_persistent_volume_claim.return_value = SimpleNamespace(
+			metadata=SimpleNamespace(name="kubeport-backups", namespace="demo"),
+			status=SimpleNamespace(phase="Bound"),
+			spec=SimpleNamespace(access_modes=["ReadWriteMany"]),
 		)
 
 		_execute_command("KCMD-00010")
@@ -225,8 +223,8 @@ class UnitTestKubernetesCommandTasks(UnitTestCase):
 
 		cmd = self._make_cmd(action="List", label_selector="app=foo")
 		mock_get_doc.return_value = cmd
-		mock_core_v1.return_value.list_namespaced_persistent_volume_claim.return_value = (
-			SimpleNamespace(items=[])
+		mock_core_v1.return_value.list_namespaced_persistent_volume_claim.return_value = SimpleNamespace(
+			items=[]
 		)
 
 		_execute_command("KCMD-00010")
@@ -270,9 +268,7 @@ class UnitTestKubernetesCommandFinalize(UnitTestCase):
 
 		_finalize(cmd, status="Completed", output=long_output)
 
-		written = next(
-			call.args[1] for call in cmd.db_set.call_args_list if call.args[0] == "output"
-		)
+		written = next(call.args[1] for call in cmd.db_set.call_args_list if call.args[0] == "output")
 		self.assertLessEqual(len(written), _OUTPUT_LIMIT)
 		self.assertIn("truncated", written)
 		# The marker must report the original length so the operator can
@@ -287,9 +283,7 @@ class UnitTestKubernetesCommandFinalize(UnitTestCase):
 		cmd = self._make_cmd()
 		_finalize(cmd, status="Completed", output="hello world")
 
-		written = next(
-			call.args[1] for call in cmd.db_set.call_args_list if call.args[0] == "output"
-		)
+		written = next(call.args[1] for call in cmd.db_set.call_args_list if call.args[0] == "output")
 		self.assertEqual(written, "hello world")
 
 	@patch("kubeport.tasks.kubernetes_command_tasks.frappe.get_doc")

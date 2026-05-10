@@ -1,18 +1,18 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
-import frappe
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-
+import frappe
 from frappe.tests import UnitTestCase
 
 from kubeport.tasks.site_tasks import (
 	BACKUP_MOUNT_PATH,
 	BACKUP_PVC_NAME,
-	_bench_drop_site_command,
+	_backup_storage_path,
 	_bench_backup_command,
+	_bench_drop_site_command,
 	_bench_migrate_command,
 	_bench_new_site_command,
 	_bench_restore_command,
@@ -21,13 +21,12 @@ from kubeport.tasks.site_tasks import (
 	_build_drop_env,
 	_build_env,
 	_build_op_job_manifest,
-	_backup_storage_path,
 	_clone_reference_pod_spec,
-	_prepare_backup_ref_spec,
 	_fail_restore_submission,
 	_job_name,
 	_merge_env,
 	_parse_install_apps,
+	_prepare_backup_ref_spec,
 	_safe_label_value,
 )
 
@@ -108,7 +107,6 @@ class UnitTestSiteHelpers(UnitTestCase):
 		cmd = _bench_new_site_command("s1", [], force=False)
 		self.assertIn("--mariadb-user-host-login-scope='%'", cmd)
 		self.assertNotIn("--no-mariadb-socket", cmd)
-
 
 	def test_build_env_admin_password_always_references_creds_secret(self):
 		env = _build_env(
@@ -241,6 +239,7 @@ class UnitTestClonePodSpec(UnitTestCase):
 
 	def _fake_api_client(self) -> MagicMock:
 		api_client = MagicMock()
+
 		# sanitize_for_serialization returns a list/dict of plain dicts in the test helpers
 		def _sanitize(value):
 			if value is None:
@@ -271,6 +270,7 @@ class UnitTestClonePodSpec(UnitTestCase):
 				if hasattr(first, "persistent_volume_claim") or hasattr(first, "empty_dir"):
 					return [_sanitize_vol(v) for v in value]
 			return value
+
 		api_client.sanitize_for_serialization.side_effect = sanitize
 		return api_client
 
@@ -348,7 +348,8 @@ class UnitTestJobManifest(UnitTestCase):
 
 		manifest = _create_manifest(self._ref_spec())
 		self.assertEqual(
-			manifest["spec"]["activeDeadlineSeconds"], _JOB_ACTIVE_DEADLINE_SECONDS,
+			manifest["spec"]["activeDeadlineSeconds"],
+			_JOB_ACTIVE_DEADLINE_SECONDS,
 		)
 		# Must be a positive int (K8s rejects 0 and negatives).
 		self.assertIsInstance(manifest["spec"]["activeDeadlineSeconds"], int)
@@ -774,9 +775,11 @@ class UnitTestCreateSiteTask(UnitTestCase):
 
 		from kubeport.tasks import site_tasks
 
-		with patch.object(site_tasks, "_site_operation_matches", return_value=False), \
-			patch.object(site_tasks, "frappe") as mock_frappe, \
-			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client:
+		with (
+			patch.object(site_tasks, "_site_operation_matches", return_value=False),
+			patch.object(site_tasks, "frappe") as mock_frappe,
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client,
+		):
 			site_tasks.create_site_task("release-a/demo", "stale-token")
 			# Stale worker must not even fetch the doc.
 			mock_frappe.get_doc.assert_not_called()
@@ -796,13 +799,15 @@ class UnitTestCreateSiteTask(UnitTestCase):
 
 			applied.append((manifest["kind"], deepcopy(manifest)))
 
-		with patch.object(site_tasks, "_site_operation_matches", return_value=True), \
-			patch.object(site_tasks, "frappe") as mock_frappe, \
-			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
-			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select, \
-			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone, \
-			patch.object(site_tasks, "apply_resource", side_effect=_apply), \
-			patch.object(site_tasks, "client") as mock_client:
+		with (
+			patch.object(site_tasks, "_site_operation_matches", return_value=True),
+			patch.object(site_tasks, "frappe") as mock_frappe,
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client,
+			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select,
+			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone,
+			patch.object(site_tasks, "apply_resource", side_effect=_apply),
+			patch.object(site_tasks, "client") as mock_client,
+		):
 			mock_frappe.get_doc.side_effect = lambda doctype, name: (
 				doc if doctype == "Frappe Site" else release
 			)
@@ -843,9 +848,7 @@ class UnitTestCreateSiteTask(UnitTestCase):
 			job_manifest["metadata"]["name"] + "-creds",
 		)
 		self.assertNotIn("ownerReferences", secret_first["metadata"])
-		self.assertEqual(
-			secret_second["metadata"]["ownerReferences"][0]["uid"], "job-uid-123"
-		)
+		self.assertEqual(secret_second["metadata"]["ownerReferences"][0]["uid"], "job-uid-123")
 
 		# No plaintext password env values anywhere on the Job.
 		container = job_manifest["spec"]["template"]["spec"]["containers"][0]
@@ -884,15 +887,19 @@ class UnitTestCreateSiteTask(UnitTestCase):
 		def _capture_delete_secret(_api_client, name, _namespace):
 			deleted_secrets.append(name)
 
-		with patch.object(site_tasks, "_site_operation_matches", side_effect=lambda *a, **kw: next(match_calls)), \
-			patch.object(site_tasks, "frappe") as mock_frappe, \
-			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
-			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select, \
-			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone, \
-			patch.object(site_tasks, "apply_resource"), \
-			patch.object(site_tasks, "_best_effort_delete_job", side_effect=_capture_delete_job), \
-			patch.object(site_tasks, "_best_effort_delete_secret", side_effect=_capture_delete_secret), \
-			patch.object(site_tasks, "client") as mock_client:
+		with (
+			patch.object(
+				site_tasks, "_site_operation_matches", side_effect=lambda *a, **kw: next(match_calls)
+			),
+			patch.object(site_tasks, "frappe") as mock_frappe,
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client,
+			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select,
+			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone,
+			patch.object(site_tasks, "apply_resource"),
+			patch.object(site_tasks, "_best_effort_delete_job", side_effect=_capture_delete_job),
+			patch.object(site_tasks, "_best_effort_delete_secret", side_effect=_capture_delete_secret),
+			patch.object(site_tasks, "client") as mock_client,
+		):
 			mock_frappe.get_doc.side_effect = lambda doctype, name: (
 				doc if doctype == "Frappe Site" else release
 			)
@@ -945,14 +952,16 @@ class UnitTestCreateSiteTask(UnitTestCase):
 		def _capture_delete(_api_client, name, _namespace):
 			deleted.append(name)
 
-		with patch.object(site_tasks, "_site_operation_matches", return_value=True), \
-			patch.object(site_tasks, "frappe") as mock_frappe, \
-			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
-			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select, \
-			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone, \
-			patch.object(site_tasks, "apply_resource", side_effect=_apply_that_fails_on_job), \
-			patch.object(site_tasks, "_best_effort_delete_secret", side_effect=_capture_delete), \
-			patch.object(site_tasks, "client") as mock_client:
+		with (
+			patch.object(site_tasks, "_site_operation_matches", return_value=True),
+			patch.object(site_tasks, "frappe") as mock_frappe,
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client,
+			patch.object(site_tasks, "_select_site_discovery_pod") as mock_select,
+			patch.object(site_tasks, "_clone_reference_pod_spec") as mock_clone,
+			patch.object(site_tasks, "apply_resource", side_effect=_apply_that_fails_on_job),
+			patch.object(site_tasks, "_best_effort_delete_secret", side_effect=_capture_delete),
+			patch.object(site_tasks, "client") as mock_client,
+		):
 			mock_frappe.get_doc.side_effect = lambda doctype, name: (
 				doc if doctype == "Frappe Site" else release
 			)
@@ -1008,18 +1017,26 @@ class UnitTestRestoreSubmissionFailure(UnitTestCase):
 			"token-1",
 			("Restoring",),
 		)
-		mock_set_value.assert_any_call("Frappe Site", "rel-a/demo.example.com", {
-			"status": "Failed",
-			"status_detail": "Restore attempt failed: Kubernetes API refused the restore Job.",
-			"operation_job_name": "",
-			"operation_job_token": "",
-		})
-		mock_set_value.assert_any_call("Frappe Site Backup", "demo.example.com::demo-20260430120000", {
-			"status": "Available",
-			"status_detail": "Restore attempt failed: Kubernetes API refused the restore Job.",
-			"operation_job_name": "",
-			"operation_job_token": "",
-		})
+		mock_set_value.assert_any_call(
+			"Frappe Site",
+			"rel-a/demo.example.com",
+			{
+				"status": "Failed",
+				"status_detail": "Restore attempt failed: Kubernetes API refused the restore Job.",
+				"operation_job_name": "",
+				"operation_job_token": "",
+			},
+		)
+		mock_set_value.assert_any_call(
+			"Frappe Site Backup",
+			"demo.example.com::demo-20260430120000",
+			{
+				"status": "Available",
+				"status_detail": "Restore attempt failed: Kubernetes API refused the restore Job.",
+				"operation_job_name": "",
+				"operation_job_token": "",
+			},
+		)
 		mock_publish.assert_any_call(
 			"frappe_site_backup_status_update",
 			{
@@ -1043,8 +1060,10 @@ class UnitTestBestEffortDeleteJob(UnitTestCase):
 		batch_api = MagicMock()
 		batch_api.delete_namespaced_job.side_effect = ApiException(status=404, reason="NotFound")
 
-		with patch.object(site_tasks, "client") as mock_client, \
-			patch.object(site_tasks.frappe, "logger") as mock_logger:
+		with (
+			patch.object(site_tasks, "client") as mock_client,
+			patch.object(site_tasks.frappe, "logger") as mock_logger,
+		):
 			mock_client.BatchV1Api.return_value = batch_api
 			site_tasks._best_effort_delete_job(MagicMock(), "ks-demo-aaaabbbbcccc", "ns")
 
@@ -1064,8 +1083,10 @@ class UnitTestBestEffortDeleteJob(UnitTestCase):
 		batch_api = MagicMock()
 		batch_api.delete_namespaced_job.side_effect = ApiException(status=500, reason="BoomError")
 
-		with patch.object(site_tasks, "client") as mock_client, \
-			patch.object(site_tasks.frappe, "logger") as mock_logger:
+		with (
+			patch.object(site_tasks, "client") as mock_client,
+			patch.object(site_tasks.frappe, "logger") as mock_logger,
+		):
 			mock_client.BatchV1Api.return_value = batch_api
 			mock_warn = MagicMock()
 			mock_logger.return_value = SimpleNamespace(warning=mock_warn)
@@ -1085,10 +1106,12 @@ class UnitTestCancelSiteTask(UnitTestCase):
 		batch_api = MagicMock()
 		batch_api.delete_namespaced_job.side_effect = ApiException(status=404, reason="NotFound")
 
-		with patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
-			patch.object(site_tasks, "client") as mock_client, \
-			patch.object(site_tasks, "_best_effort_delete_secret") as mock_del_secret, \
-			patch.object(site_tasks.frappe, "log_error") as mock_log_error:
+		with (
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client,
+			patch.object(site_tasks, "client") as mock_client,
+			patch.object(site_tasks, "_best_effort_delete_secret") as mock_del_secret,
+			patch.object(site_tasks.frappe, "log_error") as mock_log_error,
+		):
 			mock_get_client.return_value = MagicMock()
 			mock_client.BatchV1Api.return_value = batch_api
 
@@ -1111,10 +1134,12 @@ class UnitTestCancelSiteTask(UnitTestCase):
 		batch_api = MagicMock()
 		batch_api.delete_namespaced_job.side_effect = ApiException(status=500, reason="BoomError")
 
-		with patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
-			patch.object(site_tasks, "client") as mock_client, \
-			patch.object(site_tasks, "_best_effort_delete_secret") as mock_del_secret, \
-			patch.object(site_tasks.frappe, "log_error") as mock_log_error:
+		with (
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client,
+			patch.object(site_tasks, "client") as mock_client,
+			patch.object(site_tasks, "_best_effort_delete_secret") as mock_del_secret,
+			patch.object(site_tasks.frappe, "log_error") as mock_log_error,
+		):
 			mock_get_client.return_value = MagicMock()
 			mock_client.BatchV1Api.return_value = batch_api
 
@@ -1251,8 +1276,10 @@ class UnitTestOnTrashCleanup(UnitTestCase):
 
 	def _doc(self, **overrides):
 		from kubeport.kubeport.doctype.frappe_site.frappe_site import FrappeSite
+
 		# Build a stub doc that mimics the surface on_trash uses.
 		doc = MagicMock(spec=FrappeSite)
+		doc.name = overrides.get("name", "rel-a/demo")
 		doc.status = overrides.get("status", "Failed")
 		doc.operation_job_name = overrides.get("operation_job_name", "ks-demo-abc123abc123")
 		doc.cluster = overrides.get("cluster", "cluster-a")
@@ -1375,10 +1402,7 @@ class UnitTestCancelSiteConfirmation(UnitTestCase):
 		doc = self._doc(status="Migrating")
 		doc.cancel_site(confirm_destructive=True)
 		mock_enqueue.assert_called_once()
-		detail_calls = [
-			c for c in doc.db_set.call_args_list
-			if c.args and c.args[0] == "status_detail"
-		]
+		detail_calls = [c for c in doc.db_set.call_args_list if c.args and c.args[0] == "status_detail"]
 		self.assertTrue(detail_calls, "expected a status_detail db_set call")
 		detail_value = detail_calls[-1].args[1]
 		self.assertIn("destructive cancel acknowledged", detail_value)
@@ -1596,8 +1620,16 @@ class UnitTestRunSiteOp(UnitTestCase):
 
 		labels = {
 			"create": ("create-site", "Frappe Site Job Submission Failed", "Job submission failed"),
-			"delete": ("delete-site", "Frappe Site Drop Submission Failed", "Drop-site Job submission failed"),
-			"migrate": ("migrate-site", "Frappe Site Migrate Submission Failed", "Migrate Job submission failed"),
+			"delete": (
+				"delete-site",
+				"Frappe Site Drop Submission Failed",
+				"Drop-site Job submission failed",
+			),
+			"migrate": (
+				"migrate-site",
+				"Frappe Site Migrate Submission Failed",
+				"Migrate Job submission failed",
+			),
 		}
 		container_label, failure_log_title, failure_detail_prefix = labels[op_kind]
 		return SiteOpConfig(
@@ -1685,8 +1717,7 @@ class UnitTestRunSiteOp(UnitTestCase):
 		mock_get_doc.side_effect = [doc, self._stub_release()]
 		mock_clone_spec.return_value = self._ref_spec()
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"):
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, patch("kubernetes.client.CoreV1Api"):
 			mock_batch_api.return_value.read_namespaced_job.return_value = SimpleNamespace(
 				metadata=SimpleNamespace(uid="job-uid-123"),
 			)
@@ -1739,8 +1770,7 @@ class UnitTestRunSiteOp(UnitTestCase):
 		mock_get_doc.side_effect = [doc, self._stub_release()]
 		mock_clone_spec.return_value = self._ref_spec()
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"):
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, patch("kubernetes.client.CoreV1Api"):
 			mock_batch_api.return_value.read_namespaced_job.return_value = SimpleNamespace(
 				metadata=SimpleNamespace(uid="job-uid-123"),
 			)

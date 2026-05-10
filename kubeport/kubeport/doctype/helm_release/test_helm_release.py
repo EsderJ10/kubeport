@@ -7,11 +7,11 @@ from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from kubeport.kubeport.doctype.helm_release.helm_release import (
 	HelmRelease,
+	_iter_storage_configs,
+	_validate_storage_access_modes,
 	build_release_docname,
 	calculate_release_spec_hash,
-	_iter_storage_configs,
 	render_site_image_values,
-	_validate_storage_access_modes,
 )
 
 
@@ -256,34 +256,41 @@ class UnitTestHelmRelease(UnitTestCase):
 		self.assertIn("storageClass: local-path", values_yaml)
 
 	def test_iter_storage_configs_finds_nested_persistence_blocks(self):
-		configs = _iter_storage_configs({
-			"persistence": {
-				"worker": {
-					"storageClass": "local-path",
-					"accessModes": ["ReadWriteMany"],
+		configs = _iter_storage_configs(
+			{
+				"persistence": {
+					"worker": {
+						"storageClass": "local-path",
+						"accessModes": ["ReadWriteMany"],
+					},
+					"logs": {
+						"storageClass": "local-path",
+						"accessModes": ["ReadWriteOnce"],
+					},
 				},
-				"logs": {
-					"storageClass": "local-path",
-					"accessModes": ["ReadWriteOnce"],
-				},
-			},
-		})
+			}
+		)
 
-		self.assertEqual(configs, [
-			("values.persistence.worker", "local-path", ["ReadWriteMany"]),
-			("values.persistence.logs", "local-path", ["ReadWriteOnce"]),
-		])
+		self.assertEqual(
+			configs,
+			[
+				("values.persistence.worker", "local-path", ["ReadWriteMany"]),
+				("values.persistence.logs", "local-path", ["ReadWriteOnce"]),
+			],
+		)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
 	def test_validate_storage_access_modes_rejects_local_path_rwx(self, mock_throw):
-		_validate_storage_access_modes({
-			"persistence": {
-				"worker": {
-					"storageClass": "local-path",
-					"accessModes": ["ReadWriteMany"],
+		_validate_storage_access_modes(
+			{
+				"persistence": {
+					"worker": {
+						"storageClass": "local-path",
+						"accessModes": ["ReadWriteMany"],
+					},
 				},
-			},
-		})
+			}
+		)
 
 		mock_throw.assert_called_once()
 		self.assertIn("values.persistence.worker", mock_throw.call_args.args[0])
@@ -292,14 +299,16 @@ class UnitTestHelmRelease(UnitTestCase):
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
 	def test_validate_storage_access_modes_allows_local_path_rwo(self, mock_throw):
-		_validate_storage_access_modes({
-			"persistence": {
-				"worker": {
-					"storageClass": "local-path",
-					"accessModes": ["ReadWriteOnce"],
+		_validate_storage_access_modes(
+			{
+				"persistence": {
+					"worker": {
+						"storageClass": "local-path",
+						"accessModes": ["ReadWriteOnce"],
+					},
 				},
-			},
-		})
+			}
+		)
 
 		mock_throw.assert_not_called()
 
@@ -469,12 +478,14 @@ class UnitTestHelmRelease(UnitTestCase):
 		mock_get_all,
 		mock_throw,
 	):
-		mock_get_all.return_value = [{
-			"name": "cluster-a/default/bench-a/site.local",
-			"site_name": "site.local",
-			"status": "Active",
-			"operation_job_name": "",
-		}]
+		mock_get_all.return_value = [
+			{
+				"name": "cluster-a/default/bench-a/site.local",
+				"site_name": "site.local",
+				"status": "Active",
+				"operation_job_name": "",
+			}
+		]
 		mock_throw.side_effect = RuntimeError("still depend")
 		doc = object.__new__(HelmRelease)
 		doc.status = "Deployed"
@@ -519,14 +530,16 @@ class UnitTestHelmRelease(UnitTestCase):
 		doc = object.__new__(HelmRelease)
 		doc.name = "cluster-a/default/bench-a"
 		mock_walk.return_value = [
-			MagicMock(to_dict=lambda: {
-				"kind": "Deployment",
-				"name": "bench-a",
-				"namespace": "default",
-				"ready": True,
-				"reason": "",
-				"message": "1/1 available",
-			}),
+			MagicMock(
+				to_dict=lambda: {
+					"kind": "Deployment",
+					"name": "bench-a",
+					"namespace": "default",
+					"ready": True,
+					"reason": "",
+					"message": "1/1 available",
+				}
+			),
 		]
 
 		result = doc.get_release_health()

@@ -38,10 +38,14 @@ _HEALTH_KINDS = (
 	"Service",
 	"Ingress",
 )
-_HELM_PENDING_STATUSES = frozenset({
-	"pending-install", "pending-upgrade", "pending-rollback",
-	"uninstalling",
-})
+_HELM_PENDING_STATUSES = frozenset(
+	{
+		"pending-install",
+		"pending-upgrade",
+		"pending-rollback",
+		"uninstalling",
+	}
+)
 _EVENT_LIST_TIMEOUT_SECONDS = 10.0
 _WARNING_EVENT_LIMIT = 2
 
@@ -96,9 +100,7 @@ def walk(release_docname: str) -> list[ResourceHealth]:
 	release_name = release.get("release_name")
 
 	if not cluster_name or not release_name:
-		raise ValueError(
-			f"Helm Release '{release_docname}' is missing cluster or release name."
-		)
+		raise ValueError(f"Helm Release '{release_docname}' is missing cluster or release name.")
 
 	manifest = helm.get_manifest(
 		release_name=release_name,
@@ -139,10 +141,7 @@ def walk(release_docname: str) -> list[ResourceHealth]:
 		except ApiException as e:
 			results.append(_resource_health_from_api_error(kind, name, obj_namespace, e))
 
-	return [
-		_attach_warning_events(result, core_v1)
-		for result in results
-	]
+	return [_attach_warning_events(result, core_v1) for result in results]
 
 
 def summarize(results: list[ResourceHealth]) -> tuple[bool, str]:
@@ -166,9 +165,7 @@ def summarize(results: list[ResourceHealth]) -> tuple[bool, str]:
 	first_unready = next((r for r in results if not r.ready), None)
 	header = f"deployed | {ready_count}/{total} ready"
 	if first_unready is not None:
-		return False, (
-			f"{header}\n- {first_unready.kind}/{first_unready.name}: {first_unready.reason}"
-		)
+		return False, (f"{header}\n- {first_unready.kind}/{first_unready.name}: {first_unready.reason}")
 	return False, header
 
 
@@ -293,7 +290,11 @@ def _check_deployment(obj: Any, namespace: str) -> ResourceHealth:
 	if available >= spec_replicas and updated >= spec_replicas:
 		if available_cond is None or available_cond.get("status") != "False":
 			return ResourceHealth(
-				"Deployment", name, namespace, True, "",
+				"Deployment",
+				name,
+				namespace,
+				True,
+				"",
 				f"{available}/{spec_replicas} available",
 				pod_count=pod_count,
 			)
@@ -330,11 +331,13 @@ def _check_stateful_set(obj: Any, namespace: str) -> ResourceHealth:
 	if spec_replicas == 0:
 		return ResourceHealth("StatefulSet", name, namespace, True, "", "scaled to 0 replicas", pod_count=0)
 
-	if ready >= spec_replicas and (
-		not update_revision or current_revision == update_revision
-	):
+	if ready >= spec_replicas and (not update_revision or current_revision == update_revision):
 		return ResourceHealth(
-			"StatefulSet", name, namespace, True, "",
+			"StatefulSet",
+			name,
+			namespace,
+			True,
+			"",
 			f"{ready}/{spec_replicas} ready",
 			pod_count=pod_count,
 		)
@@ -364,14 +367,22 @@ def _check_daemon_set(obj: Any, namespace: str) -> ResourceHealth:
 
 	if desired == 0:
 		return ResourceHealth(
-			"DaemonSet", name, namespace, True, "",
+			"DaemonSet",
+			name,
+			namespace,
+			True,
+			"",
 			"no nodes match the DaemonSet's selector",
 			pod_count=0,
 		)
 
 	if ready >= desired and mis_scheduled == 0:
 		return ResourceHealth(
-			"DaemonSet", name, namespace, True, "",
+			"DaemonSet",
+			name,
+			namespace,
+			True,
+			"",
 			f"{ready}/{desired} ready",
 			pod_count=pod_count,
 		)
@@ -428,7 +439,10 @@ def _check_job(obj: Any, namespace: str) -> ResourceHealth:
 	succeeded = getattr(status_obj, "succeeded", None) or 0
 	failed = getattr(status_obj, "failed", None) or 0
 	return ResourceHealth(
-		"Job", name, namespace, False,
+		"Job",
+		name,
+		namespace,
+		False,
 		"in progress",
 		f"active={active}, succeeded={succeeded}, failed={failed}",
 	)
@@ -588,9 +602,7 @@ def _pod_failure_reason(status_obj: Any, phase: str) -> tuple[str, str]:
 		waiting = getattr(state, "waiting", None) if state else None
 		terminated = getattr(state, "terminated", None) if state else None
 		if waiting and getattr(waiting, "reason", None):
-			return getattr(waiting, "reason", "Waiting"), (
-				getattr(waiting, "message", None) or ""
-			)
+			return getattr(waiting, "reason", "Waiting"), (getattr(waiting, "message", None) or "")
 		if terminated and getattr(terminated, "reason", None):
 			exit_code = getattr(terminated, "exit_code", "?")
 			return (
@@ -664,7 +676,8 @@ def _list_warning_events(
 		return []
 
 	warning_events = [
-		event for event in (getattr(events, "items", None) or [])
+		event
+		for event in (getattr(events, "items", None) or [])
 		if str(getattr(event, "type", "") or "") == "Warning"
 	]
 	warning_events.sort(key=_event_sort_key, reverse=True)
@@ -694,12 +707,19 @@ def _resource_health_from_api_error(
 	if error.status == 404:
 		pod_count = 1 if kind == "Pod" else 0
 		return ResourceHealth(
-			kind, name, namespace, False, "missing",
+			kind,
+			name,
+			namespace,
+			False,
+			"missing",
 			"Resource is in the rendered manifest but missing from the cluster.",
 			pod_count=pod_count,
 		)
 	return ResourceHealth(
-		kind, name, namespace, False,
+		kind,
+		name,
+		namespace,
+		False,
 		f"api-error-{error.status}",
 		(error.reason or "")[:200],
 		pod_count=1 if kind == "Pod" else 0,

@@ -118,3 +118,62 @@ jobs:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      - name: Bump curated catalog row
+        id: bump
+        if: startsWith(github.ref, 'refs/tags/v') && steps.build.outputs.digest != ''
+        run: |
+          python3 kubeport/scripts/update_site_catalog.py \
+            --catalog kubeport/kubeport/site_images/catalog.json \
+            --apps-json kubeport/images/site/apps.json \
+            --image-name "${IMAGE_NAME}" \
+            --frappe-branch "${FRAPPE_BRANCH}" \
+            --image-digest "${{ steps.build.outputs.digest }}" \
+            --git-sha "${{ github.sha }}" \
+            --tag-ref "${{ github.ref_name }}"
+
+      - name: Verify catalog tag was published
+        if: steps.bump.outcome == 'success'
+        run: |
+          expected_tag="${IMAGE_NAME}:${{ steps.bump.outputs.image_tag }}"
+          published_tags="$(mktemp)"
+          cat > "$published_tags" <<'EOF'
+          ${{ steps.meta.outputs.tags }}
+          EOF
+
+          if ! grep -Fx -- "$expected_tag" "$published_tags" >/dev/null; then
+            {
+              echo "Catalog image_tag was not emitted by docker/metadata-action."
+              echo "Expected tag: ${expected_tag}"
+              echo "Published tags:"
+              cat "$published_tags"
+            } >&2
+            exit 1
+          fi
+
+      - name: Summarize catalog bump
+        if: steps.bump.outcome == 'success'
+        run: |
+          {
+            echo "### Curated catalog bump"
+            echo
+            echo "- Repository: \`${{ steps.bump.outputs.matched_repository }}\`"
+            echo "- Image tag: \`${{ steps.bump.outputs.image_tag }}\`"
+            echo "- Image digest: \`${{ steps.bump.outputs.image_digest }}\`"
+            echo "- Source revision: \`${{ steps.bump.outputs.source_revision }}\`"
+            echo "- apps.json hash: \`${{ steps.bump.outputs.apps_json_hash }}\`"
+            echo
+            echo "Diff against the committed catalog:"
+            echo
+            echo '```diff'
+            git -C kubeport diff -- kubeport/site_images/catalog.json || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload rewritten catalog
+        if: steps.bump.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-image-catalog-${{ github.ref_name }}
+          path: kubeport/kubeport/site_images/catalog.json
+          if-no-files-found: error

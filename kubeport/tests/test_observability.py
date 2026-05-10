@@ -55,14 +55,22 @@ class UnitTestObservability(UnitTestCase):
 		apps_v1.read_namespaced_deployment.return_value = SimpleNamespace(
 			spec=SimpleNamespace(selector=_selector({"app": "bench"})),
 		)
-		apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(items=[
-			SimpleNamespace(metadata=_metadata("bench-web-abc", owner_references=[_owner("Deployment", "bench-web")])),
-			SimpleNamespace(metadata=_metadata("other-abc", owner_references=[_owner("Deployment", "other")])),
-		])
-		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
-			_pod("bench-web-abc-1", owner_references=[_owner("ReplicaSet", "bench-web-abc")]),
-			_pod("other-abc-1", owner_references=[_owner("ReplicaSet", "other-abc")]),
-		])
+		apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=_metadata("bench-web-abc", owner_references=[_owner("Deployment", "bench-web")])
+				),
+				SimpleNamespace(
+					metadata=_metadata("other-abc", owner_references=[_owner("Deployment", "other")])
+				),
+			]
+		)
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(
+			items=[
+				_pod("bench-web-abc-1", owner_references=[_owner("ReplicaSet", "bench-web-abc")]),
+				_pod("other-abc-1", owner_references=[_owner("ReplicaSet", "other-abc")]),
+			]
+		)
 
 		pods = list_pods_for_resource("cluster-a", "erp", "Deployment", "bench-web")
 
@@ -83,13 +91,19 @@ class UnitTestObservability(UnitTestCase):
 		apps_v1.read_namespaced_deployment.return_value = SimpleNamespace(
 			spec=SimpleNamespace(selector=_selector({"app": "bench"})),
 		)
-		apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(items=[
-			SimpleNamespace(metadata=_metadata("other-abc", owner_references=[_owner("Deployment", "other")])),
-		])
-		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
-			_pod("selector-match-1", owner_references=[_owner("ReplicaSet", "other-abc")]),
-			_pod("selector-match-2"),
-		])
+		apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=_metadata("other-abc", owner_references=[_owner("Deployment", "other")])
+				),
+			]
+		)
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(
+			items=[
+				_pod("selector-match-1", owner_references=[_owner("ReplicaSet", "other-abc")]),
+				_pod("selector-match-2"),
+			]
+		)
 
 		pods = list_pods_for_resource("cluster-a", "erp", "Deployment", "bench-web")
 
@@ -109,10 +123,12 @@ class UnitTestObservability(UnitTestCase):
 		apps_v1.read_namespaced_stateful_set.return_value = SimpleNamespace(
 			spec=SimpleNamespace(selector=_selector({"app": "bench"})),
 		)
-		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
-			_pod("selector-match-1", owner_references=[_owner("StatefulSet", "other")]),
-			_pod("selector-match-2"),
-		])
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(
+			items=[
+				_pod("selector-match-1", owner_references=[_owner("StatefulSet", "other")]),
+				_pod("selector-match-2"),
+			]
+		)
 
 		pods = list_pods_for_resource("cluster-a", "erp", "StatefulSet", "bench-worker")
 
@@ -121,7 +137,9 @@ class UnitTestObservability(UnitTestCase):
 	@patch("kubeport.utils.observability.client.CoreV1Api")
 	@patch("kubeport.utils.observability.get_k8s_api_client", return_value=object())
 	def test_list_pods_for_missing_standalone_pod_returns_empty(self, _mock_api_client, mock_core_api):
-		mock_core_api.return_value.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+		mock_core_api.return_value.read_namespaced_pod.side_effect = ApiException(
+			status=404, reason="Not Found"
+		)
 
 		pods = list_pods_for_resource("cluster-a", "erp", "Pod", "gone")
 
@@ -140,8 +158,10 @@ class UnitTestObservability(UnitTestCase):
 		self.assertEqual(core_v1.read_namespaced_pod_log.call_args.kwargs["tail_lines"], 2000)
 
 	def test_get_pod_logs_coerces_previous_string_false(self):
-		with patch("kubeport.utils.observability.get_k8s_api_client", return_value=object()), \
-			patch("kubeport.utils.observability.client.CoreV1Api") as mock_core_api:
+		with (
+			patch("kubeport.utils.observability.get_k8s_api_client", return_value=object()),
+			patch("kubeport.utils.observability.client.CoreV1Api") as mock_core_api,
+		):
 			core_v1 = mock_core_api.return_value
 			core_v1.read_namespaced_pod_log.return_value = "logs"
 
@@ -201,19 +221,21 @@ class UnitTestObservability(UnitTestCase):
 		mock_events_api,
 		_mock_core_api,
 	):
-		mock_events_api.return_value.list_namespaced_event.return_value = SimpleNamespace(items=[
-			SimpleNamespace(
-				type="Warning",
-				reason=f"Reason-{i}",
-				note="message",
-				deprecated_count=1,
-				deprecated_first_timestamp=f"2026-05-05T00:{i:02d}:00Z",
-				event_time=f"2026-05-05T00:{i:02d}:00Z",
-				deprecated_last_timestamp=None,
-				reporting_controller="scheduler",
-			)
-			for i in range(60)
-		])
+		mock_events_api.return_value.list_namespaced_event.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					type="Warning",
+					reason=f"Reason-{i}",
+					note="message",
+					deprecated_count=1,
+					deprecated_first_timestamp=f"2026-05-05T00:{i:02d}:00Z",
+					event_time=f"2026-05-05T00:{i:02d}:00Z",
+					deprecated_last_timestamp=None,
+					reporting_controller="scheduler",
+				)
+				for i in range(60)
+			]
+		)
 
 		events = list_resource_events("cluster-a", "erp", "Deployment", "bench-web", limit=999)
 
@@ -228,22 +250,24 @@ class UnitTestObservability(UnitTestCase):
 			metadata=_metadata("bench-web", annotations={"deployment.kubernetes.io/revision": "30"}),
 			spec=SimpleNamespace(selector=_selector({"app": "bench"})),
 		)
-		apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(items=[
-			SimpleNamespace(
-				metadata=_metadata(
-					f"bench-web-{i}",
-					owner_references=[_owner("Deployment", "bench-web")],
-					annotations={"deployment.kubernetes.io/revision": str(i)},
-					creation_timestamp=f"2026-05-05T00:{i:02d}:00Z",
-				),
-				spec=SimpleNamespace(
-					template=SimpleNamespace(
-						spec=SimpleNamespace(containers=[SimpleNamespace(image=f"image:{i}")])
-					)
-				),
-			)
-			for i in range(30)
-		])
+		apps_v1.list_namespaced_replica_set.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=_metadata(
+						f"bench-web-{i}",
+						owner_references=[_owner("Deployment", "bench-web")],
+						annotations={"deployment.kubernetes.io/revision": str(i)},
+						creation_timestamp=f"2026-05-05T00:{i:02d}:00Z",
+					),
+					spec=SimpleNamespace(
+						template=SimpleNamespace(
+							spec=SimpleNamespace(containers=[SimpleNamespace(image=f"image:{i}")])
+						)
+					),
+				)
+				for i in range(30)
+			]
+		)
 
 		rows = get_rollout_history("cluster-a", "erp", "Deployment", "bench-web", limit=99)
 
@@ -258,16 +282,22 @@ class UnitTestObservability(UnitTestCase):
 			spec=SimpleNamespace(selector=_selector({"app": "bench"})),
 			status=SimpleNamespace(current_revision="bench-worker-1", update_revision="bench-worker-2"),
 		)
-		apps_v1.list_namespaced_controller_revision.return_value = SimpleNamespace(items=[
-			SimpleNamespace(
-				metadata=_metadata("bench-worker-1", owner_references=[_owner("StatefulSet", "bench-worker")]),
-				revision=1,
-			),
-			SimpleNamespace(
-				metadata=_metadata("bench-worker-2", owner_references=[_owner("StatefulSet", "bench-worker")]),
-				revision=2,
-			),
-		])
+		apps_v1.list_namespaced_controller_revision.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=_metadata(
+						"bench-worker-1", owner_references=[_owner("StatefulSet", "bench-worker")]
+					),
+					revision=1,
+				),
+				SimpleNamespace(
+					metadata=_metadata(
+						"bench-worker-2", owner_references=[_owner("StatefulSet", "bench-worker")]
+					),
+					revision=2,
+				),
+			]
+		)
 
 		rows = get_rollout_history("cluster-a", "erp", "StatefulSet", "bench-worker")
 

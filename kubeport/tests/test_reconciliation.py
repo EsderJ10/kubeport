@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -11,8 +12,8 @@ from kubeport.tasks.reconciliation import (
 	SITE_PROBE_EXISTS,
 	SITE_PROBE_MISSING,
 	SITE_PROBE_UNKNOWN,
-	_job_belongs_to_backup,
 	_finalize_site_status,
+	_job_belongs_to_backup,
 	_job_belongs_to_site,
 	_reconcile_frappe_site_backups,
 	_reconcile_frappe_sites,
@@ -60,37 +61,49 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_reconcile_frappe_site_backups.assert_called_once_with()
 
 	def test_summarize_unrunnable_pod_returns_terminated_exit_code_with_reason(self):
-		pod = SimpleNamespace(status=SimpleNamespace(
-			container_statuses=[SimpleNamespace(state=SimpleNamespace(
-				terminated=SimpleNamespace(exit_code=137, reason="OOMKilled", message="killed"),
-				waiting=None,
-			))],
-			init_container_statuses=None,
-			conditions=None,
-			phase="Failed",
-			reason="",
-			message="",
-		))
+		pod = SimpleNamespace(
+			status=SimpleNamespace(
+				container_statuses=[
+					SimpleNamespace(
+						state=SimpleNamespace(
+							terminated=SimpleNamespace(exit_code=137, reason="OOMKilled", message="killed"),
+							waiting=None,
+						)
+					)
+				],
+				init_container_statuses=None,
+				conditions=None,
+				phase="Failed",
+				reason="",
+				message="",
+			)
+		)
 
 		detail = _summarize_unrunnable_pod(pod)
 
 		self.assertEqual(detail, "Job pod exited with code 137 (OOMKilled): killed")
 
 	def test_summarize_unrunnable_pod_surfaces_waiting_container_reason(self):
-		pod = SimpleNamespace(status=SimpleNamespace(
-			container_statuses=[SimpleNamespace(state=SimpleNamespace(
-				terminated=None,
-				waiting=SimpleNamespace(
-					reason="ContainerCreating",
-					message="unbound PersistentVolumeClaim 'kubeport-backups'",
-				),
-			))],
-			init_container_statuses=None,
-			conditions=None,
-			phase="Pending",
-			reason="",
-			message="",
-		))
+		pod = SimpleNamespace(
+			status=SimpleNamespace(
+				container_statuses=[
+					SimpleNamespace(
+						state=SimpleNamespace(
+							terminated=None,
+							waiting=SimpleNamespace(
+								reason="ContainerCreating",
+								message="unbound PersistentVolumeClaim 'kubeport-backups'",
+							),
+						)
+					)
+				],
+				init_container_statuses=None,
+				conditions=None,
+				phase="Pending",
+				reason="",
+				message="",
+			)
+		)
 
 		detail = _summarize_unrunnable_pod(pod)
 
@@ -100,18 +113,22 @@ class UnitTestReconciliation(UnitTestCase):
 		)
 
 	def test_summarize_unrunnable_pod_surfaces_unschedulable_condition(self):
-		pod = SimpleNamespace(status=SimpleNamespace(
-			container_statuses=None,
-			init_container_statuses=None,
-			conditions=[SimpleNamespace(
-				status="False",
-				reason="Unschedulable",
-				message="0/1 nodes are available: 1 pod has unbound immediate PersistentVolumeClaims",
-			)],
-			phase="Pending",
-			reason="",
-			message="",
-		))
+		pod = SimpleNamespace(
+			status=SimpleNamespace(
+				container_statuses=None,
+				init_container_statuses=None,
+				conditions=[
+					SimpleNamespace(
+						status="False",
+						reason="Unschedulable",
+						message="0/1 nodes are available: 1 pod has unbound immediate PersistentVolumeClaims",
+					)
+				],
+				phase="Pending",
+				reason="",
+				message="",
+			)
+		)
 
 		detail = _summarize_unrunnable_pod(pod)
 
@@ -122,21 +139,22 @@ class UnitTestReconciliation(UnitTestCase):
 		)
 
 	def test_summarize_unrunnable_pod_falls_back_to_phase_when_no_signals(self):
-		pod = SimpleNamespace(status=SimpleNamespace(
-			container_statuses=None,
-			init_container_statuses=None,
-			conditions=None,
-			phase="Failed",
-			reason="DeadlineExceeded",
-			message="Job was active longer than specified deadline",
-		))
+		pod = SimpleNamespace(
+			status=SimpleNamespace(
+				container_statuses=None,
+				init_container_statuses=None,
+				conditions=None,
+				phase="Failed",
+				reason="DeadlineExceeded",
+				message="Job was active longer than specified deadline",
+			)
+		)
 
 		detail = _summarize_unrunnable_pod(pod)
 
 		self.assertEqual(
 			detail,
-			"Job pod phase=Failed, reason=DeadlineExceeded: "
-			"Job was active longer than specified deadline",
+			"Job pod phase=Failed, reason=DeadlineExceeded: Job was active longer than specified deadline",
 		)
 
 	def test_summarize_unrunnable_pod_returns_none_when_status_missing(self):
@@ -176,10 +194,14 @@ class UnitTestReconciliation(UnitTestCase):
 
 		_reconcile_helm_releases()
 
-		mock_set_value.assert_called_once_with("Helm Release", "bench-a", {
-			"status": "Deployed",
-			"helm_status_detail": "deployed (no workload resources)",
-		})
+		mock_set_value.assert_called_once_with(
+			"Helm Release",
+			"bench-a",
+			{
+				"status": "Deployed",
+				"helm_status_detail": "deployed (no workload resources)",
+			},
+		)
 		mock_publish.assert_called_once()
 
 	@patch("kubeport.tasks.reconciliation.frappe.log_error")
@@ -522,10 +544,13 @@ class UnitTestReconciliation(UnitTestCase):
 
 		_reconcile_service_bundles()
 
-		self.assertEqual(mock_set_value.call_args_list, [
-			call("Service Bundle", "bundle-a", "status", "Deployed"),
-			call("Service Bundle", "bundle-a", "status_detail", ""),
-		])
+		self.assertEqual(
+			mock_set_value.call_args_list,
+			[
+				call("Service Bundle", "bundle-a", "status", "Deployed"),
+				call("Service Bundle", "bundle-a", "status_detail", ""),
+			],
+		)
 
 	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
 	@patch("kubeport.tasks.reconciliation.frappe.log_error")
@@ -553,15 +578,18 @@ class UnitTestReconciliation(UnitTestCase):
 
 		_reconcile_service_bundles()
 
-		self.assertEqual(mock_set_value.call_args_list, [
-			call("Service Bundle", "bundle-a", "status", "Degraded"),
-			call(
-				"Service Bundle",
-				"bundle-a",
-				"status_detail",
-				"ConfigMap/demo not found in namespace default.",
-			),
-		])
+		self.assertEqual(
+			mock_set_value.call_args_list,
+			[
+				call("Service Bundle", "bundle-a", "status", "Degraded"),
+				call(
+					"Service Bundle",
+					"bundle-a",
+					"status_detail",
+					"ConfigMap/demo not found in namespace default.",
+				),
+			],
+		)
 		mock_log_error.assert_called_once()
 
 
@@ -605,14 +633,17 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			"status": "In Progress",
 		}
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
 		mock_db_set_value.assert_any_call(
-			"Frappe Site", "rel-a/demo.example.com",
+			"Frappe Site",
+			"rel-a/demo.example.com",
 			{"status": "Active", "status_detail": ""},
 		)
 		mock_publish.assert_called_once()
@@ -637,9 +668,11 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 			"status": "In Progress",
 		}
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -670,14 +703,17 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "In Progress"}
 		mock_probe_state.return_value = "exists"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
 			_reconcile_frappe_sites()
 
 		mock_db_set_value.assert_any_call(
-			"Frappe Site", "rel-a/demo.example.com",
+			"Frappe Site",
+			"rel-a/demo.example.com",
 			{"status": "Active", "status_detail": ""},
 		)
 		mock_extract_detail.assert_not_called()
@@ -707,14 +743,17 @@ class UnitTestReconcileFrappeSites(UnitTestCase):
 		mock_probe_state.return_value = "missing"
 		mock_extract_detail.return_value = "Traceback: DB error"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
 			_reconcile_frappe_sites()
 
 		mock_db_set_value.assert_any_call(
-			"Frappe Site", "rel-a/demo.example.com",
+			"Frappe Site",
+			"rel-a/demo.example.com",
 			{"status": "Failed", "status_detail": "Traceback: DB error"},
 		)
 		mock_log_error.assert_called_once()
@@ -732,7 +771,9 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 	):
 		mock_get_value.return_value = {"operation_token": "t", "status": "Failed"}
 		site = SimpleNamespace(
-			name="rel/s", operation_job_token="t", operation_job_name="j",
+			name="rel/s",
+			operation_job_token="t",
+			operation_job_name="j",
 		)
 		applied = _finalize_site_status(site, "In Progress", "Active", "")
 		self.assertFalse(applied)
@@ -750,14 +791,20 @@ class UnitTestFinalizeSiteStatus(UnitTestCase):
 	):
 		mock_get_value.return_value = {"operation_token": "t", "status": "In Progress"}
 		site = SimpleNamespace(
-			name="rel/s", operation_job_token="t", operation_job_name="j",
+			name="rel/s",
+			operation_job_token="t",
+			operation_job_name="j",
 		)
 		applied = _finalize_site_status(site, "In Progress", "Active", "")
 		self.assertTrue(applied)
-		mock_set_value.assert_called_once_with("Frappe Site", "rel/s", {
-			"status": "Active",
-			"status_detail": "",
-		})
+		mock_set_value.assert_called_once_with(
+			"Frappe Site",
+			"rel/s",
+			{
+				"status": "Active",
+				"status_detail": "",
+			},
+		)
 		mock_publish.assert_called_once()
 
 
@@ -811,8 +858,7 @@ class UnitTestReconcileFrappeSitesExtra(UnitTestCase):
 			succeeded=1,
 		)
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"):
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, patch("kubernetes.client.CoreV1Api"):
 			mock_batch_api.return_value.read_namespaced_job.return_value = wrong_job
 			_reconcile_frappe_sites()
 
@@ -843,9 +889,11 @@ class UnitTestReconcileFrappeSitesExtra(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "In Progress"}
 		mock_probe_state.return_value = "unknown"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = SimpleNamespace(
 				metadata=SimpleNamespace(name="ks-demo-abcdef123456", labels={}),
 				status=SimpleNamespace(succeeded=0, failed=1),
@@ -862,29 +910,35 @@ class UnitTestJobBelongsToSite(UnitTestCase):
 	def test_returns_true_when_labels_match(self):
 		site = SimpleNamespace(name="rel-a/demo.example.com")
 		job = SimpleNamespace(
-			metadata=SimpleNamespace(labels={
-				"app.kubernetes.io/managed-by": "kubeport",
-				"kubeport.io/frappe-site": "rel-a-demo.example.com",
-			}),
+			metadata=SimpleNamespace(
+				labels={
+					"app.kubernetes.io/managed-by": "kubeport",
+					"kubeport.io/frappe-site": "rel-a-demo.example.com",
+				}
+			),
 		)
 		self.assertTrue(_job_belongs_to_site(job, site))
 
 	def test_returns_false_when_managed_by_wrong(self):
 		site = SimpleNamespace(name="rel-a/demo.example.com")
 		job = SimpleNamespace(
-			metadata=SimpleNamespace(labels={
-				"app.kubernetes.io/managed-by": "someone-else",
-				"kubeport.io/frappe-site": "rel-a-demo.example.com",
-			}),
+			metadata=SimpleNamespace(
+				labels={
+					"app.kubernetes.io/managed-by": "someone-else",
+					"kubeport.io/frappe-site": "rel-a-demo.example.com",
+				}
+			),
 		)
 		self.assertFalse(_job_belongs_to_site(job, site))
 
 	def test_returns_false_when_site_label_missing(self):
 		site = SimpleNamespace(name="rel-a/demo.example.com")
 		job = SimpleNamespace(
-			metadata=SimpleNamespace(labels={
-				"app.kubernetes.io/managed-by": "kubeport",
-			}),
+			metadata=SimpleNamespace(
+				labels={
+					"app.kubernetes.io/managed-by": "kubeport",
+				}
+			),
 		)
 		self.assertFalse(_job_belongs_to_site(job, site))
 
@@ -898,20 +952,24 @@ class UnitTestJobBelongsToBackup(UnitTestCase):
 	def test_returns_true_when_backup_labels_match(self):
 		backup = SimpleNamespace(name="demo.example.com::demo-20260430120000")
 		job = SimpleNamespace(
-			metadata=SimpleNamespace(labels={
-				"app.kubernetes.io/managed-by": "kubeport",
-				"kubeport.io/frappe-site-backup": "demo.example.com-demo-20260430120000",
-			}),
+			metadata=SimpleNamespace(
+				labels={
+					"app.kubernetes.io/managed-by": "kubeport",
+					"kubeport.io/frappe-site-backup": "demo.example.com-demo-20260430120000",
+				}
+			),
 		)
 		self.assertTrue(_job_belongs_to_backup(job, backup))
 
 	def test_returns_false_when_backup_label_missing(self):
 		backup = SimpleNamespace(name="demo.example.com::demo-20260430120000")
 		job = SimpleNamespace(
-			metadata=SimpleNamespace(labels={
-				"app.kubernetes.io/managed-by": "kubeport",
-				"kubeport.io/frappe-site": "rel-a-demo.example.com",
-			}),
+			metadata=SimpleNamespace(
+				labels={
+					"app.kubernetes.io/managed-by": "kubeport",
+					"kubeport.io/frappe-site": "rel-a-demo.example.com",
+				}
+			),
 		)
 		self.assertFalse(_job_belongs_to_backup(job, backup))
 
@@ -941,6 +999,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 			status=SimpleNamespace(succeeded=succeeded, failed=failed),
 		)
 
+	@patch("kubeport.tasks.reconciliation.frappe.utils.now_datetime")
 	@patch("kubeport.tasks.reconciliation._extract_backup_success_metadata")
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
@@ -955,6 +1014,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		mock_db_set_value,
 		mock_publish,
 		mock_metadata,
+		mock_now,
 	):
 		mock_get_all.return_value = [self._backup()]
 		mock_metadata.return_value = {"size_bytes": 42, "bench_archive_name": "db.sql.gz"}
@@ -963,9 +1023,15 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 			{"operation_token": "token-1", "status": "In Progress"},
 		]
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True),
+			patch(
+				"kubeport.tasks.reconciliation._probe_backup_archive_on_pvc",
+				return_value=(SITE_PROBE_EXISTS, 42),
+			),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_site_backups()
 
@@ -980,6 +1046,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		self.assertEqual(backup_write[2]["size_bytes"], 42)
 		mock_publish.assert_called()
 
+	@patch("kubeport.tasks.reconciliation.frappe.utils.now_datetime")
 	@patch("kubeport.tasks.reconciliation._probe_site_state")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
@@ -992,6 +1059,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		mock_db_get_value,
 		mock_db_set_value,
 		mock_probe_state,
+		mock_now,
 	):
 		mock_get_all.return_value = [self._backup(status="Restoring")]
 		mock_db_get_value.side_effect = [
@@ -1000,9 +1068,11 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		]
 		mock_probe_state.return_value = "exists"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
 			_reconcile_frappe_site_backups()
 
@@ -1012,6 +1082,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 			{"status": "Active", "status_detail": ""},
 		)
 
+	@patch("kubeport.tasks.reconciliation.frappe.utils.now_datetime")
 	@patch("kubeport.tasks.reconciliation._extract_job_failure_detail")
 	@patch("kubeport.tasks.reconciliation._probe_site_state")
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
@@ -1028,6 +1099,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		mock_publish,
 		mock_probe_state,
 		mock_failure_detail,
+		mock_now,
 	):
 		detail = "bench restore failed: database import failed"
 		mock_get_all.return_value = [self._backup(status="Restoring")]
@@ -1038,9 +1110,11 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		mock_probe_state.return_value = SITE_PROBE_MISSING
 		mock_failure_detail.return_value = detail
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
 			_reconcile_frappe_site_backups()
 
@@ -1074,18 +1148,20 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 
 class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 	def _job(self, name: str) -> SimpleNamespace:
-		return SimpleNamespace(metadata=SimpleNamespace(
-			name=name,
-			labels={
-				"app.kubernetes.io/managed-by": "kubeport",
-				"kubeport.io/frappe-site": "rel-a-demo",
-			},
-		))
+		return SimpleNamespace(
+			metadata=SimpleNamespace(
+				name=name,
+				labels={
+					"app.kubernetes.io/managed-by": "kubeport",
+					"kubeport.io/frappe-site": "rel-a-demo",
+				},
+			)
+		)
 
 	def _job_with_age(self, name: str, age_seconds: int) -> SimpleNamespace:
-		from datetime import datetime, timedelta, timezone
+		from datetime import datetime, timedelta
 
-		created = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+		created = datetime.now(UTC) - timedelta(seconds=age_seconds)
 		return SimpleNamespace(
 			metadata=SimpleNamespace(
 				name=name,
@@ -1098,13 +1174,15 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 		)
 
 	def _backup_job(self, name: str) -> SimpleNamespace:
-		return SimpleNamespace(metadata=SimpleNamespace(
-			name=name,
-			labels={
-				"app.kubernetes.io/managed-by": "kubeport",
-				"kubeport.io/frappe-site-backup": "demo.example.com-demo-20260430120000",
-			},
-		))
+		return SimpleNamespace(
+			metadata=SimpleNamespace(
+				name=name,
+				labels={
+					"app.kubernetes.io/managed-by": "kubeport",
+					"kubeport.io/frappe-site-backup": "demo.example.com-demo-20260430120000",
+				},
+			)
+		)
 
 	@patch("kubeport.tasks.site_tasks._best_effort_delete_job")
 	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
@@ -1128,10 +1206,12 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 
 		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
 			batch = mock_batch_api.return_value
-			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
-				self._job("ks-demo-known123456ab"),  # tracked — keep
-				self._job("ks-demo-orphanabcd1234"),  # not tracked — delete
-			])
+			batch.list_namespaced_job.return_value = SimpleNamespace(
+				items=[
+					self._job("ks-demo-known123456ab"),  # tracked — keep
+					self._job("ks-demo-orphanabcd1234"),  # not tracked — delete
+				]
+			)
 			_sweep_orphan_site_jobs()
 
 		# Exactly one delete — the orphan.
@@ -1164,10 +1244,12 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 
 		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
 			batch = mock_batch_api.return_value
-			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
-				self._backup_job("ks-backup-known1234"),
-				self._backup_job("ks-backup-orphan1234"),
-			])
+			batch.list_namespaced_job.return_value = SimpleNamespace(
+				items=[
+					self._backup_job("ks-backup-known1234"),
+					self._backup_job("ks-backup-orphan1234"),
+				]
+			)
 			_sweep_orphan_site_jobs()
 
 		mock_delete_job.assert_called_once()
@@ -1196,9 +1278,11 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 
 		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
 			batch = mock_batch_api.return_value
-			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
-				self._job_with_age("ks-demo-fresh1234abcd", age_seconds=30),
-			])
+			batch.list_namespaced_job.return_value = SimpleNamespace(
+				items=[
+					self._job_with_age("ks-demo-fresh1234abcd", age_seconds=30),
+				]
+			)
 			_sweep_orphan_site_jobs()
 
 		mock_delete_job.assert_not_called()
@@ -1224,9 +1308,11 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 
 		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
 			batch = mock_batch_api.return_value
-			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
-				self._job_with_age("ks-demo-orphanold123", age_seconds=600),
-			])
+			batch.list_namespaced_job.return_value = SimpleNamespace(
+				items=[
+					self._job_with_age("ks-demo-orphanold123", age_seconds=600),
+				]
+			)
 			_sweep_orphan_site_jobs()
 
 		mock_delete_job.assert_called_once()
@@ -1259,10 +1345,12 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 
 		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
 			batch = mock_batch_api.return_value
-			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
-				self._job("ks-demo-abc123abc123"),
-				self._job("ks-other-xyz456xyz4"),
-			])
+			batch.list_namespaced_job.return_value = SimpleNamespace(
+				items=[
+					self._job("ks-demo-abc123abc123"),
+					self._job("ks-other-xyz456xyz4"),
+				]
+			)
 			_sweep_orphan_site_jobs()
 
 		mock_delete_job.assert_not_called()
@@ -1290,9 +1378,11 @@ class UnitTestSweepOrphanSiteJobs(UnitTestCase):
 
 		with patch("kubernetes.client.BatchV1Api") as mock_batch_api:
 			batch = mock_batch_api.return_value
-			batch.list_namespaced_job.return_value = SimpleNamespace(items=[
-				self._job("ks-demo-orphanabcd1234"),
-			])
+			batch.list_namespaced_job.return_value = SimpleNamespace(
+				items=[
+					self._job("ks-demo-orphanabcd1234"),
+				]
+			)
 			_sweep_orphan_site_jobs()
 
 		mock_delete_job.assert_called_once()
@@ -1340,9 +1430,11 @@ class UnitTestReconcileSiteDelete(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
 		mock_probe_state.return_value = "missing"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -1375,9 +1467,11 @@ class UnitTestReconcileSiteDelete(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
 		mock_probe_state.return_value = "exists"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -1410,9 +1504,11 @@ class UnitTestReconcileSiteDelete(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
 		mock_probe_state.return_value = "unknown"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -1438,10 +1534,12 @@ class UnitTestReconcileSiteDelete(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
 		mock_probe_state.return_value = "missing"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True), \
-			patch("kubeport.tasks.reconciliation._extract_job_failure_detail", return_value="ignored"):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+			patch("kubeport.tasks.reconciliation._extract_job_failure_detail", return_value="ignored"),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
 			_reconcile_frappe_sites()
 
@@ -1471,9 +1569,11 @@ class UnitTestReconcileSiteDelete(UnitTestCase):
 		mock_probe_state.return_value = "exists"
 		mock_extract_detail.return_value = "drop failed: permission denied"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
 			_reconcile_frappe_sites()
 
@@ -1505,8 +1605,7 @@ class UnitTestReconcileSiteDelete(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Deleting"}
 		mock_probe_state.return_value = "missing"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"):
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, patch("kubernetes.client.CoreV1Api"):
 			mock_batch_api.return_value.read_namespaced_job.side_effect = ApiException(status=404)
 			_reconcile_frappe_sites()
 
@@ -1531,9 +1630,11 @@ class UnitTestReconcileSiteDelete(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-new", "status": "Deleting"}
 		mock_probe_state.return_value = "missing"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -1583,9 +1684,11 @@ class UnitTestReconcileSiteMigrate(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
 		mock_probe_state.return_value = "exists"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -1619,9 +1722,11 @@ class UnitTestReconcileSiteMigrate(UnitTestCase):
 		mock_probe_state.return_value = "missing"
 		mock_extract_detail.return_value = "Migration log: bad column"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -1651,9 +1756,11 @@ class UnitTestReconcileSiteMigrate(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
 		mock_probe_state.return_value = "exists"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(failed=1)
 			_reconcile_frappe_sites()
 
@@ -1680,9 +1787,11 @@ class UnitTestReconcileSiteMigrate(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
 		mock_probe_state.return_value = "unknown"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -1709,8 +1818,7 @@ class UnitTestReconcileSiteMigrate(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
 		mock_probe_state.return_value = "exists"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"):
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, patch("kubernetes.client.CoreV1Api"):
 			mock_batch_api.return_value.read_namespaced_job.side_effect = ApiException(status=404)
 			_reconcile_frappe_sites()
 
@@ -1741,8 +1849,7 @@ class UnitTestReconcileSiteMigrate(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-1", "status": "Migrating"}
 		mock_probe_state.return_value = "missing"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"):
+		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, patch("kubernetes.client.CoreV1Api"):
 			mock_batch_api.return_value.read_namespaced_job.side_effect = ApiException(status=404)
 			_reconcile_frappe_sites()
 
@@ -1768,9 +1875,11 @@ class UnitTestReconcileSiteMigrate(UnitTestCase):
 		mock_db_get_value.return_value = {"operation_token": "token-new", "status": "Migrating"}
 		mock_probe_state.return_value = "exists"
 
-		with patch("kubernetes.client.BatchV1Api") as mock_batch_api, \
-			patch("kubernetes.client.CoreV1Api"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubernetes.client.BatchV1Api") as mock_batch_api,
+			patch("kubernetes.client.CoreV1Api"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_batch_api.return_value.read_namespaced_job.return_value = self._job(succeeded=1)
 			_reconcile_frappe_sites()
 
@@ -1949,8 +2058,10 @@ class UnitTestReconcileSiteBackupProbe(UnitTestCase):
 		metadata is trusted (size_bytes > 0).  The alternative — defer —
 		would risk the Job aging out before the next tick can verify."""
 		# Patch the metadata extraction so the success path runs.
-		with patch("kubeport.tasks.reconciliation._extract_backup_success_metadata") as mock_meta, \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True):
+		with (
+			patch("kubeport.tasks.reconciliation._extract_backup_success_metadata") as mock_meta,
+			patch("kubeport.tasks.reconciliation._job_belongs_to_backup", return_value=True),
+		):
 			mock_meta.return_value = {"size_bytes": 4096, "bench_archive_name": "demo.tar"}
 			batch = MagicMock()
 			batch.read_namespaced_job.return_value = SimpleNamespace(

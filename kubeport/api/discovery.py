@@ -28,10 +28,12 @@ def get_cluster_discovery(cluster_name: str) -> dict[str, Any]:
 	}
 
 	if not cluster_name:
-		response["errors"].append({
-			"scope": "cluster",
-			"message": "Cluster name is required.",
-		})
+		response["errors"].append(
+			{
+				"scope": "cluster",
+				"message": "Cluster name is required.",
+			}
+		)
 		return response
 
 	try:
@@ -42,10 +44,12 @@ def get_cluster_discovery(cluster_name: str) -> dict[str, Any]:
 			title=f"Cluster Discovery Failed: {cluster_name}",
 			message=str(e),
 		)
-		response["errors"].append({
-			"scope": "cluster",
-			"message": f"Failed to list Helm releases: {e}",
-		})
+		response["errors"].append(
+			{
+				"scope": "cluster",
+				"message": f"Failed to list Helm releases: {e}",
+			}
+		)
 		return response
 
 	frappe_releases = [release for release in releases if release.get("is_frappe_bench")]
@@ -59,10 +63,12 @@ def get_cluster_discovery(cluster_name: str) -> dict[str, Any]:
 			title=f"Site Discovery Auth Failed: {cluster_name}",
 			message=str(e),
 		)
-		response["errors"].append({
-			"scope": "cluster",
-			"message": f"Failed to initialize Kubernetes site discovery: {e}",
-		})
+		response["errors"].append(
+			{
+				"scope": "cluster",
+				"message": f"Failed to initialize Kubernetes site discovery: {e}",
+			}
+		)
 		return response
 
 	for release in frappe_releases:
@@ -73,12 +79,14 @@ def get_cluster_discovery(cluster_name: str) -> dict[str, Any]:
 				title=f"Site Discovery Failed: {cluster_name}/{release.get('release_name', '')}",
 				message=str(e),
 			)
-			response["errors"].append({
-				"scope": "release",
-				"release_name": release.get("release_name", ""),
-				"namespace": release.get("namespace", "default"),
-				"message": f"Failed to discover sites for release '{release.get('release_name', '')}': {e}",
-			})
+			response["errors"].append(
+				{
+					"scope": "release",
+					"release_name": release.get("release_name", ""),
+					"namespace": release.get("namespace", "default"),
+					"message": f"Failed to discover sites for release '{release.get('release_name', '')}': {e}",
+				}
+			)
 
 	return response
 
@@ -114,22 +122,26 @@ def adopt_helm_release(cluster_name: str, namespace: str, release_name: str) -> 
 	chart_name = str(live_release.get("chart_name") or "")
 	chart_version = str(live_release.get("chart_version") or "")
 	chart_docname = _resolve_chart_docname(chart_name, chart_version)
-	values_yaml = _normalize_values_yaml(helm.get_values(
-		release_name=release_name,
-		namespace=namespace,
-		cluster_name=cluster_name,
-	))
+	values_yaml = _normalize_values_yaml(
+		helm.get_values(
+			release_name=release_name,
+			namespace=namespace,
+			cluster_name=cluster_name,
+		)
+	)
 
-	doc = frappe.get_doc({
-		"doctype": "Helm Release",
-		"release_name": release_name,
-		"cluster": cluster_name,
-		"namespace": namespace,
-		"chart": chart_docname,
-		"chart_version": chart_version,
-		"values": values_yaml,
-		"status": "Draft",
-	})
+	doc = frappe.get_doc(
+		{
+			"doctype": "Helm Release",
+			"release_name": release_name,
+			"cluster": cluster_name,
+			"namespace": namespace,
+			"chart": chart_docname,
+			"chart_version": chart_version,
+			"values": values_yaml,
+			"status": "Draft",
+		}
+	)
 	doc.insert()
 
 	helm_result = helm.status(
@@ -156,15 +168,19 @@ def adopt_helm_release(cluster_name: str, namespace: str, release_name: str) -> 
 		release_name=release_name,
 		values_yaml=values_yaml,
 	)
-	frappe.db.set_value("Helm Release", doc.name, {
-		"status": status,
-		"helm_revision": revision,
-		"helm_status_detail": detail,
-		"desired_spec_hash": spec_hash,
-		"last_applied_spec_hash": spec_hash,
-		"last_applied_chart_version": chart_version,
-		"pending_changes": 0,
-	})
+	frappe.db.set_value(
+		"Helm Release",
+		doc.name,
+		{
+			"status": status,
+			"helm_revision": revision,
+			"helm_status_detail": detail,
+			"desired_spec_hash": spec_hash,
+			"last_applied_spec_hash": spec_hash,
+			"last_applied_chart_version": chart_version,
+			"pending_changes": 0,
+		},
+	)
 
 	return {
 		"name": doc.name,
@@ -205,9 +221,7 @@ def _find_discovered_release(
 			and str(release.get("release_name") or "") == release_name
 		):
 			return release
-	frappe.throw(
-		f"Helm release '{release_name}' was not found in namespace '{namespace}'."
-	)
+	frappe.throw(f"Helm release '{release_name}' was not found in namespace '{namespace}'.")
 
 
 def _resolve_chart_docname(chart_name: str, chart_version: str) -> str:
@@ -220,9 +234,7 @@ def _resolve_chart_docname(chart_name: str, chart_version: str) -> str:
 		fields=["name"],
 	)
 	if not charts:
-		frappe.throw(
-			f"No synced Helm Chart matches '{chart_name}'. Sync the chart repository first."
-		)
+		frappe.throw(f"No synced Helm Chart matches '{chart_name}'. Sync the chart repository first.")
 	if len(charts) == 1:
 		return charts[0].name
 

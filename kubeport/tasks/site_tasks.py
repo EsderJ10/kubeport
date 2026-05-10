@@ -21,9 +21,10 @@ Design rationale (direct Job submission, not Helm upgrade):
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import frappe
 from kubernetes import client
@@ -348,10 +349,12 @@ def _prepare_backup_ref_spec(
 	volumes = ref_spec.setdefault("volumes", [])
 	mounts = ref_spec.setdefault("volume_mounts", [])
 	if not any(volume.get("name") == "kubeport-backups" for volume in volumes):
-		volumes.append({
-			"name": "kubeport-backups",
-			"persistentVolumeClaim": {"claimName": BACKUP_PVC_NAME},
-		})
+		volumes.append(
+			{
+				"name": "kubeport-backups",
+				"persistentVolumeClaim": {"claimName": BACKUP_PVC_NAME},
+			}
+		)
 	if not any(mount.get("name") == "kubeport-backups" for mount in mounts):
 		mounts.append({"name": "kubeport-backups", "mountPath": BACKUP_MOUNT_PATH})
 
@@ -438,13 +441,15 @@ def _ensure_backup_pvc(api_client: client.ApiClient, cluster_name: str, namespac
 
 
 def _backup_storage_path(cluster: str, namespace: str, site_name: str, backup_name: str) -> str:
-	return "/".join([
-		BACKUP_MOUNT_PATH,
-		_safe_path_segment(cluster),
-		_safe_path_segment(namespace),
-		_safe_path_segment(site_name),
-		f"{_safe_path_segment(backup_name)}.tar.gz",
-	])
+	return "/".join(
+		[
+			BACKUP_MOUNT_PATH,
+			_safe_path_segment(cluster),
+			_safe_path_segment(namespace),
+			_safe_path_segment(site_name),
+			f"{_safe_path_segment(backup_name)}.tar.gz",
+		]
+	)
 
 
 def _safe_path_segment(value: str) -> str:
@@ -488,14 +493,18 @@ def backup_site_task(site_docname: str, backup_docname: str, operation_token: st
 		if not _backup_operation_matches(backup_docname, token, ("Pending",)):
 			return False
 		now = frappe.utils.now_datetime()
-		frappe.db.set_value("Frappe Site Backup", backup_docname, {
-			"status": "In Progress",
-			"started_at": now,
-			"operation_started_at": now,
-			"operation_job_name": job_name,
-			"operation_job_token": token,
-			"status_detail": "",
-		})
+		frappe.db.set_value(
+			"Frappe Site Backup",
+			backup_docname,
+			{
+				"status": "In Progress",
+				"started_at": now,
+				"operation_started_at": now,
+				"operation_job_name": job_name,
+				"operation_job_token": token,
+				"status_detail": "",
+			},
+		)
 		frappe.publish_realtime(
 			"frappe_site_backup_status_update",
 			{"site_docname": site_docname, "backup_docname": backup_docname, "status": "In Progress"},
@@ -537,18 +546,24 @@ def restore_site_task(site_docname: str, backup_docname: str, operation_token: s
 
 	backup = frappe.get_doc("Frappe Site Backup", backup_docname)
 	if not backup.storage_path:
-		_fail_restore_submission(site_docname, backup_docname, operation_token, "Backup storage path is empty.")
+		_fail_restore_submission(
+			site_docname, backup_docname, operation_token, "Backup storage path is empty."
+		)
 		return
 
 	def _record_restore_job(doc: Any, release: Any, job_name: str, token: str, namespace: str) -> bool:
 		if not _backup_operation_matches(backup_docname, token, ("Restoring",)):
 			return False
-		frappe.db.set_value("Frappe Site Backup", backup_docname, {
-			"operation_job_name": job_name,
-			"operation_job_token": token,
-			"operation_started_at": frappe.utils.now_datetime(),
-			"status_detail": "",
-		})
+		frappe.db.set_value(
+			"Frappe Site Backup",
+			backup_docname,
+			{
+				"operation_job_name": job_name,
+				"operation_job_token": token,
+				"operation_started_at": frappe.utils.now_datetime(),
+				"status_detail": "",
+			},
+		)
 		frappe.publish_realtime(
 			"frappe_site_backup_status_update",
 			{"site_docname": site_docname, "backup_docname": backup_docname, "status": "Restoring"},
@@ -635,14 +650,16 @@ def _attach_creds_secret_owner_ref(
 		job_uid = getattr(getattr(job_read, "metadata", None), "uid", None)
 		if not job_uid:
 			return
-		creds_secret_manifest["metadata"]["ownerReferences"] = [{
-			"apiVersion": "batch/v1",
-			"kind": "Job",
-			"name": job_name,
-			"uid": job_uid,
-			"controller": True,
-			"blockOwnerDeletion": True,
-		}]
+		creds_secret_manifest["metadata"]["ownerReferences"] = [
+			{
+				"apiVersion": "batch/v1",
+				"kind": "Job",
+				"name": job_name,
+				"uid": job_uid,
+				"controller": True,
+				"blockOwnerDeletion": True,
+			}
+		]
 		apply_resource(api_client, creds_secret_manifest, namespace)
 	except Exception as owner_err:
 		frappe.logger("kubeport").warning(
@@ -729,9 +746,7 @@ def _run_site_op(
 			)
 
 		if not _site_operation_matches(site_docname, operation_token, config.expected_status):
-			_best_effort_delete_job(api_client, job_name, namespace)
-			if creds_secret_name:
-				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+			_cleanup_op_resources(api_client, namespace, job_name, creds_secret_name)
 			return
 
 		if record_job is None:
@@ -744,16 +759,16 @@ def _run_site_op(
 				docname=site_docname,
 			)
 		elif not record_job(doc, release, job_name, operation_token, namespace):
-			_best_effort_delete_job(api_client, job_name, namespace)
-			if creds_secret_name:
-				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+			_cleanup_op_resources(api_client, namespace, job_name, creds_secret_name)
 
 	except Exception as e:
 		if api_client is not None and namespace:
-			if job_applied and job_name_for_cleanup:
-				_best_effort_delete_job(api_client, job_name_for_cleanup, namespace)
-			if creds_secret_name:
-				_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+			_cleanup_op_resources(
+				api_client,
+				namespace,
+				job_name_for_cleanup if job_applied else None,
+				creds_secret_name,
+			)
 
 		if not _site_operation_matches(site_docname, operation_token, config.expected_status):
 			return
@@ -779,6 +794,7 @@ def _run_site_op(
 # ---------------------------------------------------------------------------
 # Job manifest builders
 # ---------------------------------------------------------------------------
+
 
 def _build_op_job_manifest(
 	job_name: str,
@@ -885,15 +901,17 @@ def _bench_drop_site_command(site_name: str) -> str:
 	with no way to retrieve it).  ``--force`` skips the interactive confirm
 	since this Job runs non-interactively.
 	"""
-	return " ".join([
-		"bench",
-		"drop-site",
-		'"$SITE_NAME"',
-		'--root-login="$DB_ROOT_USER"',
-		'--root-password="$DB_ROOT_PASSWORD"',
-		"--no-backup",
-		"--force",
-	])
+	return " ".join(
+		[
+			"bench",
+			"drop-site",
+			'"$SITE_NAME"',
+			'--root-login="$DB_ROOT_USER"',
+			'--root-password="$DB_ROOT_PASSWORD"',
+			"--no-backup",
+			"--force",
+		]
+	)
 
 
 def _bench_migrate_command(site_name: str) -> str:
@@ -940,25 +958,29 @@ def _build_env(
 	]
 
 	if db_root_in_creds:
-		env.append({
-			"name": "DB_ROOT_PASSWORD",
-			"valueFrom": {
-				"secretKeyRef": {
-					"name": creds_secret_name,
-					"key": "DB_ROOT_PASSWORD",
-				}
-			},
-		})
+		env.append(
+			{
+				"name": "DB_ROOT_PASSWORD",
+				"valueFrom": {
+					"secretKeyRef": {
+						"name": creds_secret_name,
+						"key": "DB_ROOT_PASSWORD",
+					}
+				},
+			}
+		)
 	else:
-		env.append({
-			"name": "DB_ROOT_PASSWORD",
-			"valueFrom": {
-				"secretKeyRef": {
-					"name": db_root_secret,
-					"key": db_root_secret_key,
-				}
-			},
-		})
+		env.append(
+			{
+				"name": "DB_ROOT_PASSWORD",
+				"valueFrom": {
+					"secretKeyRef": {
+						"name": db_root_secret,
+						"key": db_root_secret_key,
+					}
+				},
+			}
+		)
 
 	return env
 
@@ -989,25 +1011,29 @@ def _build_drop_env(
 	if db_root_in_creds:
 		if not creds_secret_name:
 			raise ValueError("creds_secret_name is required when db_root_in_creds is True.")
-		env.append({
-			"name": "DB_ROOT_PASSWORD",
-			"valueFrom": {
-				"secretKeyRef": {
-					"name": creds_secret_name,
-					"key": "DB_ROOT_PASSWORD",
-				}
-			},
-		})
+		env.append(
+			{
+				"name": "DB_ROOT_PASSWORD",
+				"valueFrom": {
+					"secretKeyRef": {
+						"name": creds_secret_name,
+						"key": "DB_ROOT_PASSWORD",
+					}
+				},
+			}
+		)
 	else:
-		env.append({
-			"name": "DB_ROOT_PASSWORD",
-			"valueFrom": {
-				"secretKeyRef": {
-					"name": db_root_secret,
-					"key": db_root_secret_key,
-				}
-			},
-		})
+		env.append(
+			{
+				"name": "DB_ROOT_PASSWORD",
+				"valueFrom": {
+					"secretKeyRef": {
+						"name": db_root_secret,
+						"key": db_root_secret_key,
+					}
+				},
+			}
+		)
 
 	return env
 
@@ -1148,6 +1174,24 @@ def _best_effort_delete_job(
 		)
 
 
+def _cleanup_op_resources(
+	api_client: "client.ApiClient",
+	namespace: str,
+	job_name: str | None,
+	creds_secret_name: str | None,
+) -> None:
+	"""Best-effort rollback of resources created by a single ``_run_site_op`` attempt.
+
+	Called when the operation must be undone after the Job/Secret have been
+	applied but before the doc has committed to them — stale-token rollback,
+	rejected ``record_job`` callback, or unexpected failure mid-flight.
+	"""
+	if job_name:
+		_best_effort_delete_job(api_client, job_name, namespace)
+	if creds_secret_name:
+		_best_effort_delete_secret(api_client, creds_secret_name, namespace)
+
+
 # ---------------------------------------------------------------------------
 # Pod inspection helpers
 # ---------------------------------------------------------------------------
@@ -1198,8 +1242,7 @@ def _clone_reference_pod_spec(
 	volume_mounts = _sanitize_list(api_client, ref_container.volume_mounts)
 	referenced_vol_names = {vm.get("name") for vm in volume_mounts if vm.get("name")}
 	volumes = [
-		vol for vol in _sanitize_list(api_client, spec.volumes)
-		if vol.get("name") in referenced_vol_names
+		vol for vol in _sanitize_list(api_client, spec.volumes) if vol.get("name") in referenced_vol_names
 	]
 
 	pod_level: dict[str, Any] = {}
@@ -1219,11 +1262,13 @@ def _clone_reference_pod_spec(
 		"container_env_from": _sanitize_list(api_client, ref_container.env_from),
 		"container_resources": (
 			api_client.sanitize_for_serialization(ref_container.resources)
-			if ref_container.resources else None
+			if ref_container.resources
+			else None
 		),
 		"container_security_context": (
 			api_client.sanitize_for_serialization(ref_container.security_context)
-			if ref_container.security_context else None
+			if ref_container.security_context
+			else None
 		),
 		"volume_mounts": volume_mounts,
 		"volumes": volumes,
@@ -1231,8 +1276,8 @@ def _clone_reference_pod_spec(
 
 
 def _pick_sites_container(spec: client.V1PodSpec) -> client.V1Container:
-	for container in (spec.containers or []):
-		for vm in (container.volume_mounts or []):
+	for container in spec.containers or []:
+		for vm in container.volume_mounts or []:
 			if vm.mount_path == FRAPPE_BENCH_SITES_PATH:
 				return container
 	raise RuntimeError(
@@ -1259,6 +1304,7 @@ def _to_camel_case(snake: str) -> str:
 # ---------------------------------------------------------------------------
 # Naming and parsing helpers
 # ---------------------------------------------------------------------------
+
 
 def _job_name(site_name: str, token: str) -> str:
 	"""Build a K8s-safe Job name from the site name and operation token.
@@ -1306,6 +1352,7 @@ def _truncate(detail: str) -> str:
 # ---------------------------------------------------------------------------
 # Concurrency guard
 # ---------------------------------------------------------------------------
+
 
 def _site_operation_matches(
 	site_docname: str,
@@ -1362,13 +1409,17 @@ def _backup_operation_matches(
 def _fail_backup_row(backup_docname: str, operation_token: str, detail: str) -> bool:
 	if not _backup_operation_matches(backup_docname, operation_token, ("Pending", "In Progress")):
 		return False
-	frappe.db.set_value("Frappe Site Backup", backup_docname, {
-		"status": "Failed",
-		"status_detail": _truncate(detail),
-		"completed_at": frappe.utils.now_datetime(),
-		"operation_job_name": "",
-		"operation_job_token": "",
-	})
+	frappe.db.set_value(
+		"Frappe Site Backup",
+		backup_docname,
+		{
+			"status": "Failed",
+			"status_detail": _truncate(detail),
+			"completed_at": frappe.utils.now_datetime(),
+			"operation_job_name": "",
+			"operation_job_token": "",
+		},
+	)
 	frappe.publish_realtime(
 		"frappe_site_backup_status_update",
 		{"backup_docname": backup_docname, "status": "Failed"},
@@ -1392,12 +1443,16 @@ def _fail_restore_submission(
 ) -> None:
 	detail = _truncate(_restore_failure_detail(detail))
 	if _site_operation_matches(site_docname, operation_token, "Migrating"):
-		frappe.db.set_value("Frappe Site", site_docname, {
-			"status": "Failed",
-			"status_detail": detail,
-			"operation_job_name": "",
-			"operation_job_token": "",
-		})
+		frappe.db.set_value(
+			"Frappe Site",
+			site_docname,
+			{
+				"status": "Failed",
+				"status_detail": detail,
+				"operation_job_name": "",
+				"operation_job_token": "",
+			},
+		)
 		frappe.publish_realtime(
 			"frappe_site_status_update",
 			{"site_docname": site_docname, "status": "Failed"},
@@ -1405,12 +1460,16 @@ def _fail_restore_submission(
 			docname=site_docname,
 		)
 	if _backup_operation_matches(backup_docname, operation_token, ("Restoring",)):
-		frappe.db.set_value("Frappe Site Backup", backup_docname, {
-			"status": "Available",
-			"status_detail": detail,
-			"operation_job_name": "",
-			"operation_job_token": "",
-		})
+		frappe.db.set_value(
+			"Frappe Site Backup",
+			backup_docname,
+			{
+				"status": "Available",
+				"status_detail": detail,
+				"operation_job_name": "",
+				"operation_job_token": "",
+			},
+		)
 	frappe.publish_realtime(
 		"frappe_site_backup_status_update",
 		{"site_docname": site_docname, "backup_docname": backup_docname, "status": "Available"},

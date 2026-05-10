@@ -8,22 +8,24 @@ from frappe.tests import UnitTestCase
 
 from kubeport.api.discovery import adopt_helm_release, get_cluster_discovery
 from kubeport.utils.discovery import (
-	_parse_site_names,
 	_normalize_release_row,
+	_parse_site_names,
 	discover_release_sites,
 )
 
 
 class UnitTestClusterDiscoveryUtils(UnitTestCase):
 	def test_normalize_release_marks_official_frappe_chart(self):
-		release = _normalize_release_row({
-			"name": "bench-prod",
-			"namespace": "erp",
-			"status": "deployed",
-			"chart": "erpnext-8.1.0",
-			"app_version": "16.10.1",
-			"updated": "2026-04-10 10:00:00 +0000 UTC",
-		})
+		release = _normalize_release_row(
+			{
+				"name": "bench-prod",
+				"namespace": "erp",
+				"status": "deployed",
+				"chart": "erpnext-8.1.0",
+				"app_version": "16.10.1",
+				"updated": "2026-04-10 10:00:00 +0000 UTC",
+			}
+		)
 
 		self.assertEqual(release["release_name"], "bench-prod")
 		self.assertEqual(release["chart_name"], "erpnext")
@@ -31,22 +33,27 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 		self.assertTrue(release["is_frappe_bench"])
 
 	def test_parse_site_names_filters_assets_and_duplicates(self):
-		sites = _parse_site_names([
-			"site1.local",
-			"assets",
-			"",
-			"site2.local",
-			"site1.local",
-		])
+		sites = _parse_site_names(
+			[
+				"site1.local",
+				"assets",
+				"",
+				"site2.local",
+				"site1.local",
+			]
+		)
 
 		self.assertEqual(sites, ["site1.local", "site2.local"])
 
 	def test_discover_release_sites_skips_non_frappe_release(self):
-		sites = discover_release_sites(object(), {
-			"release_name": "redis",
-			"namespace": "infra",
-			"is_frappe_bench": False,
-		})
+		sites = discover_release_sites(
+			object(),
+			{
+				"release_name": "redis",
+				"namespace": "infra",
+				"is_frappe_bench": False,
+			},
+		)
 
 		self.assertEqual(sites, [])
 
@@ -56,25 +63,30 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 		mock_core_v1_api,
 	):
 		core_v1 = mock_core_v1_api.return_value
-		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
-			SimpleNamespace(
-				metadata=SimpleNamespace(name="bench-a-erpnext-mariadb-sts-0", labels={}),
-				status=SimpleNamespace(phase="Running", container_statuses=[]),
-				spec=SimpleNamespace(containers=[SimpleNamespace(name="mariadb")]),
-			),
-			SimpleNamespace(
-				metadata=SimpleNamespace(name="bench-a-valkey-cache-123", labels={}),
-				status=SimpleNamespace(phase="Running", container_statuses=[]),
-				spec=SimpleNamespace(containers=[SimpleNamespace(name="valkey")]),
-			),
-		])
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="bench-a-erpnext-mariadb-sts-0", labels={}),
+					status=SimpleNamespace(phase="Running", container_statuses=[]),
+					spec=SimpleNamespace(containers=[SimpleNamespace(name="mariadb")]),
+				),
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="bench-a-valkey-cache-123", labels={}),
+					status=SimpleNamespace(phase="Running", container_statuses=[]),
+					spec=SimpleNamespace(containers=[SimpleNamespace(name="valkey")]),
+				),
+			]
+		)
 
 		with self.assertRaisesRegex(RuntimeError, "Only non-Frappe pods found"):
-			discover_release_sites(object(), {
-				"release_name": "bench-a",
-				"namespace": "erp",
-				"is_frappe_bench": True,
-			})
+			discover_release_sites(
+				object(),
+				{
+					"release_name": "bench-a",
+					"namespace": "erp",
+					"is_frappe_bench": True,
+				},
+			)
 
 	@patch("kubeport.utils.discovery.stream")
 	@patch("kubeport.utils.discovery.client.CoreV1Api")
@@ -87,29 +99,34 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 		core_v1.connect_get_namespaced_pod_exec = object()
 		core_v1.list_namespaced_pod.side_effect = [
 			SimpleNamespace(items=[]),
-			SimpleNamespace(items=[
-				SimpleNamespace(
-					metadata=SimpleNamespace(name="bench-a-erpnext-gunicorn-123", labels={}),
-					status=SimpleNamespace(
-						phase="Running",
-						container_statuses=[SimpleNamespace(ready=True)],
+			SimpleNamespace(
+				items=[
+					SimpleNamespace(
+						metadata=SimpleNamespace(name="bench-a-erpnext-gunicorn-123", labels={}),
+						status=SimpleNamespace(
+							phase="Running",
+							container_statuses=[SimpleNamespace(ready=True)],
+						),
+						spec=SimpleNamespace(containers=[SimpleNamespace(name="web")]),
 					),
-					spec=SimpleNamespace(containers=[SimpleNamespace(name="web")]),
-				),
-				SimpleNamespace(
-					metadata=SimpleNamespace(name="other-release-nginx-123", labels={}),
-					status=SimpleNamespace(phase="Running", container_statuses=[]),
-					spec=SimpleNamespace(containers=[SimpleNamespace(name="nginx")]),
-				),
-			]),
+					SimpleNamespace(
+						metadata=SimpleNamespace(name="other-release-nginx-123", labels={}),
+						status=SimpleNamespace(phase="Running", container_statuses=[]),
+						spec=SimpleNamespace(containers=[SimpleNamespace(name="nginx")]),
+					),
+				]
+			),
 		]
 		mock_stream.return_value = "site-one.local"
 
-		sites = discover_release_sites(object(), {
-			"release_name": "bench-a",
-			"namespace": "erp",
-			"is_frappe_bench": True,
-		})
+		sites = discover_release_sites(
+			object(),
+			{
+				"release_name": "bench-a",
+				"namespace": "erp",
+				"is_frappe_bench": True,
+			},
+		)
 
 		self.assertEqual([site["site_name"] for site in sites], ["site-one.local"])
 		self.assertEqual(core_v1.list_namespaced_pod.call_count, 2)
@@ -125,25 +142,30 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 		mock_core_v1_api,
 	):
 		core_v1 = mock_core_v1_api.return_value
-		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[
-			SimpleNamespace(
-				metadata=SimpleNamespace(name="bench-a-erpnext-gunicorn-123", labels={}),
-				status=SimpleNamespace(phase="Pending", container_statuses=[]),
-				spec=SimpleNamespace(containers=[SimpleNamespace(name="web")]),
-			),
-			SimpleNamespace(
-				metadata=SimpleNamespace(name="bench-a-erpnext-nginx-123", labels={}),
-				status=SimpleNamespace(phase="Pending", container_statuses=[]),
-				spec=SimpleNamespace(containers=[SimpleNamespace(name="nginx")]),
-			),
-		])
+		core_v1.list_namespaced_pod.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="bench-a-erpnext-gunicorn-123", labels={}),
+					status=SimpleNamespace(phase="Pending", container_statuses=[]),
+					spec=SimpleNamespace(containers=[SimpleNamespace(name="web")]),
+				),
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="bench-a-erpnext-nginx-123", labels={}),
+					status=SimpleNamespace(phase="Pending", container_statuses=[]),
+					spec=SimpleNamespace(containers=[SimpleNamespace(name="nginx")]),
+				),
+			]
+		)
 
 		with self.assertRaisesRegex(RuntimeError, "none are running"):
-			discover_release_sites(object(), {
-				"release_name": "bench-a",
-				"namespace": "erp",
-				"is_frappe_bench": True,
-			})
+			discover_release_sites(
+				object(),
+				{
+					"release_name": "bench-a",
+					"namespace": "erp",
+					"is_frappe_bench": True,
+				},
+			)
 
 	@patch("kubeport.utils.discovery.stream")
 	@patch("kubeport.utils.discovery.client.CoreV1Api")
@@ -168,11 +190,14 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 		core_v1.list_namespaced_pod.return_value = SimpleNamespace(items=[pod])
 		mock_stream.return_value = "\n".join(["site-one.local", "assets", "site-two.local"])
 
-		sites = discover_release_sites(object(), {
-			"release_name": "bench-a",
-			"namespace": "erp",
-			"is_frappe_bench": True,
-		})
+		sites = discover_release_sites(
+			object(),
+			{
+				"release_name": "bench-a",
+				"namespace": "erp",
+				"is_frappe_bench": True,
+			},
+		)
 
 		self.assertEqual(
 			[site["site_name"] for site in sites],
@@ -210,13 +235,15 @@ class UnitTestClusterDiscoveryAPI(UnitTestCase):
 		]
 		mock_get_k8s_api_client.return_value = object()
 		mock_discover_release_sites.side_effect = [
-			[{
-				"site_name": "site1.local",
-				"bench_release": "bench-a",
-				"namespace": "erp",
-				"source": "pod_exec",
-				"pod_name": "bench-a-gunicorn-123",
-			}],
+			[
+				{
+					"site_name": "site1.local",
+					"bench_release": "bench-a",
+					"namespace": "erp",
+					"source": "pod_exec",
+					"pod_name": "bench-a-gunicorn-123",
+				}
+			],
 			RuntimeError("pods/exec forbidden"),
 		]
 
@@ -263,13 +290,15 @@ class UnitTestClusterDiscoveryAPI(UnitTestCase):
 		_mock_walk,
 		mock_set_value,
 	):
-		mock_discover_cluster_releases.return_value = [{
-			"release_name": "bench-a",
-			"namespace": "erp",
-			"chart_name": "erpnext",
-			"chart_version": "8.0.41",
-			"status": "deployed",
-		}]
+		mock_discover_cluster_releases.return_value = [
+			{
+				"release_name": "bench-a",
+				"namespace": "erp",
+				"chart_name": "erpnext",
+				"chart_version": "8.0.41",
+				"status": "deployed",
+			}
+		]
 		mock_get_all.return_value = [SimpleNamespace(name="repo/erpnext")]
 		doc = SimpleNamespace(
 			name="cluster-a/erp/bench-a",

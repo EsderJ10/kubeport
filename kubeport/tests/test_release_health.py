@@ -9,7 +9,7 @@ from kubernetes.client.rest import ApiException
 
 from kubeport.utils.release_health import (
 	ResourceHealth,
-	classify_release_state,
+	_attach_warning_events,
 	_check_daemon_set,
 	_check_deployment,
 	_check_ingress,
@@ -18,7 +18,7 @@ from kubeport.utils.release_health import (
 	_check_pvc,
 	_check_service,
 	_check_stateful_set,
-	_attach_warning_events,
+	classify_release_state,
 	summarize,
 	walk,
 )
@@ -73,7 +73,8 @@ class UnitTestReleaseHealth(UnitTestCase):
 				updated_replicas=0,
 				conditions=[
 					_condition(
-						"Available", "False",
+						"Available",
+						"False",
 						reason="MinimumReplicasUnavailable",
 						message="Deployment does not have minimum availability.",
 					),
@@ -220,7 +221,9 @@ class UnitTestReleaseHealth(UnitTestCase):
 			metadata=SimpleNamespace(name="install-app"),
 			status=SimpleNamespace(
 				conditions=[_condition("Complete", "True")],
-				active=0, succeeded=1, failed=0,
+				active=0,
+				succeeded=1,
+				failed=0,
 			),
 		)
 		health = _check_job(obj, "tfg")
@@ -231,8 +234,12 @@ class UnitTestReleaseHealth(UnitTestCase):
 		obj = SimpleNamespace(
 			metadata=SimpleNamespace(name="install-app"),
 			status=SimpleNamespace(
-				conditions=[_condition("Failed", "True", reason="BackoffLimitExceeded", message="too many retries")],
-				active=0, succeeded=0, failed=4,
+				conditions=[
+					_condition("Failed", "True", reason="BackoffLimitExceeded", message="too many retries")
+				],
+				active=0,
+				succeeded=0,
+				failed=4,
 			),
 		)
 		health = _check_job(obj, "tfg")
@@ -244,7 +251,9 @@ class UnitTestReleaseHealth(UnitTestCase):
 			metadata=SimpleNamespace(name="install-app"),
 			status=SimpleNamespace(
 				conditions=[],
-				active=1, succeeded=0, failed=0,
+				active=1,
+				succeeded=0,
+				failed=0,
 			),
 		)
 		health = _check_job(obj, "tfg")
@@ -304,9 +313,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		obj = SimpleNamespace(
 			metadata=SimpleNamespace(name="frappe"),
 			status=SimpleNamespace(
-				load_balancer=SimpleNamespace(
-					ingress=[SimpleNamespace(hostname="frappe.example.com")]
-				)
+				load_balancer=SimpleNamespace(ingress=[SimpleNamespace(hostname="frappe.example.com")])
 			),
 		)
 		health = _check_ingress(obj, "tfg")
@@ -314,14 +321,16 @@ class UnitTestReleaseHealth(UnitTestCase):
 
 	def test_attach_warning_events_appends_recent_warning_summary(self):
 		core_v1 = SimpleNamespace(
-			list_namespaced_event=lambda **kwargs: SimpleNamespace(items=[
-				SimpleNamespace(
-					type="Warning",
-					reason="FailedScheduling",
-					message="0/1 nodes available",
-					last_timestamp="2026-04-12T10:00:00Z",
-				),
-			]),
+			list_namespaced_event=lambda **kwargs: SimpleNamespace(
+				items=[
+					SimpleNamespace(
+						type="Warning",
+						reason="FailedScheduling",
+						message="0/1 nodes available",
+						last_timestamp="2026-04-12T10:00:00Z",
+					),
+				]
+			),
 		)
 		health = ResourceHealth("Pod", "worker-1", "tfg", False, "Pending", "phase=Pending")
 
@@ -444,7 +453,9 @@ class UnitTestReleaseHealth(UnitTestCase):
 				conditions=[],
 			),
 		)
-		mock_core_api.return_value.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+		mock_core_api.return_value.read_namespaced_pod.side_effect = ApiException(
+			status=404, reason="Not Found"
+		)
 
 		results = walk("cluster-a/tfg/bench-a")
 

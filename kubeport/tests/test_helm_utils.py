@@ -3,10 +3,10 @@
 
 import base64
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import yaml
 from frappe.tests import UnitTestCase
-from unittest.mock import patch
 
 from kubeport.utils.helm import _build_kubeconfig_from_token
 

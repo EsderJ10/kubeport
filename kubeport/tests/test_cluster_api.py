@@ -13,7 +13,6 @@ from kubeport.api import (
 	parse_kubeconfig_contexts,
 )
 
-
 _LOCAL_ONLY_KUBECONFIG = """
 apiVersion: v1
 kind: Config
@@ -62,10 +61,12 @@ class UnitTestClusterAPI(UnitTestCase):
 		mock_core_v1_api,
 	):
 		mock_get_k8s_api_client.return_value = object()
-		mock_core_v1_api.return_value.list_namespace.return_value = SimpleNamespace(items=[
-			SimpleNamespace(metadata=SimpleNamespace(name="zeta")),
-			SimpleNamespace(metadata=SimpleNamespace(name="alpha")),
-		])
+		mock_core_v1_api.return_value.list_namespace.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(metadata=SimpleNamespace(name="zeta")),
+				SimpleNamespace(metadata=SimpleNamespace(name="alpha")),
+			]
+		)
 
 		result = get_cluster_namespaces("cluster-a")
 

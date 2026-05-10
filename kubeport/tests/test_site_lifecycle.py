@@ -46,10 +46,12 @@ def _mock_frappe_site_doc(
 	doc.operation_job_name = ""
 	doc.operation_job_token = ""
 	doc.operation_token = ""
-	doc.get_password = MagicMock(side_effect=lambda field: {
-		"admin_password": "admin-pw",
-		"db_root_password": "root-pw",
-	}.get(field, ""))
+	doc.get_password = MagicMock(
+		side_effect=lambda field: {
+			"admin_password": "admin-pw",
+			"db_root_password": "root-pw",
+		}.get(field, "")
+	)
 	doc.db_set = MagicMock()
 	for k, v in overrides.items():
 		setattr(doc, k, v)
@@ -128,13 +130,15 @@ class TestCreateToActive(UnitTestCase):
 		def _apply(_api, manifest, _ns):
 			applied_kinds.append(manifest["kind"])
 
-		with patch.object(site_tasks, "_site_operation_matches", return_value=True), \
-			patch.object(site_tasks, "frappe") as mock_frappe, \
-			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client, \
-			patch.object(site_tasks, "_select_site_discovery_pod"), \
-			patch.object(site_tasks, "_clone_reference_pod_spec", return_value=_mock_ref_spec()), \
-			patch.object(site_tasks, "apply_resource", side_effect=_apply), \
-			patch.object(site_tasks, "client") as mock_client:
+		with (
+			patch.object(site_tasks, "_site_operation_matches", return_value=True),
+			patch.object(site_tasks, "frappe") as mock_frappe,
+			patch.object(site_tasks, "get_k8s_api_client") as mock_get_client,
+			patch.object(site_tasks, "_select_site_discovery_pod"),
+			patch.object(site_tasks, "_clone_reference_pod_spec", return_value=_mock_ref_spec()),
+			patch.object(site_tasks, "apply_resource", side_effect=_apply),
+			patch.object(site_tasks, "client") as mock_client,
+		):
 			mock_frappe.get_doc.side_effect = lambda dt, name: doc if dt == "Frappe Site" else release
 			mock_get_client.return_value = MagicMock()
 			batch_api = MagicMock()
@@ -160,10 +164,12 @@ class TestCreateToActive(UnitTestCase):
 			operation_job_token="tok-aaa",
 		)
 
-		with patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val, \
-			patch("kubeport.tasks.reconciliation.frappe.db.set_value") as mock_set_val, \
-			patch("kubeport.tasks.reconciliation.frappe.publish_realtime"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val,
+			patch("kubeport.tasks.reconciliation.frappe.db.set_value") as mock_set_val,
+			patch("kubeport.tasks.reconciliation.frappe.publish_realtime"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			mock_get_val.return_value = {"operation_token": "tok-aaa", "status": "In Progress"}
 
 			batch_v1 = MagicMock()
@@ -173,7 +179,8 @@ class TestCreateToActive(UnitTestCase):
 			_reconcile_site_create(site_row, batch_v1, core_v1)
 
 		mock_set_val.assert_any_call(
-			"Frappe Site", "release-a/demo.example.com",
+			"Frappe Site",
+			"release-a/demo.example.com",
 			{"status": "Active", "status_detail": ""},
 		)
 
@@ -198,15 +205,23 @@ class TestCreateCancelMidFlight(UnitTestCase):
 		deleted_jobs: list[str] = []
 		deleted_secrets: list[str] = []
 
-		with patch.object(site_tasks, "_site_operation_matches", side_effect=lambda *a, **kw: next(match_seq)), \
-			patch.object(site_tasks, "frappe") as mock_frappe, \
-			patch.object(site_tasks, "get_k8s_api_client"), \
-			patch.object(site_tasks, "_select_site_discovery_pod"), \
-			patch.object(site_tasks, "_clone_reference_pod_spec", return_value=_mock_ref_spec()), \
-			patch.object(site_tasks, "apply_resource"), \
-			patch.object(site_tasks, "_best_effort_delete_job", side_effect=lambda _a, n, _ns: deleted_jobs.append(n)), \
-			patch.object(site_tasks, "_best_effort_delete_secret", side_effect=lambda _a, n, _ns: deleted_secrets.append(n)), \
-			patch.object(site_tasks, "client") as mock_client:
+		with (
+			patch.object(site_tasks, "_site_operation_matches", side_effect=lambda *a, **kw: next(match_seq)),
+			patch.object(site_tasks, "frappe") as mock_frappe,
+			patch.object(site_tasks, "get_k8s_api_client"),
+			patch.object(site_tasks, "_select_site_discovery_pod"),
+			patch.object(site_tasks, "_clone_reference_pod_spec", return_value=_mock_ref_spec()),
+			patch.object(site_tasks, "apply_resource"),
+			patch.object(
+				site_tasks, "_best_effort_delete_job", side_effect=lambda _a, n, _ns: deleted_jobs.append(n)
+			),
+			patch.object(
+				site_tasks,
+				"_best_effort_delete_secret",
+				side_effect=lambda _a, n, _ns: deleted_secrets.append(n),
+			),
+			patch.object(site_tasks, "client") as mock_client,
+		):
 			mock_frappe.get_doc.side_effect = lambda dt, name: doc if dt == "Frappe Site" else release
 			batch_api = MagicMock()
 			batch_api.read_namespaced_job.return_value = SimpleNamespace(
@@ -243,13 +258,15 @@ class TestCreateFailDeleteRowRemoved(UnitTestCase):
 		site = _reconcile_site_row()
 
 		# Phase 1: reconcile creation failure
-		with patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val, \
-			patch("kubeport.tasks.reconciliation.frappe.db.set_value") as mock_set_val, \
-			patch("kubeport.tasks.reconciliation.frappe.publish_realtime"), \
-			patch("kubeport.tasks.reconciliation.frappe.log_error"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True), \
-			patch("kubeport.tasks.reconciliation._probe_site_state", return_value="missing"), \
-			patch("kubeport.tasks.reconciliation._extract_job_failure_detail", return_value="DB error"):
+		with (
+			patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val,
+			patch("kubeport.tasks.reconciliation.frappe.db.set_value") as mock_set_val,
+			patch("kubeport.tasks.reconciliation.frappe.publish_realtime"),
+			patch("kubeport.tasks.reconciliation.frappe.log_error"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+			patch("kubeport.tasks.reconciliation._probe_site_state", return_value="missing"),
+			patch("kubeport.tasks.reconciliation._extract_job_failure_detail", return_value="DB error"),
+		):
 			mock_get_val.return_value = {"operation_token": "tok-aaa", "status": "In Progress"}
 
 			batch_v1 = MagicMock()
@@ -259,7 +276,8 @@ class TestCreateFailDeleteRowRemoved(UnitTestCase):
 			_reconcile_site_create(site, batch_v1, core_v1)
 
 		mock_set_val.assert_any_call(
-			"Frappe Site", site.name,
+			"Frappe Site",
+			site.name,
 			{"status": "Failed", "status_detail": "DB error"},
 		)
 
@@ -269,12 +287,14 @@ class TestCreateFailDeleteRowRemoved(UnitTestCase):
 			operation_job_token="tok-bbb",
 		)
 
-		with patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val, \
-			patch("kubeport.tasks.reconciliation.frappe.db.set_value"), \
-			patch("kubeport.tasks.reconciliation.frappe.publish_realtime"), \
-			patch("kubeport.tasks.reconciliation.frappe.delete_doc") as mock_delete_doc, \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True), \
-			patch("kubeport.tasks.reconciliation._probe_site_state", return_value="missing"):
+		with (
+			patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val,
+			patch("kubeport.tasks.reconciliation.frappe.db.set_value"),
+			patch("kubeport.tasks.reconciliation.frappe.publish_realtime"),
+			patch("kubeport.tasks.reconciliation.frappe.delete_doc") as mock_delete_doc,
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+			patch("kubeport.tasks.reconciliation._probe_site_state", return_value="missing"),
+		):
 			mock_get_val.return_value = {"operation_token": "tok-bbb", "status": "Deleting"}
 
 			batch_v1 = MagicMock()
@@ -306,11 +326,13 @@ class TestMigrateFailRecoverActive(UnitTestCase):
 
 		site = _reconcile_site_row(status="Migrating")
 
-		with patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val, \
-			patch("kubeport.tasks.reconciliation.frappe.db.set_value") as mock_set_val, \
-			patch("kubeport.tasks.reconciliation.frappe.publish_realtime"), \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True), \
-			patch("kubeport.tasks.reconciliation._probe_site_state", return_value="exists"):
+		with (
+			patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val,
+			patch("kubeport.tasks.reconciliation.frappe.db.set_value") as mock_set_val,
+			patch("kubeport.tasks.reconciliation.frappe.publish_realtime"),
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+			patch("kubeport.tasks.reconciliation._probe_site_state", return_value="exists"),
+		):
 			mock_get_val.return_value = {"operation_token": "tok-aaa", "status": "Migrating"}
 
 			batch_v1 = MagicMock()
@@ -320,7 +342,8 @@ class TestMigrateFailRecoverActive(UnitTestCase):
 			_reconcile_site_migrate(site, batch_v1, core_v1)
 
 		mock_set_val.assert_any_call(
-			"Frappe Site", site.name,
+			"Frappe Site",
+			site.name,
 			{"status": "Active", "status_detail": ""},
 		)
 
@@ -337,9 +360,11 @@ class TestConcurrentSupersession(UnitTestCase):
 	def test_stale_worker_exits_without_side_effects(self):
 		from kubeport.tasks import site_tasks
 
-		with patch.object(site_tasks, "_site_operation_matches", return_value=False), \
-			patch.object(site_tasks, "frappe") as mock_frappe, \
-			patch.object(site_tasks, "get_k8s_api_client") as mock_k8s:
+		with (
+			patch.object(site_tasks, "_site_operation_matches", return_value=False),
+			patch.object(site_tasks, "frappe") as mock_frappe,
+			patch.object(site_tasks, "get_k8s_api_client") as mock_k8s,
+		):
 			site_tasks.create_site_task("release-a/demo.example.com", "stale-token")
 
 		# Must not attempt any K8s or doc interaction
@@ -353,10 +378,12 @@ class TestConcurrentSupersession(UnitTestCase):
 
 		site = _reconcile_site_row(operation_job_token="old-token")
 
-		with patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val, \
-			patch("kubeport.tasks.reconciliation.frappe.db.set_value") as mock_set_val, \
-			patch("kubeport.tasks.reconciliation.frappe.publish_realtime") as mock_publish, \
-			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True):
+		with (
+			patch("kubeport.tasks.reconciliation.frappe.db.get_value") as mock_get_val,
+			patch("kubeport.tasks.reconciliation.frappe.db.set_value") as mock_set_val,
+			patch("kubeport.tasks.reconciliation.frappe.publish_realtime") as mock_publish,
+			patch("kubeport.tasks.reconciliation._job_belongs_to_site", return_value=True),
+		):
 			# The doc now has a fresh token from a new operation
 			mock_get_val.return_value = {"operation_token": "fresh-token", "status": "In Progress"}
 

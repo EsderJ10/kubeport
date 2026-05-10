@@ -20,7 +20,9 @@ class UnitTestServiceBundle(UnitTestCase):
 
 		self.assertIn("Invalid manifest content", mock_throw.call_args.args[0])
 
-	@patch("kubeport.kubeport.doctype.service_bundle.service_bundle.secrets.token_hex", return_value="op-token")
+	@patch(
+		"kubeport.kubeport.doctype.service_bundle.service_bundle.secrets.token_hex", return_value="op-token"
+	)
 	@patch("kubeport.kubeport.doctype.service_bundle.service_bundle.frappe.msgprint")
 	@patch("kubeport.kubeport.doctype.service_bundle.service_bundle.frappe.enqueue")
 	def test_apply_bundle_enqueues_service_bundle_task(

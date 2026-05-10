@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 from frappe.tests import UnitTestCase
@@ -38,7 +38,7 @@ class UnitTestApiDashboard(UnitTestCase):
 			captured.append((doctype, dict(filters or {})))
 			return 0
 
-		fake_now = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
+		fake_now = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC)
 		with (
 			patch("kubeport.api.dashboard.frappe.db.count", side_effect=fake_count),
 			patch("kubeport.api.dashboard.frappe.utils.now_datetime", return_value=fake_now),
@@ -53,7 +53,7 @@ class UnitTestApiDashboard(UnitTestCase):
 		self.assertNotIn("operation_started_at", filters_by_doctype["Frappe Site"])
 
 		# Every query must require operation_token to be set.
-		for doctype, filters in captured:
+		for _doctype, filters in captured:
 			self.assertEqual(filters["operation_token"], ["is", "set"])
 
 	def test_count_stale_operations_threshold_matches_reconciliation_constant(self):
@@ -69,7 +69,7 @@ class UnitTestApiDashboard(UnitTestCase):
 					captured_cutoffs.append(value[1])
 			return 0
 
-		fake_now = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
+		fake_now = datetime(2026, 5, 9, 12, 0, 0, tzinfo=UTC)
 		with (
 			patch("kubeport.api.dashboard.frappe.db.count", side_effect=fake_count),
 			patch("kubeport.api.dashboard.frappe.utils.now_datetime", return_value=fake_now),

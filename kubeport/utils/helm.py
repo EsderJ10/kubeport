@@ -150,11 +150,16 @@ def install_or_upgrade(
 	"""
 	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 		cmd = [
-			"helm", "upgrade", "--install",
-			release_name, chart_ref,
-			"--namespace", namespace,
+			"helm",
+			"upgrade",
+			"--install",
+			release_name,
+			chart_ref,
+			"--namespace",
+			namespace,
 			"--create-namespace",
-			"--output", "json",
+			"--output",
+			"json",
 		]
 
 		if chart_version:
@@ -165,9 +170,7 @@ def install_or_upgrade(
 
 		# Write values to a temp file if provided
 		if values_yaml:
-			values_fd, values_path = tempfile.mkstemp(
-				suffix=".yaml", prefix="kubeport_values_"
-			)
+			values_fd, values_path = tempfile.mkstemp(suffix=".yaml", prefix="kubeport_values_")
 			try:
 				os.write(values_fd, values_yaml.encode("utf-8"))
 				os.close(values_fd)
@@ -193,8 +196,11 @@ def uninstall(
 	"""
 	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 		cmd = [
-			"helm", "uninstall", release_name,
-			"--namespace", namespace,
+			"helm",
+			"uninstall",
+			release_name,
+			"--namespace",
+			namespace,
 		]
 		if kubeconfig_path:
 			cmd.extend(["--kubeconfig", kubeconfig_path])
@@ -211,8 +217,12 @@ def rollback(
 	"""Roll back a Helm release to a previous revision and return fresh status."""
 	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 		cmd = [
-			"helm", "rollback", release_name, str(revision),
-			"--namespace", namespace,
+			"helm",
+			"rollback",
+			release_name,
+			str(revision),
+			"--namespace",
+			namespace,
 		]
 		if kubeconfig_path:
 			cmd.extend(["--kubeconfig", kubeconfig_path])
@@ -237,9 +247,13 @@ def status(
 	"""
 	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 		cmd = [
-			"helm", "status", release_name,
-			"--namespace", namespace,
-			"--output", "json",
+			"helm",
+			"status",
+			release_name,
+			"--namespace",
+			namespace,
+			"--output",
+			"json",
 		]
 		if kubeconfig_path:
 			cmd.extend(["--kubeconfig", kubeconfig_path])
@@ -260,9 +274,13 @@ def history(
 	"""
 	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 		cmd = [
-			"helm", "history", release_name,
-			"--namespace", namespace,
-			"--output", "json",
+			"helm",
+			"history",
+			release_name,
+			"--namespace",
+			namespace,
+			"--output",
+			"json",
 		]
 		if kubeconfig_path:
 			cmd.extend(["--kubeconfig", kubeconfig_path])
@@ -295,8 +313,12 @@ def get_manifest(
 	"""
 	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 		cmd = [
-			"helm", "get", "manifest", release_name,
-			"--namespace", namespace,
+			"helm",
+			"get",
+			"manifest",
+			release_name,
+			"--namespace",
+			namespace,
 		]
 		if kubeconfig_path:
 			cmd.extend(["--kubeconfig", kubeconfig_path])
@@ -323,9 +345,14 @@ def get_values(
 	"""Return the values stored on a Helm release as YAML."""
 	with _helm_kubeconfig(cluster_name) as kubeconfig_path:
 		cmd = [
-			"helm", "get", "values", release_name,
-			"--namespace", namespace,
-			"--output", "yaml",
+			"helm",
+			"get",
+			"values",
+			release_name,
+			"--namespace",
+			namespace,
+			"--output",
+			"yaml",
 		]
 		if all_values:
 			cmd.append("--all")
@@ -423,42 +450,46 @@ def _build_kubeconfig_from_token(cluster_doc) -> str:
 	"""
 	token = cluster_doc.get_password("bearer_token")
 	if not token:
-		frappe.throw(
-			f"Kubernetes Cluster '{cluster_doc.name}' has no bearer token configured."
-		)
+		frappe.throw(f"Kubernetes Cluster '{cluster_doc.name}' has no bearer token configured.")
 
 	kubeconfig: dict[str, Any] = {
 		"apiVersion": "v1",
 		"kind": "Config",
 		"current-context": "default",
-		"clusters": [{
-			"name": "default",
-			"cluster": {
-				"server": cluster_doc.api_server_url,
-			},
-		}],
-		"contexts": [{
-			"name": "default",
-			"context": {
-				"cluster": "default",
-				"user": "default",
-			},
-		}],
-		"users": [{
-			"name": "default",
-			"user": {
-				"token": token,
-			},
-		}],
+		"clusters": [
+			{
+				"name": "default",
+				"cluster": {
+					"server": cluster_doc.api_server_url,
+				},
+			}
+		],
+		"contexts": [
+			{
+				"name": "default",
+				"context": {
+					"cluster": "default",
+					"user": "default",
+				},
+			}
+		],
+		"users": [
+			{
+				"name": "default",
+				"user": {
+					"token": token,
+				},
+			}
+		],
 	}
 
 	# Keep Helm TLS behavior aligned with the Python Kubernetes client.
 	if cluster_doc.skip_tls_verify:
 		kubeconfig["clusters"][0]["cluster"]["insecure-skip-tls-verify"] = True
 	elif cluster_doc.ca_certificate:
-		kubeconfig["clusters"][0]["cluster"]["certificate-authority-data"] = (
-			base64.b64encode(cluster_doc.ca_certificate.encode("utf-8")).decode("ascii")
-		)
+		kubeconfig["clusters"][0]["cluster"]["certificate-authority-data"] = base64.b64encode(
+			cluster_doc.ca_certificate.encode("utf-8")
+		).decode("ascii")
 	else:
 		frappe.throw(
 			"Bearer Token authentication requires a CA certificate unless "
@@ -495,10 +526,7 @@ def _run_helm(cmd: list[str], timeout: int = _HELM_WORKER_TIMEOUT_SECONDS) -> st
 		)
 		return result.stdout
 	except FileNotFoundError:
-		frappe.throw(
-			"Helm CLI binary not found. Please install Helm 3: "
-			"https://helm.sh/docs/intro/install/"
-		)
+		frappe.throw("Helm CLI binary not found. Please install Helm 3: https://helm.sh/docs/intro/install/")
 	except subprocess.CalledProcessError as e:
 		error_msg = e.stderr.strip() if e.stderr else str(e)
 		frappe.throw(

@@ -14,10 +14,10 @@ Each task follows the pattern:
 6. Push a realtime event so the browser auto-reloads
 """
 
-from collections import defaultdict
 import fnmatch
 import re
 import secrets
+from collections import defaultdict
 
 import frappe
 import yaml
@@ -252,12 +252,14 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 				site_image=release.get("site_image"),
 				site_image_digest=_get_site_image_digest_for_hash(release.get("site_image")),
 			)
-			fields.update({
-				"last_applied_chart_version": version,
-				"desired_spec_hash": spec_hash,
-				"last_applied_spec_hash": spec_hash,
-				"pending_changes": 0,
-			})
+			fields.update(
+				{
+					"last_applied_chart_version": version,
+					"desired_spec_hash": spec_hash,
+					"last_applied_spec_hash": spec_hash,
+					"pending_changes": 0,
+				}
+			)
 
 		_set_helm_release_fields(release_name, fields)
 
@@ -276,12 +278,15 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 		if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
 			return
 
-		_set_helm_release_fields(release_name, {
-			"status": "Failed",
-			"helm_status_detail": _truncate_status_detail(str(e)),
-			"operation_type": "",
-			"operation_started_at": None,
-		})
+		_set_helm_release_fields(
+			release_name,
+			{
+				"status": "Failed",
+				"helm_status_detail": _truncate_status_detail(str(e)),
+				"operation_type": "",
+				"operation_started_at": None,
+			},
+		)
 		frappe.log_error(
 			title=f"Helm Install/Upgrade Failed: {release_name}",
 			message=str(e),
@@ -350,11 +355,13 @@ def rollback_release(release_name: str, operation_token: str, target_revision: i
 		}
 
 		if doc_status in ("Deployed", "Degraded"):
-			values_yaml = _normalize_helm_values_output(helm.get_values(
-				release_name=release["release_name"],
-				namespace=namespace,
-				cluster_name=release["cluster"],
-			))
+			values_yaml = _normalize_helm_values_output(
+				helm.get_values(
+					release_name=release["release_name"],
+					namespace=namespace,
+					cluster_name=release["cluster"],
+				)
+			)
 			chart_version = _extract_chart_version_from_status(
 				status_result=result,
 				chart_doc=chart_doc,
@@ -367,14 +374,16 @@ def rollback_release(release_name: str, operation_token: str, target_revision: i
 				release_name=release["release_name"],
 				values_yaml=values_yaml,
 			)
-			fields.update({
-				"values": values_yaml,
-				"chart_version": chart_version,
-				"last_applied_chart_version": chart_version,
-				"desired_spec_hash": spec_hash,
-				"last_applied_spec_hash": spec_hash,
-				"pending_changes": 0,
-			})
+			fields.update(
+				{
+					"values": values_yaml,
+					"chart_version": chart_version,
+					"last_applied_chart_version": chart_version,
+					"desired_spec_hash": spec_hash,
+					"last_applied_spec_hash": spec_hash,
+					"pending_changes": 0,
+				}
+			)
 
 		_set_helm_release_fields(release_name, fields)
 
@@ -393,12 +402,15 @@ def rollback_release(release_name: str, operation_token: str, target_revision: i
 		if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
 			return
 
-		_set_helm_release_fields(release_name, {
-			"status": "Failed",
-			"helm_status_detail": _truncate_status_detail(str(e)),
-			"operation_type": "",
-			"operation_started_at": None,
-		})
+		_set_helm_release_fields(
+			release_name,
+			{
+				"status": "Failed",
+				"helm_status_detail": _truncate_status_detail(str(e)),
+				"operation_type": "",
+				"operation_started_at": None,
+			},
+		)
 		frappe.log_error(
 			title=f"Helm Rollback Failed: {release_name}",
 			message=str(e),
@@ -446,12 +458,15 @@ def uninstall_release(release_name: str, operation_token: str):
 			_finalize_uninstall_success(release_name, release["release_name"], operation_token)
 			return
 
-		_set_helm_release_fields(release_name, {
-			"status": "Failed",
-			"helm_status_detail": _truncate_status_detail(str(e)),
-			"operation_type": "",
-			"operation_started_at": None,
-		})
+		_set_helm_release_fields(
+			release_name,
+			{
+				"status": "Failed",
+				"helm_status_detail": _truncate_status_detail(str(e)),
+				"operation_type": "",
+				"operation_started_at": None,
+			},
+		)
 		frappe.log_error(
 			title=f"Helm Uninstall Failed: {release_name}",
 			message=str(e),
@@ -536,7 +551,8 @@ def _safe_walk(release_name: str) -> tuple[list[ResourceHealth], str | None]:
 	except Exception as e:
 		frappe.logger("kubeport").warning(
 			"Readiness walker failed for Helm Release '%s': %s",
-			release_name, e,
+			release_name,
+			e,
 		)
 		return [], str(e)
 
@@ -549,16 +565,19 @@ def _finalize_uninstall_success(
 	if not _release_operation_matches(release_docname, operation_token, _UNINSTALLING_WORKER_STATUS):
 		return
 
-	_set_helm_release_fields(release_docname, {
-		"status": "Draft",
-		"helm_revision": 0,
-		"helm_status_detail": "",
-		"last_applied_chart_version": "",
-		"last_applied_spec_hash": "",
-		"pending_changes": 0,
-		"operation_type": "",
-		"operation_started_at": None,
-	})
+	_set_helm_release_fields(
+		release_docname,
+		{
+			"status": "Draft",
+			"helm_revision": 0,
+			"helm_status_detail": "",
+			"last_applied_chart_version": "",
+			"last_applied_spec_hash": "",
+			"pending_changes": 0,
+			"operation_type": "",
+			"operation_started_at": None,
+		},
+	)
 
 	frappe.publish_realtime(
 		"helm_release_status_update",
@@ -608,7 +627,7 @@ def _extract_chart_version_from_status(
 	chart_name = str(getattr(chart_doc, "chart_name", "") or "")
 	prefix = f"{chart_name}-"
 	if chart_name and chart_text.startswith(prefix):
-		return chart_text[len(prefix):]
+		return chart_text[len(prefix) :]
 
 	return str(fallback or "")
 
@@ -698,11 +717,14 @@ def _sync_charts(repo_doc):
 		chart_doc_name = f"{repo_doc.name}/{chart_name}"
 		desired_chart_doc_names.add(chart_doc_name)
 		latest_entry = version_rows[0]
-		version_payload = [{
-			"version": entry["version"],
-			"app_version": entry["app_version"],
-			"description": entry["description"],
-		} for entry in version_rows]
+		version_payload = [
+			{
+				"version": entry["version"],
+				"app_version": entry["app_version"],
+				"description": entry["description"],
+			}
+			for entry in version_rows
+		]
 
 		if frappe.db.exists("Helm Chart", chart_doc_name):
 			chart_doc = frappe.get_doc("Helm Chart", chart_doc_name)
@@ -717,26 +739,29 @@ def _sync_charts(repo_doc):
 			chart_doc.set("versions", version_payload)
 			chart_doc.save(ignore_permissions=True)
 		else:
-			new_chart = frappe.get_doc({
-				"doctype": "Helm Chart",
-				"chart_name": chart_name,
-				"repository": repo_doc.name,
-				"latest_version": latest_entry["version"],
-				"latest_app_version": latest_entry["app_version"],
-				"description": latest_entry["description"],
-				"default_values": "",
-				"versions": version_payload,
-			})
+			new_chart = frappe.get_doc(
+				{
+					"doctype": "Helm Chart",
+					"chart_name": chart_name,
+					"repository": repo_doc.name,
+					"latest_version": latest_entry["version"],
+					"latest_app_version": latest_entry["app_version"],
+					"description": latest_entry["description"],
+					"default_values": "",
+					"versions": version_payload,
+				}
+			)
 			new_chart.insert(ignore_permissions=True)
 
-	existing_chart_doc_names = set(frappe.get_all(
-		"Helm Chart",
-		filters={"repository": repo_doc.name},
-		pluck="name",
-	))
+	existing_chart_doc_names = set(
+		frappe.get_all(
+			"Helm Chart",
+			filters={"repository": repo_doc.name},
+			pluck="name",
+		)
+	)
 	for stale_chart_doc_name in existing_chart_doc_names - desired_chart_doc_names:
 		frappe.delete_doc("Helm Chart", stale_chart_doc_name, ignore_permissions=True)
-
 
 
 def _parse_include_patterns(patterns_text: str | None) -> list[str]:
@@ -748,11 +773,7 @@ def _parse_include_patterns(patterns_text: str | None) -> list[str]:
 		return []
 
 	# Split by comma, strip whitespace, remove empty entries
-	return [
-		p.strip()
-		for p in re.split(r"[,\n]", patterns_text)
-		if p.strip()
-	]
+	return [p.strip() for p in re.split(r"[,\n]", patterns_text) if p.strip()]
 
 
 def _matches_any_pattern(chart_name: str, patterns: list[str]) -> bool:
@@ -778,11 +799,13 @@ def _group_chart_inventory(
 		if patterns and not _matches_any_pattern(chart_name, patterns):
 			continue
 
-		grouped[chart_name].append({
-			"version": chart_version,
-			"app_version": str(chart_entry.get("app_version") or ""),
-			"description": str(chart_entry.get("description") or ""),
-		})
+		grouped[chart_name].append(
+			{
+				"version": chart_version,
+				"app_version": str(chart_entry.get("app_version") or ""),
+				"description": str(chart_entry.get("description") or ""),
+			}
+		)
 
 	for chart_name, version_rows in grouped.items():
 		grouped[chart_name] = sorted(
@@ -813,7 +836,4 @@ def _version_sort_key(version: str) -> tuple[tuple[int, object], ...]:
 	if not parts:
 		return ((1, version.lower()),)
 
-	return tuple(
-		(0, int(part)) if part.isdigit() else (1, part.lower())
-		for part in parts
-	)
+	return tuple((0, int(part)) if part.isdigit() else (1, part.lower()) for part in parts)

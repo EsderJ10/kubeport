@@ -82,14 +82,19 @@ cd apps/kubeport && pre-commit install
 | `Frappe Site Backup` | Site backup archive metadata | Standalone metadata rows for PVC-backed backups. Archives live on namespace-local `kubeport-backups` PVCs and can outlive the source site row. |
 | `Kubeport Site Image` | Curated and user-registered Frappe runtime images | Repository must be a public GHCR coordinate (`ghcr.io/owner/image`); digest, when present, must be a `sha256:` reference. Curated active rows are required to record the pushed digest. `is_default` is reserved for curated active rows. Curated rows cannot be deleted (must be marked Deprecated); user-registered rows are deletable only when no `Helm Release` references them. Curated rows are seeded from `kubeport/site_images/catalog.json` by the daily sync. |
 | `Kubeport Site Image App` | Child of `Kubeport Site Image` | Records each Frappe/ERPNext/custom app baked into a Site Image with its source URL and ref. Edit-locked unless the parent is user-registered. |
+| `Kubernetes Command` | Operator-tools doctype for ad-hoc Get / List / Delete | Fixed kind allowlist (read: 8 kinds; delete: `Pod`/`Job`/`ConfigMap` only). System Manager only. Delete requires typed `confirm_destructive` enforced at validate and execute. Execution enqueued onto the `long` queue. |
+| `Kubernetes Command Audit Log` | Append-only execute log | One row per `Kubernetes Command` execute (success or failure). Decoupled from the source row so audit history survives row deletion. System Manager read-only; never written from the UI. |
 
 ### Scheduled Jobs
 
 Declared in `hooks.py`:
 
-- `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_all_releases` (drift detection for Helm Releases, Service Bundles, and Frappe Sites)
+- `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_all_releases` (drift detection for Helm Releases, Service Bundles, and Frappe Sites; also runs the orphan-Job sweep)
+- `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_site_backups` (Frappe Site Backup Job polling and PVC-side completion probe)
 - Daily → `kubeport.tasks.helm_tasks.sync_all_repos` (chart catalog refresh)
-- Daily → `kubeport.tasks.site_image_tasks.sync_site_image_catalog` (re-imports `kubeport/site_images/catalog.json` into the `Kubeport Site Image` doctype, marking curated rows and reconciling drift against the shipped manifest)
+- Daily → `kubeport.tasks.site_image_tasks.enqueue_sync_site_image_catalog` (re-imports `kubeport/site_images/catalog.json` into the `Kubeport Site Image` doctype, marking curated rows and reconciling drift against the shipped manifest; also runs `after_install` and `after_migrate`)
+
+The catalog itself is refreshed by CI: a `v*` tag push to `.github/workflows/publish-site-image.yml` runs `scripts/update_site_catalog.py` after digest verification, which rewrites the matched curated row's `image_tag`, `image_digest`, `source_revision`, and `apps_json_hash`. The workflow does not commit or open a PR — it uploads the rewritten file as the `site-image-catalog-<tag>` artifact and surfaces the diff in the run's step summary; the operator commits the bump through the normal review flow.
 
 ---
 

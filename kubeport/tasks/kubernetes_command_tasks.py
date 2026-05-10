@@ -13,7 +13,7 @@ holds: nothing else reads from this output).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import frappe
@@ -100,7 +100,7 @@ def _finalize(cmd: Any, *, status: str, output: str) -> None:
 		marker = _TRUNCATION_MARKER.format(N=original_length)
 		# Reserve space for the marker so the operator always sees it.
 		output = output[: _OUTPUT_LIMIT - len(marker)] + marker
-	completed_at = datetime.now(timezone.utc)
+	completed_at = datetime.now(UTC)
 	cmd.db_set("status", status)
 	cmd.db_set("output", output)
 	cmd.db_set("completed_at", completed_at)
@@ -117,20 +117,22 @@ def _append_audit_log(cmd: Any, *, status: str, output: str, completed_at: datet
 	"""
 	try:
 		excerpt = (output or "")[:_AUDIT_EXCERPT_LIMIT]
-		audit = frappe.get_doc({
-			"doctype": "Kubernetes Command Audit Log",
-			"command": cmd.name,
-			"action": cmd.action,
-			"resource_kind": cmd.resource_kind,
-			"resource_name": cmd.resource_name or "",
-			"cluster": cmd.cluster,
-			"namespace": cmd.namespace or "",
-			"label_selector": cmd.label_selector or "",
-			"outcome": status,
-			"executed_at": completed_at,
-			"triggered_by": cmd.triggered_by,
-			"output_excerpt": excerpt,
-		})
+		audit = frappe.get_doc(
+			{
+				"doctype": "Kubernetes Command Audit Log",
+				"command": cmd.name,
+				"action": cmd.action,
+				"resource_kind": cmd.resource_kind,
+				"resource_name": cmd.resource_name or "",
+				"cluster": cmd.cluster,
+				"namespace": cmd.namespace or "",
+				"label_selector": cmd.label_selector or "",
+				"outcome": status,
+				"executed_at": completed_at,
+				"triggered_by": cmd.triggered_by,
+				"output_excerpt": excerpt,
+			}
+		)
 		audit.insert(ignore_permissions=True)
 	except Exception as audit_err:
 		frappe.logger("kubeport").warning(

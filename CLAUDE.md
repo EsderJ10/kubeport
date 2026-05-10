@@ -50,10 +50,16 @@ bench --site <site> run-tests --app kubeport --doctype <DocType>
 
 | File | Purpose |
 |---|---|
-| `README.md` | Shipped feature set (keep aligned with reality) |
-| `AGENTS.md` | Full agent rules, invariants, and patterns |
-| `docs/control-plane-state.md` | Capabilities, gaps, robustness notes |
+| `README.md` | Entry point: capability summary, architecture sketch, install, doc map |
+| `AGENTS.md` | Authoritative invariants and implementation patterns |
+| `CONTRIBUTING.md` | Dev setup, lint/test workflow, PR conventions |
+| `SECURITY.md` | Disclosure policy and trust-boundary notes |
+| `docs/thesis.md` | Project framing: problem, SOTA, objectives, results, future work |
+| `docs/architecture.md` | C4 diagrams, runtime sequences, design invariants |
+| `docs/operator-guide.md` | End-to-end operator workflows + smoke procedure |
+| `docs/control-plane-state.md` | Capabilities, robustness defences, open gaps |
 | `docs/codebase-summary.md` | Module-level architecture reference |
+| `docs/history/` | Archived planning documents (see its README) |
 | `CHANGELOG.md` | Architecture decision log |
 
 Update docs in the same commit when changes affect discovery, tasks, or state semantics.

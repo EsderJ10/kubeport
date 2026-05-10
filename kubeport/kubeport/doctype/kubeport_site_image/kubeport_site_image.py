@@ -21,6 +21,7 @@ class KubeportSiteImage(Document):
 
 	if TYPE_CHECKING:
 		from frappe.types import DF
+
 		from kubeport.kubeport.doctype.kubeport_site_image_app.kubeport_site_image_app import (
 			KubeportSiteImageApp,
 		)
@@ -92,8 +93,7 @@ class KubeportSiteImage(Document):
 	def on_trash(self) -> None:
 		if self.is_curated:
 			frappe.throw(
-				f"Curated Kubeport Site Image '{self.name}' cannot be deleted; "
-				"mark it Deprecated instead."
+				f"Curated Kubeport Site Image '{self.name}' cannot be deleted; mark it Deprecated instead."
 			)
 
 		linked = frappe.get_all(
@@ -105,8 +105,7 @@ class KubeportSiteImage(Document):
 		if linked:
 			names = ", ".join(row["name"] for row in linked)
 			frappe.throw(
-				f"Cannot delete Kubeport Site Image '{self.name}'; "
-				f"it is linked to Helm Release(s): {names}."
+				f"Cannot delete Kubeport Site Image '{self.name}'; it is linked to Helm Release(s): {names}."
 			)
 
 
@@ -132,10 +131,7 @@ def validate_site_image_reference(
 	label = str(label or repository or "Site Image").strip()
 
 	if not _GHCR_REPOSITORY_RE.fullmatch(repository):
-		frappe.throw(
-			f"Site image '{label}' must use a public GHCR repository such as "
-			"'ghcr.io/owner/image'."
-		)
+		frappe.throw(f"Site image '{label}' must use a public GHCR repository such as 'ghcr.io/owner/image'.")
 	if ":" in repository or "@" in repository:
 		frappe.throw(
 			f"Site image '{label}' repository must not include a tag or digest; "
@@ -153,9 +149,7 @@ def validate_site_image_reference(
 	if is_default and status == "Deprecated":
 		frappe.throw("A deprecated image cannot be the default.")
 	if is_curated and status == "Active" and not digest:
-		frappe.throw(
-			f"Curated active site image '{label}' must record the pushed GHCR image digest."
-		)
+		frappe.throw(f"Curated active site image '{label}' must record the pushed GHCR image digest.")
 
 
 def _clear_other_defaults(current_name: str) -> None:

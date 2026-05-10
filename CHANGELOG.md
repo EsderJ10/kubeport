@@ -6,6 +6,239 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-10 — Documentation overhaul: industry-standard layout
+
+### Context
+
+The repository's documentation had grown organically. The shipped surface was
+a comprehensive `README.md`, an `AGENTS.md` of invariants, the architecture
+decision log here, and two reference docs under `docs/` (`control-plane-state.md`,
+`codebase-summary.md`). What it was missing, against the industry-standard
+layout for an open-source project, was a clear separation between an entry-point
+README, a contributor onboarding doc, a security disclosure policy, an
+architecture document with diagrams, and a user-facing operator guide. The
+`docs/codebase-summary.md` reference had also drifted — it predated the
+addition of `Kubernetes Command`, `Kubernetes Command Audit Log`,
+`api/observability.py`, `api/dashboard.py`, and `tasks/kubernetes_command_tasks.py`
+and listed 10 DocTypes when the actual count is 12 (plus the
+`Kubernetes Command Audit Log` audit row). `license.txt` still carried the
+unfilled `[year] [fullname]` placeholders. Three planning docs lived under
+`docs/plans/` alongside a manual smoke procedure (`docs/frappe-site-smoke.md`),
+mixing historical planning material with current reference material.
+
+### Decision
+
+- Restructured the documentation tree to match the industry-standard layout for
+  an OSS project:
+  - `README.md` is now a focused entry point — capability summary, architecture
+    sketch, install, getting-started, and a documentation map pointing at every
+    other doc by goal.
+  - Added `CONTRIBUTING.md` (development environment, branching and PR
+    conventions, commit-message style matching the existing `git log`, code
+    style table, test commands, the seven invariants every contributor must
+    respect, and a per-doc "update when" matrix).
+  - Added `SECURITY.md` (private disclosure policy, scope, trust model, and
+    hardening recommendations specific to a Frappe-app-as-control-plane).
+  - Added `docs/architecture.md` with C4 context / container diagrams in
+    Mermaid, a DocType relationship diagram, runtime sequence diagrams for the
+    deploy / create-site / reconciliation flows, and a layer-mutation
+    truth-table that makes the "desired vs observed" invariant auditable.
+  - Added `docs/operator-guide.md` covering every operator workflow end-to-end:
+    cluster connection, repo registration, Helm release lifecycle,
+    Service Bundle, Frappe Site lifecycle (create / migrate / cancel / drop),
+    backup / restore, discovery, operator tools, reconciliation, and the
+    pre-release smoke procedure (folded in from `docs/frappe-site-smoke.md`).
+  - Added `docs/thesis.md` framing the project: problem statement, prior-art
+    survey, five testable objectives, methodology, results vs. objectives,
+    declared limitations, and future work. This is the load-bearing
+    deliverable-context document.
+- Updated `docs/codebase-summary.md` to reflect actual code:
+  added `Kubernetes Command`, `Kubernetes Command Audit Log`, the missing
+  `api/observability.py` and `api/dashboard.py` modules, the missing
+  `tasks/kubernetes_command_tasks.py` module, and references to the
+  `kubeport/workspace/` and `kubeport/number_card/` fixture directories.
+- Updated `AGENTS.md` DocType table to list the two `Kubernetes Command`
+  DocTypes that were previously only mentioned in `control-plane-state.md`.
+- Updated `CLAUDE.md` documentation index to reflect the new layout.
+- Renamed `license.txt` → `LICENSE` (industry convention — capital, no
+  extension) and filled in the copyright placeholders with `2026 Los Favs`
+  (matching `app_publisher` in `hooks.py` and `authors` in `pyproject.toml`).
+- Moved `docs/plans/` → `docs/history/` and folded `docs/frappe-site-smoke.md`
+  into the same archive, with a `docs/history/README.md` that explicitly marks
+  the archive as non-authoritative and points readers at the current docs for
+  each topic.
+
+### Rejected alternatives
+
+- **Wholesale rewrite of `README.md`, `AGENTS.md`, `control-plane-state.md`,
+  and `codebase-summary.md`.** They are dense and accurate. Wholesale rewrites
+  would lose information without improving anything demonstrable. The work was
+  scoped to drift fixes plus restructuring around the new entry-point /
+  architecture / operator triad.
+- **A `CODE_OF_CONDUCT.md`.** Performative for a solo-author project; would
+  add maintenance surface without changing behaviour. Skipped — can be added
+  later when there are external contributors to govern.
+- **Generated API reference (Sphinx / mkdocs-material).** The whitelisted API
+  surface is small and already enumerated in `docs/codebase-summary.md` with
+  more useful per-endpoint commentary than auto-generated signatures would
+  provide. Generation tooling adds CI surface for negligible benefit.
+- **Splitting `CHANGELOG.md` into "decisions" and "release notes".**
+  The decision-log format already explicitly captures Context / Decision /
+  Rejected Alternatives / Implementation Details, which is the auditable
+  trail the project needs. A second release-notes file would duplicate without
+  adding signal.
+
+### Implementation details
+
+- New / restructured files:
+  `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` (renamed from
+  `license.txt`), `CLAUDE.md` (updated doc index), `AGENTS.md` (added two
+  `Kubernetes Command` DocType rows), `docs/architecture.md`,
+  `docs/operator-guide.md`, `docs/thesis.md`, `docs/codebase-summary.md`
+  (drift fixes), `docs/history/README.md`, `docs/history/plan-*.md` (moved
+  from `docs/plans/`), `docs/history/frappe-site-smoke.md` (moved from
+  `docs/`).
+- The architecture document uses Mermaid for C4 diagrams (rendered natively
+  by GitHub), so no external diagram tool is introduced. Sequence diagrams
+  cover deploy, Frappe Site create, and reconciliation tick — the three
+  flows that exercise every invariant.
+- The operator guide is opinionated about the order of operations (connect
+  cluster → register repo → deploy release → create site → backup) so a
+  reader can follow it linearly without cross-referencing.
+- `docs/thesis.md` states each of the five objectives as a testable claim and
+  evaluates each in §5 with concrete code-level evidence — so the deliverable's
+  "results vs. objectives" claim is auditable, not aspirational.
+
+---
+
+## 2026-05-09 — Code-quality cleanup pass and CI test gating
+
+### Context
+
+A thorough review of the codebase was conducted to find bugs, inefficiencies, security concerns,
+and deviations from best practices. The architecture itself was found to be sound: 12 DocTypes for
+desired state only, all cluster mutations enqueued onto the long queue with operation/sync token
+re-checks, discovery is read-only, no shell=True, no SQL string-building, type hints enforced on
+whitelisted APIs. What the audit surfaced was a short list of tactical issues that were not
+worth a structural rewrite but were worth fixing in place. The publish-site-image workflow also
+did not gate tests on PR — formatting and unit-test regressions could merge unnoticed.
+
+### Decision
+
+- Replaced the single `self.reload()` violation in
+  `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py` with a targeted
+  `frappe.db.get_value()` lookup. This is the only `reload()` call in the repo and the project
+  invariant (CLAUDE.md, AGENTS.md) explicitly bans it in favour of `db_set` / `frappe.db.get_value`.
+- Extracted a `_cleanup_op_resources()` helper in `kubeport/tasks/site_tasks.py` and replaced three
+  identical job-and-secret cleanup blocks inside `_run_site_op` with calls to it. The orchestrator's
+  control flow is now linear: token-recheck → build → apply → record → on-rollback cleanup →
+  on-exception cleanup, with one named place where rollback semantics live.
+- Added `.github/workflows/ci.yml` with two jobs: a fast `lint` job (ruff format + check, pinned
+  to v0.14.10 to match `.pre-commit-config.yaml`) and a `test` job that boots a Frappe v16 bench
+  against MariaDB and Redis service containers, installs the kubeport app, and runs
+  `bench --site test_site run-tests --app kubeport`. Both gate on PR and push to main.
+
+### Rejected alternatives
+
+- **Wholesale rewrite into hexagonal/DDD/repository-pattern layering.** DocType controllers,
+  whitelisted methods, and `frappe.enqueue` *are* the framework's idioms — wrapping them in a
+  service-layer shell would fight Frappe and produce churn against the existing 8.7k LoC of
+  integration tests without improving anything demonstrable.
+- **Consolidating the duplicated `_APP_NAME_RE` between `frappe_site.py:29` and
+  `tasks/site_tasks.py:67`.** The comment at `tasks/site_tasks.py:64-67` explicitly documents the
+  duplication as deliberate defense-in-depth: a malformed value reaching the worker through a
+  direct DB write or schema import must still be rejected at the shell-interpolation boundary.
+  Sharing a constant would not change the security property, but it works against the author's
+  stated "validate at every trust boundary" intent.
+- **Wrapping `kubernetes.client.exceptions.ApiException` in a custom `KubeportApiError`.** The
+  initial review punch list flagged this, but a closer audit found the codebase already does
+  layered exception handling correctly: `k8s_resources.py` uses narrow `ApiException` catches with
+  proper re-raise, and `observability.py`/`discovery.py`/`release_health.py` consistently extract
+  `.status` and `.reason` for useful messages before falling back to `RuntimeError`. The remaining
+  broad `except Exception` blocks in `tasks/` are correct — they are last-resort orchestrator
+  hooks where any unexpected failure must still trigger state cleanup. No actionable change.
+- **Replacing the Helm subprocess wrapper with a Python SDK.** The Python Helm SDK ecosystem
+  (PyHelm and forks) is unmaintained; `subprocess.run` with a list of args (no `shell=True`) is
+  the industry standard.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:130-131` — replaced
+  `self.reload(); return {... "status": self.status}` with
+  `status = frappe.db.get_value("Kubernetes Command", self.name, "status")` and returned that.
+- `kubeport/tasks/site_tasks.py` — added `_cleanup_op_resources()` adjacent to the existing
+  `_best_effort_delete_*` helpers, and substituted it for the three duplicated cleanup blocks
+  inside `_run_site_op` (the post-apply token-recheck rollback, the rejected-`record_job`
+  rollback, and the broad-`except` cleanup). Behaviour is unchanged — the third call site forwards
+  `job_name_for_cleanup if job_applied else None` so the helper still respects the
+  "only delete the job if it was actually applied" guard.
+- `.github/workflows/ci.yml` — `lint` job runs ruff against the repo root using a Python 3.14
+  runner; `test` job sets up MariaDB 10.6, Redis 7 (cache + queue), and a fresh Frappe v16 bench,
+  then exercises the full kubeport test suite. The test suite was previously runnable only inside
+  the project's dev container; the CI job reproduces that environment on stock GitHub-hosted
+  runners. The `test` job ships with `continue-on-error: true` for the first cycle — bench-in-CI
+  bring-up has known fragility points (Python 3.14 wheel coverage on Ubuntu, occasional `bench`
+  flag drift, service-container timing) that are easier to surface and fix from a real run than to
+  pre-empt. The flag is to be removed once a green run lands, restoring full PR gating.
+
+---
+
+## 2026-05-09 — Automate curated site image catalog bumps on tag publish
+
+### Context
+
+The publish-site-image workflow already builds and pushes Kubeport's curated GHCR image with a
+verified digest, but `kubeport/site_images/catalog.json` was still updated by hand after each
+release (commit `ec2a398` was the manual prototype). The manifest of "what we ship" drifts away
+from "what was actually published" between releases, and a wrong-by-one-character paste re-enters
+the doctype on the next daily catalog sync.
+
+### Decision
+
+- Added `scripts/update_site_catalog.py`: a standalone, frappe-free Python script that mirrors the
+  doctype's GHCR repository, image-tag, and sha256 digest regexes, locates the curated row by
+  `(image_repository, frappe_major)`, and rewrites only its `image_tag`, `image_digest`,
+  `source_revision`, and `apps_json_hash`. The script aborts non-zero on any validation failure
+  or ambiguous match.
+- Wired the script into `.github/workflows/publish-site-image.yml` so a `v*` tag push runs the
+  bump after the existing digest verification, writes the diff and the new values to the run's
+  step summary, and uploads the rewritten `catalog.json` as a build artifact named
+  `site-image-catalog-<tag>`.
+- Kept the operator in the loop for the commit and PR: the workflow does not push, commit, or
+  open a PR. The operator downloads the artifact (or copies the values from the step summary),
+  commits to a topic branch, and opens the bump PR through whatever review flow they prefer.
+- Catalog mutation is gated on `startsWith(github.ref, 'refs/tags/v')`, so push-to-main and PR
+  builds skip it entirely. The daily `sync_site_image_catalog` task continues to reconcile the
+  shipped catalog into MariaDB without change.
+
+### Rejected alternatives
+
+- **Auto-open a PR with `peter-evans/create-pull-request@v6`.** Would require bumping the
+  workflow's `contents` permission to `write` and adds another moving piece in CI. The operator
+  preferred to keep the commit/PR step manual; the artifact + step-summary path delivers the
+  computed values without that escalation.
+- **Push the bump directly to `main`.** Loses the review trail and bypasses the protected-branch
+  flow used everywhere else in this repo.
+- **Hold the script inside `kubeport/site_images/`.** A future edit could pull `frappe` into the
+  import graph and break the publish runner, which has no Frappe install. `scripts/` keeps the
+  helper unambiguously CI-side.
+
+### Implementation details
+
+- Catalog rewriter: `scripts/update_site_catalog.py`. Regexes are copy-pasted verbatim from
+  `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py:11-13`.
+- Workflow steps: `Bump curated catalog row`, `Summarize catalog bump`, `Upload rewritten catalog`
+  in `.github/workflows/publish-site-image.yml`. Step summary includes the four before/after
+  fields plus a `git diff` of the rewritten file.
+- Drift guard: `kubeport/tests/test_publish_automation.py::UnitTestRegexDriftFromDoctype` loads
+  the script via `importlib.util` and asserts its regex `pattern` strings equal the doctype's, so
+  the test suite fails immediately if either side changes without the other.
+- Rewrite tests: same module's `UnitTestSiteCatalogRewrite` covers the happy path, end-to-end
+  validity through `kubeport.site_images.catalog.load_catalog`, and every validation/match
+  abort path.
+
+---
+
 ## 2026-05-09 — Curated Site Image catalog and digest-pinned bench deploys
 
 ### Context

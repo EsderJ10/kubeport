@@ -108,7 +108,7 @@ def _client_from_bearer_token(cluster_doc) -> client.ApiClient:
 			"'Skip TLS Verification (Development Only)' is enabled."
 		)
 
-	return client.ApiClient(configuration=configuration)
+	return client.ApiClient(configuration)
 
 
 # Well-known paths for in-cluster service account credentials.
@@ -155,6 +155,7 @@ def _client_from_incluster() -> client.ApiClient:
 # ---------------------------------------------------------------------------
 # Private Utilities
 # ---------------------------------------------------------------------------
+
 
 def _write_ca_tempfile(ca_pem: str) -> str:
 	"""Write a PEM string to a temp file and register cleanup on exit.

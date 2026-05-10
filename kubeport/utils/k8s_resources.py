@@ -9,12 +9,10 @@ modules — they should never be called directly from a web request.
 import json
 from typing import Any
 
-import yaml
-
 import frappe
+import yaml
 from kubernetes import client
 from kubernetes.client.rest import ApiException
-
 
 # ---------------------------------------------------------------------------
 # Resource Dispatch Table
@@ -117,6 +115,7 @@ _RESOURCE_DISPATCH: dict[str, dict[str, Any]] = {
 # Public Helpers
 # ---------------------------------------------------------------------------
 
+
 def parse_manifest_objects(manifest_content: str) -> list[dict]:
 	"""Parse a JSON or YAML string into a list of K8s resource dicts.
 
@@ -198,6 +197,7 @@ def apply_resource(api_client: client.ApiClient, k8s_object: dict, namespace: st
 		if e.status == 404:
 			# Resource doesn't exist yet — create it
 			from kubernetes import utils
+
 			utils.create_from_dict(api_client, data=k8s_object, namespace=obj_namespace)
 		else:
 			raise
@@ -272,8 +272,7 @@ def check_resources_exist(
 			if e.status == 404:
 				return False, f"{kind}/{name} not found in namespace {obj_namespace}."
 			return False, (
-				f"Failed to read {kind}/{name} in namespace {obj_namespace}: "
-				f"{_format_api_exception(e)}"
+				f"Failed to read {kind}/{name} in namespace {obj_namespace}: {_format_api_exception(e)}"
 			)
 
 	return True, "All managed resources are present."
@@ -314,9 +313,7 @@ _KIND_TO_PLURAL: dict[str, str] = {
 }
 
 
-def _build_resource_path(
-	api_version: str, kind: str, name: str, namespace: str
-) -> str | None:
+def _build_resource_path(api_version: str, kind: str, name: str, namespace: str) -> str | None:
 	"""Build the REST path for a specific K8s resource.
 
 	Returns ``None`` if the apiVersion or kind is not in our lookup tables.
@@ -357,8 +354,7 @@ def _validate_managed_manifest_object(
 	]
 	if missing_fields:
 		frappe.throw(
-			f"Manifest object #{object_index} is missing required field(s): "
-			f"{', '.join(missing_fields)}."
+			f"Manifest object #{object_index} is missing required field(s): {', '.join(missing_fields)}."
 		)
 
 	if kind not in _RESOURCE_DISPATCH:
@@ -367,8 +363,7 @@ def _validate_managed_manifest_object(
 	namespace = str(metadata_dict.get("namespace") or "default")
 	if not _build_resource_path(api_version, kind, name, namespace):
 		frappe.throw(
-			f"Manifest object #{object_index} uses unsupported apiVersion '{api_version}' "
-			f"for kind '{kind}'."
+			f"Manifest object #{object_index} uses unsupported apiVersion '{api_version}' for kind '{kind}'."
 		)
 
 	return k8s_object
@@ -387,9 +382,7 @@ def _managed_resource_fields(
 	namespace = str(metadata.get("namespace") or default_namespace)
 	resource_path = _build_resource_path(api_version, kind, name, namespace)
 	if not resource_path:
-		frappe.throw(
-			f"Unsupported managed resource '{kind}' with apiVersion '{api_version}'."
-		)
+		frappe.throw(f"Unsupported managed resource '{kind}' with apiVersion '{api_version}'.")
 
 	return kind, api_version, name, namespace, resource_path
 
