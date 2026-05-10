@@ -1,0 +1,222 @@
+name: Chaos
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  chaos:
+    name: worker_kill_mid_helm_upgrade
+    runs-on: ubuntu-latest
+    # First iteration — relax PR gating until the workflow has stabilised on main,
+    # mirroring the pattern called out in TODO-15 / CHANGELOG 2026-05-09.
+    continue-on-error: true
+    timeout-minutes: 30
+
+    services:
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=root"
+          --health-interval=5s
+          --health-timeout=2s
+          --health-retries=10
+
+      redis-cache:
+        image: redis:7-alpine
+        ports:
+          - 13000:6379
+
+      redis-queue:
+        image: redis:7-alpine
+        ports:
+          - 11000:6379
+
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v4
+        with:
+          path: kubeport
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Yarn
+        run: npm install -g yarn@1.22.22
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mariadb-client \
+            libmariadb-dev \
+            libffi-dev
+
+      - name: Install frappe-bench
+        run: |
+          python -m pip install --upgrade pip
+          pip install frappe-bench
+
+      - name: Init bench
+        run: |
+          bench init \
+            --skip-redis-config-generation \
+            --skip-assets \
+            --python "$(which python)" \
+            --frappe-branch version-16 \
+            frappe-bench
+          cd frappe-bench
+          bench set-config -g db_host 127.0.0.1
+          bench set-config -g db_port 3306
+          bench set-config -g redis_cache redis://127.0.0.1:13000
+          bench set-config -g redis_queue redis://127.0.0.1:11000
+          bench set-config -g redis_socketio redis://127.0.0.1:11000
+
+      - name: Install kubeport into bench
+        run: |
+          cd frappe-bench
+          bench get-app kubeport "$GITHUB_WORKSPACE/kubeport"
+
+      - name: Create test site
+        run: |
+          cd frappe-bench
+          bench new-site \
+            --db-root-password root \
+            --admin-password admin \
+            --no-mariadb-socket \
+            test_site
+          bench --site test_site install-app kubeport
+          bench --site test_site set-config developer_mode 1
+
+      - name: Install helm, kubectl, k3d
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+          curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+          helm version
+          kubectl version --client
+          k3d version
+
+      - name: Boot k3d cluster
+        run: |
+          k3d cluster create chaos \
+            --no-lb \
+            --k3s-arg "--disable=traefik,metrics-server@server:0" \
+            --wait
+          k3d kubeconfig get chaos > "$HOME/chaos.kubeconfig"
+          KUBECONFIG="$HOME/chaos.kubeconfig" kubectl get nodes
+
+      - name: Package chaos chart and serve via local HTTP
+        run: |
+          mkdir -p /tmp/chaos-charts
+          helm package "$GITHUB_WORKSPACE/kubeport/eval/faults/fixtures/chaos-chart" -d /tmp/chaos-charts
+          helm repo index /tmp/chaos-charts --url http://127.0.0.1:8080
+          nohup python3 -m http.server 8080 --directory /tmp/chaos-charts \
+            > /tmp/chart-server.log 2>&1 &
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8080/index.yaml > /dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:8080/index.yaml | head -20
+
+      - name: Start long-queue worker
+        run: |
+          cd frappe-bench
+          # Long-queue worker is required for sync_charts and deploy_release; the
+          # bench scheduler is not, because _inproc_worker_kill.py invokes
+          # _reconcile_stale_helm_operations directly under --fast-forward.
+          nohup bench worker --queue long > /tmp/worker-long.log 2>&1 &
+          for _ in $(seq 1 20); do
+            if pgrep -fa 'frappe.*worker.*--queue.*long' > /dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+          pgrep -fa 'frappe.*worker.*--queue.*long' || (cat /tmp/worker-long.log; exit 1)
+
+      - name: Bootstrap Kubernetes Cluster, Helm Repository, Helm Release
+        run: |
+          cd frappe-bench
+          set -o pipefail
+          BOOTSTRAP_OUT=$(env/bin/python \
+            "$GITHUB_WORKSPACE/kubeport/eval/faults/_inproc_chaos_setup.py" \
+            --site test_site \
+            --bench-path "$PWD" \
+            --kubeconfig-file "$HOME/chaos.kubeconfig" \
+            --kubeconfig-context "k3d-chaos" \
+            --helm-repo-url "http://127.0.0.1:8080")
+          printf '%s\n' "$BOOTSTRAP_OUT"
+          RELEASE_DOC_NAME=$(printf '%s\n' "$BOOTSTRAP_OUT" \
+            | sed -n '/^RELEASE_BEGIN$/,/^RELEASE_END$/p' \
+            | sed '1d;$d')
+          if [ -z "$RELEASE_DOC_NAME" ]; then
+            echo "No RELEASE_BEGIN/END markers in bootstrap output." >&2
+            exit 1
+          fi
+          echo "RELEASE_DOC_NAME=$RELEASE_DOC_NAME" >> "$GITHUB_ENV"
+
+      - name: Run worker_kill_mid_helm_upgrade scenario
+        run: |
+          cd frappe-bench
+          set -o pipefail
+          SCENARIO_OUT=$(env/bin/python \
+            "$GITHUB_WORKSPACE/kubeport/eval/faults/_inproc_worker_kill.py" \
+            --site test_site \
+            --bench-path "$PWD" \
+            --release-doc-name "$RELEASE_DOC_NAME" \
+            --cluster-doc-name chaos-k3d \
+            --kubeconfig-file "$HOME/chaos.kubeconfig" \
+            --kubeconfig-context "k3d-chaos" \
+            --fast-forward \
+            --in-progress-poll-seconds 180 \
+            --recovery-poll-seconds 600)
+          printf '%s\n' "$SCENARIO_OUT"
+          printf '%s\n' "$SCENARIO_OUT" \
+            | sed -n '/^RESULT_BEGIN$/,/^RESULT_END$/p' \
+            | sed '1d;$d' \
+            > /tmp/scenario.json
+          python3 - <<'PY'
+          import json
+          import sys
+          report = json.load(open("/tmp/scenario.json"))
+          passed = report.get("passed")
+          mttr = report.get("mttr_seconds")
+          bound = report.get("expected_mttr_bound_seconds")
+          detail = report.get("detail", "")
+          print(f"scenario={report.get('scenario')} passed={passed} mttr={mttr}s bound={bound}s")
+          print(f"detail={detail}")
+          if not passed:
+              sys.exit(1)
+          PY
+
+      - name: Upload chaos report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-report
+          path: |
+            /tmp/scenario.json
+            /tmp/worker-long.log
+            /tmp/chart-server.log
+
+      - name: Cleanup k3d cluster
+        if: always()
+        run: k3d cluster delete chaos || true

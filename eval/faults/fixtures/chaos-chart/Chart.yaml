@@ -1,0 +1,6 @@
+apiVersion: v2
+name: chaos-chart
+description: Minimal chart used by .github/workflows/chaos.yml as the upgrade target for the worker_kill_mid_helm_upgrade scenario. Renders a single ConfigMap so installs are deterministic and image-pull-free.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

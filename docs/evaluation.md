@@ -56,6 +56,10 @@ Each scenario maps one-to-one to a robustness defence enumerated in [`docs/contr
 
 The `corrupt_archive_size_sidecar` scenario also exercises the cascade behaviour: after the row is marked `Failed`, the trash cleanup task (`delete_backup_archive_task`) is enqueued and the corrupted archive is removed from the PVC — verified by the `cleanup_check` step (`log: ABSENT\nSIZE_ABSENT`). This is the closing-loop guarantee for the backup-archive lifecycle; without it, the failure path would leak storage.
 
+### Continuous fault injection in CI
+
+The reference table above is regenerated locally with `make eval-faults`. The same `worker_kill_mid_helm_upgrade` scenario is also wired into [`.github/workflows/chaos.yml`](../.github/workflows/chaos.yml), which runs on every pull request and push to `main`. The CI job boots a Frappe v16 bench, a one-node k3d cluster, and a long-queue worker, packages the in-repo [`eval/faults/fixtures/chaos-chart`](../eval/faults/fixtures/chaos-chart) (a single-`ConfigMap` chart used purely as a fast, image-pull-free upgrade target), and runs the scenario with `--fast-forward` so recovery is observed in seconds rather than 30 min. The job parses `RESULT_BEGIN`/`RESULT_END` from the in-bench harness output and asserts `passed == true`. While the workflow stabilises on `main`, the job is published with `continue-on-error: true` (mirroring the on-ramp pattern from CHANGELOG `2026-05-09 — Code-quality cleanup pass and CI test gating`); flipping it to a required check is a one-line follow-up after the first green run on `main`.
+
 ---
 
 ## 3. Comparative baseline (Kubeport vs. raw `kubectl` + `helm`)
