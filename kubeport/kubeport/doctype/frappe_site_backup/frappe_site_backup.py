@@ -90,8 +90,7 @@ class FrappeSiteBackup(Document):
 		correlation_id = metrics.new_correlation_id()
 		with metrics.correlation_scope(correlation_id):
 			metrics.logger("kubeport.backup").info(
-				"enqueue delete_backup_archive_task backup=%s path=%s",
-				self.name,
+				"enqueue delete_backup_archive_task path=%s",
 				self.storage_path,
 			)
 		frappe.enqueue(
