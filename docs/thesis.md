@@ -25,7 +25,11 @@ This split creates real cost:
 
 ## 2. State of the Art
 
-The thesis is positioned against the current generation of Kubernetes management UIs. None of the systems below close the specific gap identified above.
+The thesis is positioned along two axes: an operator-facing axis (the existing Kubernetes management UIs operators choose between today) and a research axis (the design patterns from distributed-systems and platform-engineering literature that inform Kubeport's invariants). The product survey establishes the operational gap; the prose subsections that follow establish the conceptual lineage.
+
+### 2.1 Existing Kubernetes management surfaces
+
+None of the systems below close the specific gap identified in §1.
 
 | System | What it does | Why it does not solve this problem |
 |---|---|---|
@@ -37,6 +41,26 @@ The thesis is positioned against the current generation of Kubernetes management
 | **`kubectl` + `helm` + IaC repo** | The status quo | No unified audit, drift detection, or business-state link; high operator skill floor. |
 
 The conceptual gap is not "another Kubernetes UI". It is: **a control plane whose unit of management is a Frappe site or ERPNext bench, backed by Kubernetes, integrated into the same Desk where the rest of the business runs**, with the operational invariants normally associated with platform-engineering tooling (background-job execution, drift reconciliation, ground-truth verification) rather than the looser invariants of a UI shell over `kubectl`.
+
+### 2.2 Operator pattern and reconciliation loops
+
+The operator pattern, formalised by CoreOS in 2016 [1] and now canonical in the Kubernetes documentation [2], encodes domain-specific operational knowledge as a software controller that reconciles a *desired state* (a custom resource) against the live cluster on each tick. The pattern descends directly from the controller architecture introduced in Borg and inherited by Kubernetes [3], where every API object is a record of intent that an asynchronous control loop drives toward observation. Hightower, Burns, and Beda [4] frame the loop as level-triggered rather than edge-triggered: the controller does not react to events, it periodically observes the world and corrects drift, which makes the loop idempotent under crashes, retries, and missed events.
+
+Kubeport adopts this pattern at the Frappe layer rather than as a Kubernetes operator. The reconciliation tick (`*/5 * * * *` in `kubeport/hooks.py`) plays the role of the controller loop, the DocType row plays the role of the custom resource, and the per-run `operation_token` plays the role of the resource-version guard that rejects stale workers. The contribution is not the pattern itself — it is its application inside a business platform whose runtime model (synchronous request handlers, RQ background queues) is foreign to the control-loop literature.
+
+### 2.3 Desired-state vs. observed-state in declarative systems
+
+The strict separation of desired state from observed state is the foundational discipline of large-scale cluster management. Verma et al. [5] document it as the central design choice in Borg: the operator declares intent, and the system asynchronously reports what it observed. The OpenGitOps principles [6] generalise the same idea — a declarative source of truth, continuously reconciled toward the live system — into a vendor-neutral standard.
+
+The discipline is not merely organisational; it is a precondition for sound behaviour under partial failure. Vogels' analysis of eventual consistency [7] and Brewer's CAP retrospective [8] establish that, once writes outlive a single round-trip, a system that conflates "what was requested" with "what is true now" loses the ability to recover from transient inconsistency. Kubeport applies this lesson literally: the MariaDB-backed DocType is the desired-state store; live cluster queries are the observed-state probes; and the two are never combined into a single persisted projection. Discovery code paths are read-only, and reconciliation drives the row toward the observed truth, not the other way around.
+
+### 2.4 Background-execution patterns in business platforms
+
+Frappe's runtime is fundamentally request-response: web handlers run inside a synchronous request thread with a hard timeout, and the canonical mechanism for long work is to enqueue a job onto an RQ-backed queue [9]. This shape mirrors the broader pattern Dean and Ghemawat [10] identified for any system whose unit of work outruns a single request: decompose the operation into a small synchronous front and a large asynchronous tail, and let the tail be retried, monitored, and recovered independently.
+
+For Kubeport this is non-negotiable. Helm subprocess invocations [11] routinely run for tens of seconds; `bench new-site` runs for minutes; `helm upgrade --install` against a slow registry can run for longer. None of those are acceptable inside a Frappe web handler. The control plane therefore enqueues every cluster-mutating call onto the `long` RQ queue with `enqueue_after_commit=True`, and the worker re-checks the row's status and `operation_token` before acting. The token check turns the queue from a fire-and-forget mailbox into something closer to a logical-clock guard in the sense of Lamport [12]: a stale message can still arrive, but the recipient detects staleness from the token alone, without a global view of message ordering.
+
+Bibliographic entries are listed in §9 and keyed to BibTeX records in [`docs/references.bib`](references.bib).
 
 ---
 
@@ -144,7 +168,37 @@ The remaining work is depth work; the core plumbing is in place.
 
 ---
 
-## 9. References (Repository-Internal)
+## 9. Bibliografía
+
+References are listed in the order of first citation in §2 and are keyed to BibTeX entries in [`docs/references.bib`](references.bib). The listing follows IEEE numeric style.
+
+[1] B. Philips, "Introducing Operators: Putting Operational Knowledge into Software," CoreOS Engineering Blog, 2016.
+
+[2] The Kubernetes Authors, "Operator Pattern," Kubernetes Project Documentation.
+
+[3] B. Burns, B. Grant, D. Oppenheimer, E. Brewer, and J. Wilkes, "Borg, Omega, and Kubernetes," *ACM Queue*, vol. 14, no. 1, 2016.
+
+[4] K. Hightower, B. Burns, and J. Beda, *Kubernetes: Up and Running*, 3rd ed. O'Reilly Media, 2022.
+
+[5] A. Verma, L. Pedrosa, M. Korupolu, D. Oppenheimer, E. Tune, and J. Wilkes, "Large-scale cluster management at Google with Borg," in *Proc. 10th European Conf. on Computer Systems (EuroSys)*, 2015.
+
+[6] OpenGitOps Working Group, "OpenGitOps Principles v1.0.0," Cloud Native Computing Foundation, 2021.
+
+[7] W. Vogels, "Eventually Consistent," *Communications of the ACM*, vol. 52, no. 1, pp. 40–44, 2009.
+
+[8] E. Brewer, "CAP Twelve Years Later: How the 'Rules' Have Changed," *IEEE Computer*, vol. 45, no. 2, pp. 23–29, 2012.
+
+[9] The Frappe Authors, "Frappe Framework Documentation," Frappe Technologies.
+
+[10] J. Dean and S. Ghemawat, "MapReduce: Simplified Data Processing on Large Clusters," *Communications of the ACM*, vol. 51, no. 1, pp. 107–113, 2008.
+
+[11] The Helm Authors, "Helm: The Package Manager for Kubernetes," Helm Project Documentation.
+
+[12] L. Lamport, "Time, Clocks, and the Ordering of Events in a Distributed System," *Communications of the ACM*, vol. 21, no. 7, pp. 558–565, 1978.
+
+---
+
+## 10. Repository Documents
 
 | Document | Role |
 |---|---|
@@ -154,6 +208,7 @@ The remaining work is depth work; the core plumbing is in place.
 | [`docs/control-plane-state.md`](control-plane-state.md) | Capability and robustness inventory; open gaps. |
 | [`docs/codebase-summary.md`](codebase-summary.md) | Module-level architecture reference. |
 | [`docs/evaluation.md`](evaluation.md) | Empirical evaluation chapter — functional, reliability, baseline, scaling. |
+| [`docs/references.bib`](references.bib) | BibTeX bibliography backing the §9 listing. |
 | [`AGENTS.md`](../AGENTS.md) | Authoritative invariants and implementation patterns. |
 | [`CHANGELOG.md`](../CHANGELOG.md) | Architecture decision log (what / why / rejected alternatives). |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Development setup, lint and test workflow. |
@@ -162,7 +217,7 @@ The remaining work is depth work; the core plumbing is in place.
 
 ---
 
-## 10. Project Components
+## 11. Project Components
 
 This thesis describes the backend artefact (Kubeport). The complete TFG deliverable comprises three repositories:
 
