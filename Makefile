@@ -10,8 +10,10 @@ HOST_UID    := $(shell id -u)
 HOST_GID    := $(shell id -g)
 RUFF        := $(COMPOSE) run --rm --user $(HOST_UID):$(HOST_GID) ruff
 
+EVAL_K3D_CLUSTER ?= frappe-cluster
+
 .DEFAULT_GOAL := help
-.PHONY: help fmt lint fix lint-check
+.PHONY: help fmt lint fix lint-check eval eval-clean
 
 help:
 	@echo "Containerised lint targets (ghcr.io/astral-sh/ruff:0.14.10):"
@@ -19,6 +21,10 @@ help:
 	@echo "  make lint        Report ruff lint findings"
 	@echo "  make fix         Auto-fix ruff findings, then format"
 	@echo "  make lint-check  CI-equivalent dry run (format --check + check)"
+	@echo ""
+	@echo "Evaluation harness (eval/README.md):"
+	@echo "  make eval        Run the golden-path harness against the local k3d cluster"
+	@echo "  make eval-clean  Remove all eval/results/*.json reports"
 
 fmt:
 	$(RUFF) format .
@@ -33,3 +39,9 @@ fix:
 lint-check:
 	$(RUFF) format --check .
 	$(RUFF) check .
+
+eval:
+	python3 eval/harness.py --k3d-cluster $(EVAL_K3D_CLUSTER)
+
+eval-clean:
+	@find eval/results -type f -name '*.json' -print -delete
