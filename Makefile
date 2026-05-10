@@ -27,7 +27,7 @@ EVAL_SCALING_NS      ?= 1,10,100,1000
 EVAL_SCALING_REPEATS ?= 5
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt lint fix lint-check eval eval-clean eval-baseline eval-scaling eval-scaling-plot
+.PHONY: help fmt lint fix lint-check eval eval-clean eval-baseline eval-scaling eval-scaling-plot rbac-smoke
 
 help:
 	@echo "Containerised lint targets (ghcr.io/astral-sh/ruff:0.14.10):"
@@ -42,6 +42,9 @@ help:
 	@echo "  make eval-scaling     Characterise reconciliation tick latency vs N (eval/scaling/README hint)"
 	@echo "  make eval-scaling-plot Render the scaling plot from the latest scaling-*.json report"
 	@echo "  make eval-clean       Remove all eval/results/*.json reports"
+	@echo ""
+	@echo "RBAC smoke (deploy/rbac/README.md):"
+	@echo "  make rbac-smoke       Run kubectl auth can-i for every Kubeport call site"
 
 fmt:
 	$(RUFF) format .
@@ -95,3 +98,6 @@ eval-faults-real:
 	    --release-doc-name $(EVAL_FAULT_RELEASE) \
 	    --site-doc-name $(EVAL_FAULT_SITE) \
 	    --scenarios $(EVAL_FAULT_SCENARIOS)
+
+rbac-smoke:
+	./deploy/rbac/smoke.sh

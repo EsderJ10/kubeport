@@ -186,9 +186,7 @@ The codebase actively defends against imperfect cluster conditions:
 - Strong coverage: discovery, reconciliation, manifest validation, concurrency guards, cleanup patches, shared Frappe Site operation orchestration (Secret+Job apply, ownerRef attach, failure rollback), cancel task error handling, direct delete/migrate reconciliation branch behavior, full lifecycle simulation scenarios (create→active, cancel mid-flight, fail→delete→row-removed, migrate false-negative recovery, concurrent supersession), site backup/restore guards and Job finalization, Helm release lifecycle (install/upgrade/rollback/uninstall token staleness, blocking-site detection, force-uninstall, stale-operation recovery), Helm Repository sync supersession and chart inventory rebuild, and per-kind workload readiness for all eight supported kinds with warning-event attachment.
 - Weak coverage: broader cross-DocType integration tests.
 
-### Operator Documentation
-
-- `docs/deploy.md` covers in-cluster vs. out-of-cluster topology, the bench-image Helm packaging snippet, the verb-resource RBAC matrix, resource-limit baselines, the internal-metrics endpoints, and the control-plane backup procedure. Kustomized least-privilege manifests at `deploy/rbac/` (with a `make rbac-smoke` target) are the remaining piece, tracked as TODO-17.
+- `docs/deploy.md` covers in-cluster vs. out-of-cluster topology, the bench-image Helm packaging snippet, the verb-resource RBAC matrix, resource-limit baselines, the internal-metrics endpoints, and the control-plane backup procedure. Kustomized least-privilege RBAC manifests live at `deploy/rbac/` and are validated by the `make rbac-smoke` target which probes every Kubeport call site with `kubectl auth can-i`.
 
 ---
 
@@ -199,5 +197,5 @@ The remaining work is depth work — the core plumbing is in place:
 1. **Broader health modeling**: add application-level health probes and CRD-specific health where those signals have clear semantics.
 2. **Backup depth**: add scheduled backups, retention policy, object-store backends, encryption, cross-cluster restore, and restore-to-different-site-name when the storage model is expanded.
 3. **Testing coverage**: integration tests for repo sync, chart metadata, and cross-DocType workflows.
-4. **Operator documentation**: kustomized least-privilege RBAC manifests at `deploy/rbac/` with a `make rbac-smoke` target (TODO-17). The narrative deploy guide (topology, bench-image packaging, RBAC matrix, sizing, monitoring, control-plane backup) is at `docs/deploy.md`.
+4. **Operator documentation**: complete. `docs/deploy.md` is the narrative deploy guide and `deploy/rbac/` ships the kustomized least-privilege RBAC manifests with a `make rbac-smoke` validator.
 5. **Wider chart support**: controlled expansion of bench discovery beyond `erpnext`-only chart identification.

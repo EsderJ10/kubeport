@@ -1,0 +1,102 @@
+# Two ClusterRoles separated by scope so operators tightening to per-namespace
+# binding can drop kubeport:namespaced's ClusterRoleBinding and replace it
+# with RoleBindings per workload namespace, while kubeport:cluster-scoped
+# stays bound cluster-wide (its resources cannot be scoped to a namespace).
+#
+# Verbs are audited against:
+#   kubeport/utils/k8s_resources.py        Service Bundle apply / delete
+#   kubeport/utils/discovery.py            Bench discovery, pod exec
+#   kubeport/utils/observability.py        Pod logs, events, rollout context
+#   kubeport/tasks/site_tasks.py           Frappe Site Job lifecycle, creds Secret
+#   kubeport/tasks/helm_tasks.py           StorageClass discovery, helm subprocess
+#   kubeport/tasks/reconciliation.py       Job reads, orphan-Job sweep, PVC probe
+#   kubeport/tasks/service_bundle_tasks.py Bundle apply / delete via apply_resource
+#
+# Each verb appears here only because at least one of those modules calls
+# the corresponding K8s API. See deploy/rbac/README.md §Verb justification.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeport:cluster-scoped
+  labels:
+    app.kubernetes.io/name: kubeport
+    app.kubernetes.io/component: control-plane
+rules:
+  # Service Bundle applies Namespace manifests; reconciliation lists namespaces
+  # for the orphan-Job sweep and storage-class discovery callsites.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # ERPNext-style chart deploy auto-discovers the cluster default StorageClass
+  # in kubeport/tasks/helm_tasks.py; list is the only verb used.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["list"]
+  # Service Bundle's allowlist includes ClusterRole and ClusterRoleBinding;
+  # apply_resource server-side-applies them, delete_resource deletes them.
+  # Granting CRUD here also makes Kubeport subject to the K8s RBAC escalation
+  # check: it cannot grant verbs it does not itself hold.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeport:namespaced
+  labels:
+    app.kubernetes.io/name: kubeport
+    app.kubernetes.io/component: control-plane
+rules:
+  # Service Bundle apply / delete on the eight namespaced kinds in core/v1
+  # plus rollout / log drilldown reads. Helm storage uses Secrets by default.
+  - apiGroups: [""]
+    resources:
+      - "pods"
+      - "services"
+      - "configmaps"
+      - "secrets"
+      - "persistentvolumeclaims"
+      - "serviceaccounts"
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # observability.py uses read_namespaced_pod_log; restrict to read.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # discovery.py and reconciliation site-probe stream pod exec; the K8s API
+  # treats `kubectl exec` as a `create` on the exec subresource.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # Event drilldown uses the legacy v1 Event API.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+  # Service Bundle apply on apps/v1 controllers; release readiness walk reads
+  # them for the Helm-release health classifier.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # observability.py rollout context lists ReplicaSets and ControllerRevisions
+  # to surface the active revision and pod-template hash; read-only.
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "controllerrevisions"]
+    verbs: ["get", "list"]
+  # Frappe Site lifecycle Jobs (create/migrate/backup/restore/drop), archive
+  # cleanup Jobs, orphan-Job sweep, Service Bundle Job manifests, CronJob SB.
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # Service Bundle ingress apply; readiness walk reads ingresses.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # Service Bundle namespaced RBAC apply / delete.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  # observability.py also reads the events.k8s.io v1 API on newer clusters.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["list"]

@@ -120,142 +120,53 @@ When Kubeport runs as a pod inside the cluster it manages, the
 `kubeport/utils/k8s_client.py:_client_from_incluster`). The pod's
 service account therefore needs every API verb Kubeport actually calls.
 
-> **Forward note (TODO-17):** a kustomized least-privilege manifest tree
-> will ship at `deploy/rbac/` with `kubectl apply -k deploy/rbac/`
-> support and a `make rbac-smoke` target that runs `kubectl auth can-i`
-> for each call site. Until that lands, the manifest below is the
-> documented interim baseline — adapt the `namespace` and binding scope
-> to your environment.
+### Apply the manifests
+
+```bash
+kubectl apply -k deploy/rbac/
+```
+
+This installs a `kubeport` ServiceAccount in the `kubeport-system`
+namespace, two ClusterRoles (`kubeport:cluster-scoped`,
+`kubeport:namespaced`), and two ClusterRoleBindings binding both to the
+SA cluster-wide. Mount the SA on the bench pod
+(`spec.serviceAccountName: kubeport`); then in the Desk create a
+`Kubernetes Cluster` row with `Auth Method = In-Cluster` (no other
+fields — the pod-mounted token is read at use time).
+
+To verify the bound permissions match every call site Kubeport makes,
+run the smoke test:
+
+```bash
+make rbac-smoke
+```
+
+It runs `kubectl auth can-i --as=system:serviceaccount:kubeport-system:kubeport`
+for every verb-resource pair in the matrix below and exits non-zero on
+any FAIL. The caller must have impersonation permission (typically
+cluster-admin) for `--as` to take effect.
+
+For per-namespace tightening (drop the cluster-wide binding on
+`kubeport:namespaced`, replace with one RoleBinding per workload
+namespace), see [`deploy/rbac/README.md`](../deploy/rbac/README.md)
+§Tightening to per-namespace.
 
 ### Verb-resource matrix
 
-Audited from `kubeport/utils/k8s_resources.py`,
-`kubeport/utils/observability.py`, `kubeport/utils/discovery.py`, and
-the four task modules under `kubeport/tasks/`. Kubeport never calls a
-verb it does not need.
+The full matrix — verb, resource, scope, and the audited Kubeport call
+site that motivates each row — lives in
+[`deploy/rbac/README.md`](../deploy/rbac/README.md) §Verb justification,
+alongside the manifests that grant it. Kubeport does **not** request
+`pods/portforward`, `nodes/*`, persistent volumes, custom resources, or
+any `*/scale`, `*/finalizers`, `*/status` subresources beyond what
+`delete` and `patch` already cover.
 
-Two verb classes appear:
-
-- **CRUD** (`get, list, create, patch, delete`) — every kind in the
-  Service Bundle allowlist, because `apply_resource` uses server-side
-  apply (`PATCH` with `application/apply-patch+yaml`, falling back to
-  `create_from_dict` on `404`), and `delete_resource` calls the
-  per-kind `delete_*` method.
-- **Read-only** (`get, list`) — auxiliary kinds Kubeport only inspects
-  (rollout history, events, storage class discovery, log / exec
-  subresources).
-
-| API group | Resources | Verbs | Scope | Used by |
-|---|---|---|---|---|
-| `""` (core) | `pods`, `services`, `configmaps`, `secrets`, `persistentvolumeclaims`, `serviceaccounts` | CRUD | namespaced | Service Bundle apply / delete; Helm release storage (`secrets`, default driver); Frappe Site creds Secret (`{job}-creds`); backup PVC. |
-| `""` | `namespaces` | CRUD | cluster | Service Bundle. |
-| `""` | `pods/log` | `get` | namespaced | Pod log drilldown (`observability.py`). |
-| `""` | `pods/exec` | `create` | namespaced | Bench discovery, site existence probe (`utils/discovery.py`, reconciliation). |
-| `""` | `events` | `list` | namespaced | Release / site event drilldown. |
-| `apps` | `deployments`, `statefulsets`, `daemonsets` | CRUD | namespaced | Service Bundle; readiness walk for Helm release health. |
-| `apps` | `replicasets`, `controllerrevisions` | `get`, `list` | namespaced | Rollout-context drilldown. |
-| `batch` | `jobs`, `cronjobs` | CRUD | namespaced | Service Bundle; every Frappe Site lifecycle Job; archive cleanup Jobs. |
-| `networking.k8s.io` | `ingresses` | CRUD | namespaced | Service Bundle; readiness walk. |
-| `rbac.authorization.k8s.io` | `roles`, `rolebindings` | CRUD | namespaced | Service Bundle. |
-| `rbac.authorization.k8s.io` | `clusterroles`, `clusterrolebindings` | CRUD | cluster | Service Bundle. |
-| `storage.k8s.io` | `storageclasses` | `list` | cluster | Default-StorageClass discovery for ERPNext-style charts (`tasks/helm_tasks.py`). |
-| `events.k8s.io` | `events` | `list` | namespaced | Release / site event drilldown. |
-
-Kubeport does **not** require `pods/portforward`, `nodes/*`, persistent
-volumes (cluster-scoped `pv`), CRD `*` verbs, or any `*/scale`,
-`*/finalizers`, `*/status` subresources beyond what `delete` and
-`patch` cover.
-
-### Interim manifest
-
-A working baseline you can apply today. Replace `<kubeport-namespace>`
-with the namespace where the bench pod runs. The cluster-scoped
-binding is required because Service Bundle supports `Namespace`,
-`ClusterRole`, `ClusterRoleBinding`, and the StorageClass discovery
-path lists `storageclasses`.
-
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kubeport
-  namespace: <kubeport-namespace>
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: kubeport
-rules:
-  - apiGroups: [""]
-    resources: ["namespaces", "events"]
-    verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: [""]
-    resources:
-      ["pods", "services", "configmaps", "secrets",
-       "persistentvolumeclaims", "serviceaccounts"]
-    verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get"]
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["create"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets"]
-    verbs: ["get", "list", "patch", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["replicasets", "controllerrevisions"]
-    verbs: ["get", "list"]
-  - apiGroups: ["batch"]
-    resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list", "create", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
-    verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["clusterroles", "clusterrolebindings"]
-    verbs: ["get", "list", "create", "patch", "delete"]
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
-    verbs: ["list"]
-  - apiGroups: ["events.k8s.io"]
-    resources: ["events"]
-    verbs: ["list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: kubeport
-subjects:
-  - kind: ServiceAccount
-    name: kubeport
-    namespace: <kubeport-namespace>
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: kubeport
-```
-
-Mount this service account on the bench pod (`spec.serviceAccountName:
-kubeport`), then in the Desk create a `Kubernetes Cluster` row with
-`Auth Method = In-Cluster`. There are no other fields to set — the pod's
-mounted token is read at use time.
-
-If your operations policy disallows cluster-scoped roles, you can shrink
-the binding by:
-
-1. Granting a *namespaced* `Role` per workload namespace instead of one
-   `ClusterRole`, **and**
-2. Removing `Namespace`, `ClusterRole`, and `ClusterRoleBinding` from
-   `kubeport/utils/k8s_resources.py`'s allowlist, **and**
-3. Accepting that the StorageClass discovery short-circuit will fail
-   (operators must always supply `persistence.worker.storageClass`).
-
-That trade-off is documented in `docs/control-plane-state.md` §Helm
-Release Management.
+If your operations policy further forbids granting CRUD on namespaced
+resources cluster-wide, the per-namespace tightening pattern in
+[`deploy/rbac/README.md`](../deploy/rbac/README.md) keeps
+`kubeport:namespaced`'s verbs scoped to an explicit set of workload
+namespaces (one RoleBinding each), at the cost of an extra
+`kubectl apply` per new workload namespace.
 
 ---
 

@@ -27,6 +27,7 @@ Start with the document that matches what you want to do.
 |---|---|
 | Understand what Kubeport is and why it was built | [`docs/thesis.md`](docs/thesis.md) |
 | Deploy Kubeport for non-development use (topology, RBAC, sizing, monitoring, control-plane backup) | [`docs/deploy.md`](docs/deploy.md) |
+| Apply the in-cluster RBAC manifests | [`deploy/rbac/README.md`](deploy/rbac/README.md) |
 | Use Kubeport end-to-end (operator workflows) | [`docs/operator-guide.md`](docs/operator-guide.md) |
 | Understand the architecture (C4 diagrams, sequences, invariants) | [`docs/architecture.md`](docs/architecture.md) |
 | See current capability surface, robustness defences, open gaps | [`docs/control-plane-state.md`](docs/control-plane-state.md) |
