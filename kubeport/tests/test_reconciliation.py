@@ -249,6 +249,88 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_publish.assert_called_once()
 		mock_log_error.assert_called_once()
 
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.release_health.walk")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_helm_releases_skips_unchanged_status_detail(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_helm_status,
+		mock_walk,
+		mock_get_value,
+		mock_publish,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				status="Deployed",
+				operation_token="tok-1",
+			),
+		]
+		mock_helm_status.return_value = {"info": {"status": "deployed"}}
+		mock_walk.return_value = []
+		mock_get_value.return_value = {
+			"operation_token": "tok-1",
+			"status": "Deployed",
+			"helm_status_detail": "deployed (no workload resources)",
+		}
+
+		_reconcile_helm_releases()
+
+		mock_set_value.assert_not_called()
+		mock_publish.assert_not_called()
+
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.release_health.walk")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_helm_releases_refreshes_same_status_detail_without_modified(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_helm_status,
+		mock_walk,
+		mock_get_value,
+		mock_publish,
+	):
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				status="Deployed",
+				operation_token="tok-1",
+			),
+		]
+		mock_helm_status.return_value = {"info": {"status": "deployed"}}
+		mock_walk.return_value = []
+		mock_get_value.return_value = {
+			"operation_token": "tok-1",
+			"status": "Deployed",
+			"helm_status_detail": "old detail",
+		}
+
+		_reconcile_helm_releases()
+
+		mock_set_value.assert_called_once_with(
+			"Helm Release",
+			"bench-a",
+			"helm_status_detail",
+			"deployed (no workload resources)",
+			update_modified=False,
+		)
+		mock_publish.assert_not_called()
+
 	@patch("kubeport.tasks.reconciliation.frappe.log_error")
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")

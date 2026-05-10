@@ -1804,7 +1804,7 @@ def _set_helm_reconciliation_state(
 	current = frappe.db.get_value(
 		"Helm Release",
 		release_docname,
-		["operation_token", "status"],
+		["operation_token", "status", "helm_status_detail"],
 		as_dict=True,
 	)
 	if not current:
@@ -1827,13 +1827,18 @@ def _set_helm_reconciliation_state(
 
 	truncated_detail = _truncate_status_detail(detail)
 	if current.get("status") == next_status:
-		# Status unchanged: still refresh detail so the panel sees current
-		# readiness, but skip the realtime event to avoid notification spam.
+		if (current.get("helm_status_detail") or "") == (truncated_detail or ""):
+			return False
+
+		# Status unchanged: refresh the observed detail without advancing the
+		# document timestamp. Otherwise an open Helm Release form can become
+		# stale every reconciliation tick and fail the user's next save.
 		frappe.db.set_value(
 			"Helm Release",
 			release_docname,
 			"helm_status_detail",
 			truncated_detail,
+			update_modified=False,
 		)
 		return False
 

@@ -1,0 +1,64 @@
+name: Lint autofix
+
+# Auto-applies `ruff check --fix` and `ruff format` to PR branches and
+# commits the result back, so the CI lint job (.github/workflows/ci.yml)
+# does not block on mechanically fixable formatting drift.
+#
+# Caveat: GitHub does not re-trigger workflows on commits pushed with the
+# default GITHUB_TOKEN (loop prevention). If you need the `Lint` check to
+# re-run on the autofix commit, push a follow-up commit yourself, e.g.
+#   git pull --rebase && git commit --allow-empty -m "ci: rerun" && git push
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lint-autofix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  autofix:
+    name: Apply ruff autofixes
+    runs-on: ubuntu-latest
+    # Skip drafts (avoid commit noise on WIP) and forks (cannot push back via GITHUB_TOKEN).
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install ruff
+        run: pip install ruff==0.14.10
+
+      - name: Apply ruff fixes and format
+        run: |
+          ruff check --fix .
+          ruff format .
+
+      - name: Commit and push if changes
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No formatting changes."
+            exit 0
+          fi
+          git add -A
+          git commit -m "style: apply ruff autofixes"
+          git push origin HEAD:${{ github.head_ref }}
