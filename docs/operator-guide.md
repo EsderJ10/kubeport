@@ -99,15 +99,17 @@ A `Failed` Helm Release cannot be deleted directly (it might still own cluster r
 By default the Frappe/ERPNext chart deploys with `ingress.enabled=false`, so the release is only reachable from inside the cluster (`kubectl port-forward` for ad-hoc access). The Helm Release form exposes structured ingress fields that render the chart's `ingress.*` values for you:
 
 - **Enable Ingress** — toggles the rendering. When unchecked the form fields have no effect.
-- **Hostname** — required when ingress is enabled. Becomes `ingress.hosts[0].host`. The path is hard-coded to `/` with `pathType: ImplementationSpecific`.
-- **Ingress Class** — `ingress.className`. Leave blank to fall back to the cluster's default `IngressClass`.
-- **cert-manager ClusterIssuer** — optional. When set, Kubeport renders the `cert-manager.io/cluster-issuer` annotation and a `tls` block referencing secret `<release-name>-tls` (cert-manager creates the secret on first reconcile). Leave blank for HTTP-only.
+- **Hostname** — required when ingress is enabled. Becomes `ingress.hosts[0].host`. The path is hard-coded to `/` with `pathType: ImplementationSpecific`. If Kubeport sees a LoadBalancer ingress-controller IP, it suggests `<release-name>.<ip>.nip.io` for local/dev clusters without a real domain.
+- **Ingress Class** — `ingress.className`. Kubeport suggests the cluster's default `IngressClass`, or the only detected class when there is exactly one. Leave blank to let the cluster choose its default.
+- **cert-manager ClusterIssuer** — optional. Kubeport suggests a detected ready `ClusterIssuer` when cert-manager is present. When set, Kubeport renders the `cert-manager.io/cluster-issuer` annotation and a `tls` block referencing secret `<release-name>-tls` (cert-manager creates the secret on first reconcile). Leave blank for HTTP-only.
 
 These fields apply only to Frappe charts (matched by chart name containing "frappe" or "erpnext"). For other charts, configure ingress via the raw `Values` YAML.
 
 **Escape hatch.** If the raw `Values` YAML already contains an `ingress` key, Kubeport leaves it alone — the form fields are a convenience layer, not a lock-in. Use this for advanced configurations like multi-host SAN certs, custom annotations, or alternate path types.
 
-After saving with ingress changes, **Pending Changes** lights up. Click **Preview Diff** before deploying to see the `Ingress/<release>` resource being added (or its `tls` block changing) in the desired vs live diff.
+Ingress suggestions are live, read-only cluster discovery. They are not persisted anywhere except the Helm Release fields you explicitly save, and the fields remain editable when nothing is detected.
+
+After saving with ingress changes, **Pending Changes** lights up. Click **Preview Diff** before deploying to see the `Ingress/<release>` resource being added (or its `tls` block changing) in the desired vs live diff. After deployment, the Release Status area shows **Reachable at** once the live Ingress reports a load-balancer address; until then it shows that Kubeport is waiting for the address.
 
 ---
 

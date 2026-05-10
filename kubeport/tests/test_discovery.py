@@ -5,11 +5,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from frappe.tests import UnitTestCase
+from kubernetes.client.rest import ApiException
 
-from kubeport.api.discovery import adopt_helm_release, get_cluster_discovery
+from kubeport.api.discovery import adopt_helm_release, get_cluster_discovery, get_ingress_suggestions
 from kubeport.utils.discovery import (
 	_normalize_release_row,
 	_parse_site_names,
+	build_nip_io_hostname,
+	discover_cluster_issuers,
+	discover_ingress_classes,
+	discover_ingress_controller_addresses,
 	discover_release_sites,
 )
 
@@ -56,6 +61,90 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 		)
 
 		self.assertEqual(sites, [])
+
+	@patch("kubeport.utils.discovery.client.NetworkingV1Api")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client", return_value=object())
+	def test_discover_ingress_classes_marks_default_class(
+		self,
+		_mock_get_client,
+		mock_networking_v1_api,
+	):
+		networking_v1 = mock_networking_v1_api.return_value
+		networking_v1.list_ingress_class.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="internal", annotations={}),
+					spec=SimpleNamespace(controller="example.com/internal"),
+				),
+				SimpleNamespace(
+					metadata=SimpleNamespace(
+						name="nginx",
+						annotations={"ingressclass.kubernetes.io/is-default-class": "true"},
+					),
+					spec=SimpleNamespace(controller="k8s.io/ingress-nginx"),
+				),
+			]
+		)
+
+		rows = discover_ingress_classes("cluster-a")
+
+		self.assertEqual(rows[0]["name"], "nginx")
+		self.assertTrue(rows[0]["is_default"])
+
+	@patch("kubeport.utils.discovery.client.CustomObjectsApi")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client", return_value=object())
+	def test_discover_cluster_issuers_reports_missing_crd_as_unavailable(
+		self,
+		_mock_get_client,
+		mock_custom_api,
+	):
+		exc = ApiException(status=404, reason="Not Found")
+		mock_custom_api.return_value.list_cluster_custom_object.side_effect = exc
+
+		result = discover_cluster_issuers("cluster-a")
+
+		self.assertFalse(result["available"])
+		self.assertEqual(result["issuers"], [])
+
+	@patch("kubeport.utils.discovery.client.CoreV1Api")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client", return_value=object())
+	def test_discover_ingress_controller_addresses_prefers_likely_ingress_services(
+		self,
+		_mock_get_client,
+		mock_core_v1_api,
+	):
+		core_v1 = mock_core_v1_api.return_value
+		core_v1.list_service_for_all_namespaces.return_value = SimpleNamespace(
+			items=[
+				SimpleNamespace(
+					metadata=SimpleNamespace(name="app-lb", namespace="default", labels={}),
+					spec=SimpleNamespace(type="LoadBalancer", selector={}),
+					status=SimpleNamespace(
+						load_balancer=SimpleNamespace(ingress=[SimpleNamespace(ip="10.0.0.5")])
+					),
+				),
+				SimpleNamespace(
+					metadata=SimpleNamespace(
+						name="ingress-nginx-controller",
+						namespace="ingress-nginx",
+						labels={"app.kubernetes.io/name": "ingress-nginx"},
+					),
+					spec=SimpleNamespace(
+						type="LoadBalancer",
+						selector={"app.kubernetes.io/name": "ingress-nginx"},
+					),
+					status=SimpleNamespace(
+						load_balancer=SimpleNamespace(ingress=[SimpleNamespace(ip="192.168.1.50")])
+					),
+				),
+			]
+		)
+
+		rows = discover_ingress_controller_addresses("cluster-a")
+
+		self.assertEqual(rows[0]["address"], "192.168.1.50")
+		self.assertTrue(rows[0]["is_likely_ingress_controller"])
+		self.assertEqual(build_nip_io_hostname("bench-a", rows[0]["address"]), "bench-a.192.168.1.50.nip.io")
 
 	@patch("kubeport.utils.discovery.client.CoreV1Api")
 	def test_discover_release_sites_ignores_running_infra_pods(
@@ -208,6 +297,13 @@ class UnitTestClusterDiscoveryUtils(UnitTestCase):
 
 
 class UnitTestClusterDiscoveryAPI(UnitTestCase):
+	def _empty_capabilities(self):
+		return {
+			"ingress": {"available": False, "ingress_classes": [], "controller_addresses": []},
+			"cert_manager": {"available": False, "cluster_issuers": []},
+		}
+
+	@patch("kubeport.api.discovery._discover_cluster_capabilities")
 	@patch("kubeport.api.discovery.frappe.log_error")
 	@patch("kubeport.api.discovery.discover_release_sites")
 	@patch("kubeport.api.discovery.get_k8s_api_client")
@@ -218,7 +314,9 @@ class UnitTestClusterDiscoveryAPI(UnitTestCase):
 		mock_get_k8s_api_client,
 		mock_discover_release_sites,
 		_mock_log_error,
+		mock_discover_capabilities,
 	):
+		mock_discover_capabilities.return_value = self._empty_capabilities()
 		mock_discover_cluster_releases.return_value = [
 			{
 				"release_name": "bench-a",
@@ -254,14 +352,18 @@ class UnitTestClusterDiscoveryAPI(UnitTestCase):
 		self.assertEqual(result["sites"][0]["site_name"], "site1.local")
 		self.assertEqual(len(result["errors"]), 1)
 		self.assertIn("bench-b", result["errors"][0]["message"])
+		self.assertIn("capabilities", result)
 
+	@patch("kubeport.api.discovery._discover_cluster_capabilities")
 	@patch("kubeport.api.discovery.frappe.log_error")
 	@patch("kubeport.api.discovery.discover_cluster_releases")
 	def test_get_cluster_discovery_returns_cluster_error_on_helm_failure(
 		self,
 		mock_discover_cluster_releases,
 		_mock_log_error,
+		mock_discover_capabilities,
 	):
+		mock_discover_capabilities.return_value = self._empty_capabilities()
 		mock_discover_cluster_releases.side_effect = RuntimeError("helm not available")
 
 		result = get_cluster_discovery("cluster-a")
@@ -270,6 +372,38 @@ class UnitTestClusterDiscoveryAPI(UnitTestCase):
 		self.assertEqual(result["sites"], [])
 		self.assertEqual(len(result["errors"]), 1)
 		self.assertIn("Failed to list Helm releases", result["errors"][0]["message"])
+
+	@patch("kubeport.api.discovery._discover_cluster_capabilities")
+	def test_get_ingress_suggestions_returns_defaults_and_nip_hostname(
+		self,
+		mock_discover_capabilities,
+	):
+		mock_discover_capabilities.return_value = {
+			"ingress": {
+				"available": True,
+				"ingress_classes": [
+					{"name": "nginx", "is_default": True, "controller": "k8s.io/ingress-nginx"}
+				],
+				"controller_addresses": [
+					{
+						"address": "192.168.1.50",
+						"address_type": "ip",
+						"service": "ingress-nginx-controller",
+						"namespace": "ingress-nginx",
+					}
+				],
+			},
+			"cert_manager": {
+				"available": True,
+				"cluster_issuers": [{"name": "selfsigned", "ready": True}],
+			},
+		}
+
+		result = get_ingress_suggestions("cluster-a", "bench-a")
+
+		self.assertEqual(result["default_ingress_class"], "nginx")
+		self.assertEqual(result["default_cluster_issuer"], "selfsigned")
+		self.assertEqual(result["suggested_hostname"], "bench-a.192.168.1.50.nip.io")
 
 	@patch("kubeport.api.discovery.frappe.db.set_value")
 	@patch("kubeport.utils.release_health.walk", return_value=[])

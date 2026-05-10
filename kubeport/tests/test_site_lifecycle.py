@@ -68,10 +68,12 @@ def _mock_release() -> MagicMock:
 
 
 def _mock_ref_spec() -> dict:
+	# Pre-populate DB_HOST so create-site's required DB host resolution
+	# succeeds without needing a fake Service list in every lifecycle test.
 	return {
 		"image": "frappe/erpnext:v15.0.0",
 		"pod_level": {},
-		"container_env": [],
+		"container_env": [{"name": "DB_HOST", "value": "bench-a-mariadb"}],
 		"container_env_from": [],
 		"container_resources": None,
 		"container_security_context": None,

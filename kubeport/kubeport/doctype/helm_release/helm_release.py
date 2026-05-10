@@ -64,6 +64,7 @@ class HelmRelease(Document):
 		site_image: DF.Link | None
 		site_image_detail: DF.HTML | None
 		status: DF.Literal["Draft", "In Progress", "Deployed", "Degraded", "Uninstalling", "Failed"]
+		use_external_database: DF.Check
 		values: DF.Code | None
 	# end: auto-generated types
 
@@ -111,6 +112,7 @@ class HelmRelease(Document):
 			ingress_hostname=ingress_hostname,
 			ingress_class_name=ingress_class_name,
 			ingress_cluster_issuer=ingress_cluster_issuer,
+			use_external_database=getattr(self, "use_external_database", 0),
 		)
 		self.pending_changes = int(
 			bool(self.last_applied_spec_hash and self.desired_spec_hash != self.last_applied_spec_hash)
@@ -291,20 +293,31 @@ class HelmRelease(Document):
 		"""
 		from kubeport.utils.release_health import walk
 
+		# Drop the request's open transaction before shelling out to helm and
+		# the kubernetes API.  Without this, the row's read-snapshot keeps
+		# this connection in a state that can collide with reconciliation's
+		# UPDATE on the same Helm Release row, surfacing as the "Server was
+		# too busy" QueryTimeoutError popup on a slow cluster.
+		is_frappe_site_chart = _release_uses_frappe_site_chart(self)
+		release_docname = self.name
+		frappe.db.commit()
+
 		try:
 			return {
-				"rows": [r.to_dict() for r in walk(self.name)],
+				"rows": [r.to_dict() for r in walk(release_docname)],
 				"error": "",
+				"is_frappe_site_chart": is_frappe_site_chart,
 			}
 		except Exception as e:
 			frappe.logger("kubeport").warning(
 				"Could not read Helm Release health for '%s': %s",
-				self.name,
+				release_docname,
 				e,
 			)
 			return {
 				"rows": [],
 				"error": _format_observed_state_error(e),
+				"is_frappe_site_chart": is_frappe_site_chart,
 			}
 
 	@frappe.whitelist()
@@ -345,6 +358,7 @@ class HelmRelease(Document):
 				ingress_class_name=getattr(self, "ingress_class_name", None),
 				ingress_cluster_issuer=getattr(self, "ingress_cluster_issuer", None),
 				release_name=getattr(self, "release_name", None),
+				use_external_database=getattr(self, "use_external_database", 0),
 			)
 			or ""
 		)
@@ -354,11 +368,20 @@ class HelmRelease(Document):
 		"""Return live Helm revision history for this release."""
 		from kubeport.utils import helm
 
+		# Same rationale as ``get_release_health``: drop the implicit request
+		# transaction before shelling out so the held connection cannot
+		# collide with reconciliation writes on this same row.
+		release_name = self.release_name
+		namespace = self.namespace or "default"
+		cluster_name = self.cluster
+		release_docname = self.name
+		frappe.db.commit()
+
 		try:
 			history = helm.history(
-				release_name=self.release_name,
-				namespace=self.namespace or "default",
-				cluster_name=self.cluster,
+				release_name=release_name,
+				namespace=namespace,
+				cluster_name=cluster_name,
 			)
 			return {
 				"rows": history if isinstance(history, list) else [],
@@ -367,7 +390,7 @@ class HelmRelease(Document):
 		except Exception as e:
 			frappe.logger("kubeport").warning(
 				"Could not read Helm Release history for '%s': %s",
-				self.name,
+				release_docname,
 				e,
 			)
 			return {
@@ -428,6 +451,7 @@ def calculate_release_spec_hash(
 	ingress_hostname: str | None = None,
 	ingress_class_name: str | None = None,
 	ingress_cluster_issuer: str | None = None,
+	use_external_database: bool | int | None = False,
 ) -> str:
 	"""Return a stable hash for the Helm desired-state fields Kubeport applies."""
 	payload = {
@@ -442,6 +466,7 @@ def calculate_release_spec_hash(
 		"ingress_hostname": str(ingress_hostname or "").strip(),
 		"ingress_class_name": str(ingress_class_name or "").strip(),
 		"ingress_cluster_issuer": str(ingress_cluster_issuer or "").strip(),
+		"use_external_database": int(bool(use_external_database)),
 	}
 	encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 	return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -512,6 +537,7 @@ def prepare_release_values(
 	ingress_class_name: str | None = None,
 	ingress_cluster_issuer: str | None = None,
 	release_name: str | None = None,
+	use_external_database: bool | int | None = False,
 ) -> str | None:
 	"""Return values YAML ready for Helm for a Kubeport Helm Release.
 
@@ -522,6 +548,12 @@ def prepare_release_values(
 	chart-specific starter values.
 	"""
 	values_yaml = render_chart_starter_values(values_yaml, chart_doc, cluster_name)
+	values_yaml = render_bundled_database_values(
+		values_yaml,
+		chart_doc,
+		use_external_database=use_external_database,
+		release_name=release_name,
+	)
 	values_yaml = render_ingress_values(
 		values_yaml,
 		chart_doc,
@@ -536,6 +568,54 @@ def prepare_release_values(
 		site_image,
 		allow_image_override=allow_site_image_override,
 	)
+
+
+def bundled_mariadb_release_name(release_name: str | None) -> str:
+	"""Stable name of the sibling Bitnami MariaDB release for a Frappe release."""
+	return f"{str(release_name or '').strip()}-mariadb"
+
+
+def render_bundled_database_values(
+	values_yaml: str | None,
+	chart_doc: Any,
+	*,
+	use_external_database: bool | int | None,
+	release_name: str | None,
+) -> str | None:
+	"""Point a Frappe chart at the sibling Bitnami MariaDB Service Kubeport provisions.
+
+	The Frappe/ERPNext Helm chart 8.x has no ``mariadb`` subchart dependency —
+	the value ``mariadb.enabled=true`` is unused by the chart.  Kubeport's
+	"bundled MariaDB" promise is delivered by deploying a separate Bitnami
+	MariaDB Helm release named ``<release>-mariadb`` from the install/upgrade
+	task.  This function only writes the *pointer*: ``dbHost: <release>-mariadb``
+	at the top of the Frappe chart's values, which is what the chart's
+	``common_site_config.json`` reads to wire the bench at the bundled DB.
+
+	No-op when:
+	- the chart is not a Frappe site chart;
+	- the user toggled "Use External Database" — they own ``dbHost`` themselves;
+	- the user already set a top-level ``dbHost`` — explicit wins.
+	"""
+	if not is_frappe_site_chart(chart_doc) or use_external_database:
+		return values_yaml
+
+	values = _normalize_values_for_hash(values_yaml)
+	if not isinstance(values, dict):
+		frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
+
+	if str(values.get("dbHost") or "").strip():
+		return values_yaml
+
+	if not str(release_name or "").strip():
+		# Form preview before the operator types a release name — skip the
+		# injection rather than write a half-formed "<empty>-mariadb"
+		# hostname.  The deploy task always has the real name.
+		return values_yaml
+
+	rendered = dict(values)
+	rendered["dbHost"] = bundled_mariadb_release_name(release_name)
+	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
 
 
 def render_chart_starter_values(
@@ -593,10 +673,10 @@ def render_ingress_values(
 ) -> str | None:
 	"""Render Frappe-chart ingress values from structured Helm Release fields.
 
-	No-op for non-Frappe charts and when ingress is disabled.  If the user
-	already wrote any ``ingress`` block in the raw values YAML it wins — that
-	provides an escape hatch for advanced configurations (multi-host SAN,
-	custom annotations, alternate path types).
+	No-op for non-Frappe charts and when ingress is disabled.  Advanced
+	user-supplied ``ingress`` blocks still win as the escape hatch, but simple
+	single-host chart-default or Kubeport-rendered blocks are replaced so the
+	structured form fields remain the source of truth.
 	"""
 	if not is_frappe_site_chart(chart_doc) or not ingress_enabled:
 		return values_yaml
@@ -605,7 +685,7 @@ def render_ingress_values(
 	if not isinstance(values, dict):
 		frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
 
-	if values.get("ingress"):
+	if _has_advanced_ingress_override(values.get("ingress")):
 		return values_yaml
 
 	hostname = (hostname or "").strip()
@@ -644,6 +724,54 @@ def render_ingress_values(
 def is_frappe_site_chart(chart_doc: Any) -> bool:
 	chart_name = _chart_value(chart_doc, "chart_name") or _chart_value(chart_doc, "name")
 	return "erpnext" in chart_name.lower() or "frappe" in chart_name.lower()
+
+
+def _has_advanced_ingress_override(ingress_value: Any) -> bool:
+	if not isinstance(ingress_value, dict):
+		return bool(ingress_value)
+	if not ingress_value.get("enabled"):
+		return False
+
+	allowed_keys = {"enabled", "className", "hosts", "annotations", "tls"}
+	if set(ingress_value) - allowed_keys:
+		return True
+
+	hosts = ingress_value.get("hosts")
+	if not _is_single_root_ingress_host(hosts):
+		return True
+
+	annotations = ingress_value.get("annotations") or {}
+	if not isinstance(annotations, dict):
+		return True
+	if set(annotations) - {"cert-manager.io/cluster-issuer"}:
+		return True
+
+	return False
+
+
+def _is_single_root_ingress_host(hosts: Any) -> bool:
+	if not isinstance(hosts, list) or len(hosts) != 1:
+		return False
+	host = hosts[0]
+	if not isinstance(host, dict):
+		return False
+	paths = host.get("paths")
+	if not isinstance(paths, list) or len(paths) != 1:
+		return False
+	path = paths[0]
+	if not isinstance(path, dict):
+		return False
+	return path.get("path") == "/" and path.get("pathType") == "ImplementationSpecific"
+
+
+def _release_uses_frappe_site_chart(release_doc: Any) -> bool:
+	chart = getattr(release_doc, "chart", None)
+	if not chart:
+		return False
+	try:
+		return is_frappe_site_chart(frappe.get_doc("Helm Chart", chart))
+	except Exception:
+		return False
 
 
 def _normalize_values_for_hash(values_yaml: str | None) -> Any:

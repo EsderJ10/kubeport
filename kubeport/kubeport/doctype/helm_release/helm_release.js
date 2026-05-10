@@ -37,9 +37,23 @@ frappe.ui.form.on('Helm Release', {
                     }
                 }
             });
+            // Detail-only updates: status is unchanged so a `reload_doc()`
+            // would churn the form and trip the modified-timestamp guard.
+            // Patch `helm_status_detail` in place and re-render the panel.
+            frappe.realtime.on('helm_release_detail_update', (data) => {
+                if (data.release_docname !== frm.doc.name) return;
+                if (typeof data.helm_status_detail === 'string') {
+                    frm.doc.helm_status_detail = data.helm_status_detail;
+                    if (frm.fields_dict.helm_status_detail) {
+                        frm.refresh_field('helm_status_detail');
+                    }
+                }
+                kubeport_render_release_health(frm);
+            });
         }
 
         kubeport_render_release_health(frm);
+        kubeport_configure_ingress_suggestions(frm);
     },
 
     chart: function(frm) {
@@ -65,10 +79,12 @@ frappe.ui.form.on('Helm Release', {
                     );
                 }
                 kubeport_configure_site_image_selector(frm, chart_doc);
+                kubeport_configure_ingress_suggestions(frm, chart_doc);
             });
         } else {
             frm.set_value('site_image', '');
             kubeport_configure_site_image_selector(frm);
+            kubeport_clear_ingress_suggestions(frm);
         }
     },
 
@@ -79,6 +95,15 @@ frappe.ui.form.on('Helm Release', {
     cluster: function(frm) {
         // When the cluster changes, reset namespace to default
         frm.set_value('namespace', 'default');
+        kubeport_configure_ingress_suggestions(frm);
+    },
+
+    release_name: function(frm) {
+        kubeport_configure_ingress_suggestions(frm);
+    },
+
+    ingress_enabled: function(frm) {
+        kubeport_configure_ingress_suggestions(frm);
     },
 
     load_defaults: function(frm) {
@@ -175,6 +200,137 @@ function kubeport_is_site_chart(chart_doc) {
     if (!chart_doc) return false;
     const name = String(chart_doc.chart_name || chart_doc.name || '').toLowerCase();
     return name.includes('erpnext') || name.includes('frappe');
+}
+
+function kubeport_configure_ingress_suggestions(frm, chart_doc) {
+    if (!frm.doc.ingress_enabled || !frm.doc.cluster || !frm.doc.release_name) {
+        kubeport_clear_ingress_suggestions(frm);
+        return;
+    }
+
+    const apply_for_chart = (chart) => {
+        if (!kubeport_is_site_chart(chart)) {
+            kubeport_clear_ingress_suggestions(frm);
+            return;
+        }
+        kubeport_fetch_ingress_suggestions(frm);
+    };
+
+    if (chart_doc) {
+        apply_for_chart(chart_doc);
+        return;
+    }
+
+    if (!frm.doc.chart) {
+        kubeport_clear_ingress_suggestions(frm);
+        return;
+    }
+
+    frappe.db.get_doc('Helm Chart', frm.doc.chart).then(apply_for_chart, () => {
+        kubeport_clear_ingress_suggestions(frm);
+    });
+}
+
+function kubeport_fetch_ingress_suggestions(frm) {
+    const request_id = (frm.__kubeport_ingress_suggestion_request_id || 0) + 1;
+    frm.__kubeport_ingress_suggestion_request_id = request_id;
+
+    kubeport_render_ingress_suggestions(frm, {
+        loading: true,
+        ingress_classes: [],
+        cluster_issuers: [],
+        controller_addresses: [],
+        errors: []
+    });
+
+    frappe.call({
+        method: 'kubeport.api.discovery.get_ingress_suggestions',
+        args: {
+            cluster_name: frm.doc.cluster,
+            release_name: frm.doc.release_name
+        }
+    }).then((r) => {
+        if (request_id !== frm.__kubeport_ingress_suggestion_request_id) return;
+        const payload = (r && r.message) || {};
+        kubeport_apply_ingress_suggestions(frm, payload);
+        kubeport_render_ingress_suggestions(frm, payload);
+    }, () => {
+        if (request_id !== frm.__kubeport_ingress_suggestion_request_id) return;
+        kubeport_render_ingress_suggestions(frm, {
+            errors: [{ message: __('Could not load ingress suggestions.') }]
+        });
+    });
+}
+
+function kubeport_apply_ingress_suggestions(frm, payload) {
+    if (!frm.doc.ingress_hostname && payload.suggested_hostname) {
+        frm.set_value('ingress_hostname', payload.suggested_hostname);
+    }
+    if (!frm.doc.ingress_class_name && payload.default_ingress_class) {
+        frm.set_value('ingress_class_name', payload.default_ingress_class);
+    }
+    if (!frm.doc.ingress_cluster_issuer && payload.default_cluster_issuer) {
+        frm.set_value('ingress_cluster_issuer', payload.default_cluster_issuer);
+    }
+}
+
+function kubeport_render_ingress_suggestions(frm, payload) {
+    const field = frm.fields_dict.ingress_cluster_issuer;
+    if (!field || !field.$wrapper) return;
+
+    let $panel = field.$wrapper.find('.kubeport-ingress-suggestions');
+    if (!$panel.length) {
+        $panel = $('<div class="kubeport-ingress-suggestions"></div>');
+        field.$wrapper.append($panel);
+    }
+
+    if (payload.loading) {
+        $panel.html(`<div class="text-muted small">${__('Loading ingress suggestions...')}</div>`);
+        return;
+    }
+
+    const errors = Array.isArray(payload.errors) ? payload.errors : [];
+    const classes = Array.isArray(payload.ingress_classes) ? payload.ingress_classes : [];
+    const issuers = Array.isArray(payload.cluster_issuers) ? payload.cluster_issuers : [];
+    const addresses = Array.isArray(payload.controller_addresses) ? payload.controller_addresses : [];
+    const suggestion_bits = [];
+
+    if (payload.suggested_hostname) {
+        suggestion_bits.push(__('Suggested hostname: {0}', [payload.suggested_hostname]));
+    }
+    if (payload.default_ingress_class) {
+        suggestion_bits.push(__('Class: {0}', [payload.default_ingress_class]));
+    }
+    if (payload.default_cluster_issuer) {
+        suggestion_bits.push(__('Issuer: {0}', [payload.default_cluster_issuer]));
+    }
+
+    let html = '<div class="small" style="margin-top: 8px;">';
+    if (suggestion_bits.length) {
+        html += `<div class="text-muted">${frappe.utils.escape_html(suggestion_bits.join(' | '))}</div>`;
+    } else {
+        html += `<div class="text-muted">${__('No ingress defaults were detected. You can still enter values manually.')}</div>`;
+    }
+    html += `<div class="text-muted" style="margin-top: 4px;">
+        ${__('Detected classes')}: ${classes.length || 0} |
+        ${__('ClusterIssuers')}: ${issuers.length || 0} |
+        ${__('Controller addresses')}: ${addresses.length || 0}
+    </div>`;
+    if (errors.length) {
+        html += `<div class="text-muted" style="margin-top: 4px;">
+            ${frappe.utils.escape_html(errors[0].message || __('Some ingress discovery checks failed.'))}
+        </div>`;
+    }
+    html += '</div>';
+    $panel.html(html);
+}
+
+function kubeport_clear_ingress_suggestions(frm) {
+    frm.__kubeport_ingress_suggestion_request_id = (frm.__kubeport_ingress_suggestion_request_id || 0) + 1;
+    const field = frm.fields_dict && frm.fields_dict.ingress_cluster_issuer;
+    if (field && field.$wrapper) {
+        field.$wrapper.find('.kubeport-ingress-suggestions').remove();
+    }
 }
 
 function kubeport_render_site_image_detail(frm) {
@@ -481,6 +637,7 @@ function kubeport_render_release_health(frm) {
         if (request_id !== frm.__helm_release_health_request_id) return;
         if (r && !r.exc) {
             const payload = r.message || {};
+            frm.__kubeport_release_health_is_frappe_chart = Boolean(payload.is_frappe_site_chart);
             kubeport_paint_health_rows(frm, $wrapper, payload.rows || [], payload.error || '');
         } else {
             $wrapper.html(
@@ -534,12 +691,14 @@ function kubeport_paint_health_rows(frm, $body, rows, error) {
 
     if (!rows.length) {
         $body.html(
-            `${error_html}
+            `${kubeport_render_reachability(frm, rows)}
+             ${error_html}
              <div class="text-muted small">${__('No workload resources found in this release.')}</div>`
         );
         return;
     }
 
+    const reachability_html = kubeport_render_reachability(frm, rows);
     const lines = rows.map((row) => {
         const dot = row.ready
             ? '<span style="color: var(--green-500);">●</span>'
@@ -564,7 +723,7 @@ function kubeport_paint_health_rows(frm, $body, rows, error) {
             </div>
         `;
     }).join('');
-    $body.html(`${error_html}${lines}`);
+    $body.html(`${reachability_html}${error_html}${lines}`);
     $body.find('.kubeport-health-action').on('click', function() {
         const $button = $(this);
         const row = {
@@ -582,6 +741,51 @@ function kubeport_paint_health_rows(frm, $body, rows, error) {
             kubeport_show_resource_rollout(frm, row);
         }
     });
+}
+
+function kubeport_render_reachability(frm, rows) {
+    if (!frm.doc.ingress_enabled || !frm.doc.ingress_hostname) return '';
+    if (frm.__kubeport_release_health_is_frappe_chart === false) return '';
+
+    const ingress_rows = (rows || []).filter((row) => row.kind === 'Ingress');
+    if (!ingress_rows.length) return '';
+
+    const ready_row = ingress_rows.find((row) => {
+        return row.ready && Array.isArray(row.addresses) && row.addresses.length;
+    });
+    if (ready_row) {
+        const scheme = frm.doc.ingress_cluster_issuer ? 'https' : 'http';
+        const host = kubeport_effective_ingress_host(frm, ready_row);
+        const url = `${scheme}://${host}`;
+        return `
+            <div style="margin-bottom: 8px; padding: 8px;
+                        border: 1px solid var(--border-color); border-radius: 4px;">
+                <span class="indicator green"></span>
+                ${__('Reachable at:')}
+                <a href="${kubeport_escape_attr(url)}" target="_blank" rel="noopener noreferrer">
+                    ${frappe.utils.escape_html(url)}
+                </a>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="text-muted small"
+             style="margin-bottom: 8px; padding: 8px;
+                    border: 1px solid var(--border-color); border-radius: 4px;">
+            <span class="indicator orange"></span>
+            ${__('Waiting for load balancer address.')}
+        </div>
+    `;
+}
+
+function kubeport_escape_attr(value) {
+    return frappe.utils.escape_html(value == null ? '' : String(value)).replace(/"/g, '&quot;');
+}
+
+function kubeport_effective_ingress_host(frm, ingress_row) {
+    const hosts = Array.isArray(ingress_row.hosts) ? ingress_row.hosts : [];
+    return hosts[0] || frm.doc.ingress_hostname;
 }
 
 function kubeport_render_health_actions(row) {

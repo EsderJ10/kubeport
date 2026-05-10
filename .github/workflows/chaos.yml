@@ -174,7 +174,13 @@ jobs:
         run: |
           cd frappe-bench
           set -o pipefail
-          SCENARIO_OUT=$(env/bin/python \
+          # Tee the scenario's stdout into a file so we always have it in the
+          # artifact, even if the python summary or upstream pipe steps fail.
+          # Earlier runs ate the script's RESULT_BEGIN/END output entirely
+          # because the original ``$(cmd)`` capture interacted badly with
+          # bash's errexit, leaving only the step preamble in the GHA log.
+          set +e
+          env/bin/python \
             "$GITHUB_WORKSPACE/kubeport/eval/faults/_inproc_worker_kill.py" \
             --site test_site \
             --bench-path "$PWD" \
@@ -184,12 +190,15 @@ jobs:
             --kubeconfig-context "k3d-chaos" \
             --fast-forward \
             --in-progress-poll-seconds 180 \
-            --recovery-poll-seconds 600)
-          printf '%s\n' "$SCENARIO_OUT"
-          printf '%s\n' "$SCENARIO_OUT" \
-            | sed -n '/^RESULT_BEGIN$/,/^RESULT_END$/p' \
-            | sed '1d;$d' \
-            > /tmp/scenario.json
+            --recovery-poll-seconds 600 2>&1 | tee /tmp/scenario_stdout.log
+          PY_EXIT=${PIPESTATUS[0]}
+          set -e
+          sed -n '/^RESULT_BEGIN$/,/^RESULT_END$/p' /tmp/scenario_stdout.log \
+            | sed '1d;$d' > /tmp/scenario.json
+          if [ ! -s /tmp/scenario.json ]; then
+            echo "::error::No RESULT_BEGIN/RESULT_END markers in scenario output (python exit=$PY_EXIT)"
+            exit 1
+          fi
           python3 - <<'PY'
           import json
           import sys
@@ -211,6 +220,7 @@ jobs:
           name: chaos-report
           path: |
             /tmp/scenario.json
+            /tmp/scenario_stdout.log
             /tmp/worker-long.log
             /tmp/chart-server.log
 

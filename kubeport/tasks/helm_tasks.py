@@ -24,7 +24,9 @@ import yaml
 
 from kubeport.kubeport.doctype.helm_release.helm_release import (
 	_get_site_image_digest_for_hash,
+	bundled_mariadb_release_name,
 	calculate_release_spec_hash,
+	is_frappe_site_chart,
 	prepare_release_values,
 )
 from kubeport.utils import helm, metrics
@@ -33,6 +35,13 @@ from kubeport.utils.release_health import ResourceHealth, classify_release_state
 _HELM_STATUS_DETAIL_LIMIT = 500
 _DEPLOYABLE_WORKER_STATUS = "In Progress"
 _UNINSTALLING_WORKER_STATUS = "Uninstalling"
+
+# Bitnami's MariaDB OCI chart.  Pinned for reproducibility — bumps go through
+# code review since a Bitnami breaking change would silently break every
+# bundled-MariaDB Frappe release on the next install/upgrade.  Verify any
+# bump exists with: ``helm show chart oci://registry-1.docker.io/bitnamicharts/mariadb --version <X.Y.Z>``.
+_BUNDLED_MARIADB_CHART_REF = "oci://registry-1.docker.io/bitnamicharts/mariadb"
+_BUNDLED_MARIADB_CHART_VERSION = "25.1.1"
 
 # ---------------------------------------------------------------------------
 # Repository Tasks
@@ -77,6 +86,7 @@ def _add_and_sync_repo_impl(repo_name: str, sync_token: str):
 			{"repo_name": repo_name, "status": "Synced"},
 			doctype="Helm Repository",
 			docname=repo_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -93,6 +103,7 @@ def _add_and_sync_repo_impl(repo_name: str, sync_token: str):
 			{"repo_name": repo_name, "status": "Error"},
 			doctype="Helm Repository",
 			docname=repo_name,
+			after_commit=True,
 		)
 
 
@@ -138,6 +149,7 @@ def _sync_repo_charts_impl(repo_name: str, sync_token: str):
 			{"repo_name": repo_name, "status": "Synced"},
 			doctype="Helm Repository",
 			docname=repo_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -154,6 +166,7 @@ def _sync_repo_charts_impl(repo_name: str, sync_token: str):
 			{"repo_name": repo_name, "status": "Error"},
 			doctype="Helm Repository",
 			docname=repo_name,
+			after_commit=True,
 		)
 
 
@@ -231,6 +244,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			"ingress_hostname",
 			"ingress_class_name",
 			"ingress_cluster_issuer",
+			"use_external_database",
 		],
 		as_dict=True,
 	)
@@ -252,6 +266,18 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			ingress_class_name=release.get("ingress_class_name"),
 			ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
 			release_name=release["release_name"],
+			use_external_database=release.get("use_external_database"),
+		)
+
+		# Provision the sibling MariaDB *before* the parent so the bench's
+		# post-install configuration jobs can reach a database (or at least
+		# resolve its Service and wait).  Idempotent: re-runs are no-ops.
+		_ensure_bundled_mariadb_release(
+			parent_release_name=release["release_name"],
+			namespace=release["namespace"] or "default",
+			cluster_name=release["cluster"],
+			chart_doc=chart_doc,
+			use_external_database=release.get("use_external_database"),
 		)
 
 		result = helm.install_or_upgrade(
@@ -306,6 +332,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 				ingress_hostname=release.get("ingress_hostname"),
 				ingress_class_name=release.get("ingress_class_name"),
 				ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
+				use_external_database=release.get("use_external_database"),
 			)
 			fields.update(
 				{
@@ -327,6 +354,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -355,6 +383,7 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 
@@ -390,6 +419,7 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 			"ingress_hostname",
 			"ingress_class_name",
 			"ingress_cluster_issuer",
+			"use_external_database",
 		],
 		as_dict=True,
 	)
@@ -456,6 +486,7 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 				ingress_hostname=release.get("ingress_hostname"),
 				ingress_class_name=release.get("ingress_class_name"),
 				ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
+				use_external_database=release.get("use_external_database"),
 			)
 			fields.update(
 				{
@@ -479,6 +510,7 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 	except Exception as e:
@@ -507,6 +539,7 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 
@@ -537,6 +570,17 @@ def _uninstall_release_impl(release_name: str, operation_token: str):
 	try:
 		helm.uninstall(
 			release_name=release["release_name"],
+			namespace=release["namespace"] or "default",
+			cluster_name=release["cluster"],
+		)
+
+		# Cascade to the sibling MariaDB if there is one.  We don't gate on
+		# use_external_database here: the field may have flipped between
+		# deploy and uninstall, and a sibling that was provisioned must still
+		# be cleaned up.  The helper is itself idempotent and 404-tolerant,
+		# so it's safe to run unconditionally.
+		_uninstall_bundled_mariadb_release(
+			parent_release_name=release["release_name"],
 			namespace=release["namespace"] or "default",
 			cluster_name=release["cluster"],
 		)
@@ -573,6 +617,7 @@ def _uninstall_release_impl(release_name: str, operation_token: str):
 			},
 			doctype="Helm Release",
 			docname=release_name,
+			after_commit=True,
 		)
 
 
@@ -584,6 +629,84 @@ def _uninstall_release_impl(release_name: str, operation_token: str):
 def _set_helm_release_fields(release_name: str, values: dict[str, object]) -> None:
 	for fieldname, value in values.items():
 		frappe.db.set_value("Helm Release", release_name, fieldname, value)
+
+
+def _bundled_mariadb_values(parent_release_name: str) -> str:
+	"""Return values YAML for the sibling Bitnami MariaDB release.
+
+	``fullnameOverride`` is required so the rendered Service and Secret are
+	named exactly ``<parent>-mariadb`` (Bitnami's default would prepend the
+	sibling release name and produce ``<parent>-mariadb-mariadb``).  That
+	canonical name is what the parent's ``dbHost`` and Kubeport's auto-wire
+	both look for.
+	"""
+	sibling = bundled_mariadb_release_name(parent_release_name)
+	return yaml.safe_dump(
+		{
+			"fullnameOverride": sibling,
+			# Bitnami auto-generates a root password into the
+			# ``<sibling>-mariadb`` Secret with key ``mariadb-root-password``.
+			# Kubeport's auto-wire on the Frappe Site doc finds it by
+			# Bitnami convention, so the operator never has to copy it.
+			"auth": {},
+		},
+		default_flow_style=False,
+		sort_keys=False,
+	)
+
+
+def _ensure_bundled_mariadb_release(
+	parent_release_name: str,
+	namespace: str,
+	cluster_name: str,
+	chart_doc: object,
+	use_external_database: bool | int | None,
+) -> None:
+	"""Idempotently ensure the sibling Bitnami MariaDB release exists.
+
+	No-op when the chart is not a Frappe site chart or the operator opted
+	into external-DB topology.  ``helm upgrade --install`` is itself
+	idempotent: re-running with the same values is a no-op, the StatefulSet
+	keeps its PVC, no data is lost.
+	"""
+	if not is_frappe_site_chart(chart_doc):
+		return
+	if use_external_database:
+		return
+
+	sibling = bundled_mariadb_release_name(parent_release_name)
+	values_yaml = _bundled_mariadb_values(parent_release_name)
+	helm.install_or_upgrade(
+		release_name=sibling,
+		chart_ref=_BUNDLED_MARIADB_CHART_REF,
+		namespace=namespace,
+		cluster_name=cluster_name,
+		values_yaml=values_yaml,
+		chart_version=_BUNDLED_MARIADB_CHART_VERSION,
+	)
+
+
+def _uninstall_bundled_mariadb_release(
+	parent_release_name: str,
+	namespace: str,
+	cluster_name: str,
+) -> None:
+	"""Cascade-uninstall the sibling.  Best-effort: a missing sibling is fine
+	(operator may have removed it manually, or it was never bundled), and a
+	non-404 failure is logged but not propagated — we don't block the parent's
+	uninstall on sibling cleanup.  The PVC behind the StatefulSet is deleted
+	as part of the helm uninstall.
+	"""
+	sibling = bundled_mariadb_release_name(parent_release_name)
+	try:
+		helm.uninstall(release_name=sibling, namespace=namespace, cluster_name=cluster_name)
+	except Exception as exc:
+		if helm.is_release_not_found_error(exc):
+			return
+		frappe.log_error(
+			title=f"Bundled MariaDB cascade uninstall failed: {sibling}",
+			message=str(exc),
+		)
 
 
 def _safe_walk(release_name: str) -> tuple[list[ResourceHealth], str | None]:
@@ -637,6 +760,7 @@ def _finalize_uninstall_success(
 		},
 		doctype="Helm Release",
 		docname=release_docname,
+		after_commit=True,
 	)
 
 
