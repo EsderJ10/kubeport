@@ -490,7 +490,7 @@ These close gaps already named in `docs/control-plane-state.md` §Open Gaps. **P
 
 ---
 
-### TODO-19 — `feat/site-health-surface`
+### TODO-19 — `feat/site-health-surface` ✅ DONE 2026-05-10 — 57f8aea
 
 **Goal**: Mirror the Helm Release observability panel on `Frappe Site`.
 
