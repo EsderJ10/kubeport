@@ -368,6 +368,33 @@ class FrappeSite(Document):
 		)
 		return {"backup_docname": backup.name}
 
+	@frappe.whitelist()
+	def get_site_health(self) -> dict[str, object]:
+		"""Return per-resource readiness for the form drilldown panel.
+
+		The site is hosted on its bench release; the bench's workload
+		readiness is the per-site health surface.  Pure observed state —
+		never persisted.  Called via ``frappe.xcall`` from the form, not
+		from ``onload``, so a slow cluster cannot block document load.
+		"""
+		from kubeport.utils.release_health import walk
+
+		if not self.bench_release:
+			return {"rows": [], "error": "This site has no bench release."}
+
+		try:
+			return {
+				"rows": [r.to_dict() for r in walk(self.bench_release)],
+				"error": "",
+			}
+		except Exception as e:
+			frappe.logger("kubeport").warning(
+				"Could not read Frappe Site health for '%s': %s",
+				self.name,
+				e,
+			)
+			return {"rows": [], "error": _format_observed_state_error(e)}
+
 	def _has_in_flight_backup(self) -> bool:
 		status_filter = ["in", ["Pending", "In Progress", "Restoring"]]
 		if frappe.db.exists(
@@ -529,6 +556,14 @@ class FrappeSite(Document):
 			enqueue_after_commit=True,
 		)
 		_cancel_inflight_backups_for_site(self.name, reason="Source site row was deleted.")
+
+
+def _format_observed_state_error(error: Exception) -> str:
+	from kubeport.utils import helm
+
+	if helm.is_release_not_found_error(error):
+		return "No Helm release exists yet for this site's bench. Deploy the bench release before reading live state."
+	return str(error)
 
 
 def _cancel_inflight_backups_for_site(site_docname: str, *, reason: str) -> None:

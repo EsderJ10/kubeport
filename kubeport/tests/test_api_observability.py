@@ -17,6 +17,23 @@ def _release_doc(cluster: str = "server-cluster", namespace: str = "erp", releas
 	return doc
 
 
+def _site_doc(bench_release: str = "server-cluster/erp/bench"):
+	doc = MagicMock()
+	doc.bench_release = bench_release
+	return doc
+
+
+def _site_get_doc(site, release):
+	def fake(doctype, name):
+		if doctype == "Frappe Site":
+			return site
+		if doctype == "Helm Release":
+			return release
+		raise AssertionError(f"unexpected doctype {doctype}")
+
+	return fake
+
+
 class UnitTestObservabilityAPI(UnitTestCase):
 	def setUp(self):
 		super().setUp()
@@ -29,6 +46,9 @@ class UnitTestObservabilityAPI(UnitTestCase):
 			"get_release_resource_logs",
 			"get_release_resource_events",
 			"get_release_resource_rollout",
+			"get_site_resource_logs",
+			"get_site_resource_events",
+			"get_site_resource_rollout",
 		):
 			method = getattr(observability, method_name)
 			signature = inspect.signature(method)
@@ -443,6 +463,171 @@ class UnitTestObservabilityAPI(UnitTestCase):
 				kind="Deployment",
 				name="bench-web",
 				pod_name="other-pod",
+			)
+
+		mock_throw.assert_called_once()
+
+	@patch("kubeport.api.observability.frappe.get_doc")
+	def test_site_endpoint_rejects_non_system_manager_before_loading_site(self, mock_get_doc):
+		self.mock_only_for.side_effect = RuntimeError("No permission")
+
+		with self.assertRaisesRegex(RuntimeError, "No permission"):
+			observability.get_site_resource_events(
+				site_docname="cluster-a/erp/bench/site-1",
+				kind="Pod",
+				name="bench-web-1",
+			)
+
+		mock_get_doc.assert_not_called()
+
+	@patch("kubeport.api.observability.get_pod_logs", return_value="pod logs")
+	@patch("kubeport.api.observability.list_pods_for_resource")
+	@patch("kubeport.api.observability.helm.get_manifest")
+	@patch("kubeport.api.observability.frappe.get_doc")
+	def test_site_logs_endpoint_resolves_cluster_via_bench_release(
+		self,
+		mock_get_doc,
+		mock_get_manifest,
+		mock_list_pods,
+		mock_get_logs,
+	):
+		site = _site_doc()
+		release = _release_doc()
+		mock_get_doc.side_effect = _site_get_doc(site, release)
+		mock_get_manifest.return_value = [
+			{"kind": "Deployment", "metadata": {"name": "bench-web"}},
+		]
+		mock_list_pods.return_value = [{"name": "bench-web-1", "container_names": ["web"]}]
+
+		result = observability.get_site_resource_logs(
+			site_docname="cluster-a/erp/bench/site-1",
+			kind="Deployment",
+			name="bench-web",
+			container="web",
+			tail_lines=500,
+			previous=True,
+		)
+
+		self.assertEqual(result["logs_by_pod"]["bench-web-1"], "pod logs")
+		self.assertEqual(result["selected_pod"], "bench-web-1")
+		self.mock_only_for.assert_called_with("System Manager")
+		site.check_permission.assert_called_once_with("read")
+		release.check_permission.assert_called_once_with("read")
+		mock_get_manifest.assert_called_once_with(
+			release_name="bench",
+			namespace="erp",
+			cluster_name="server-cluster",
+		)
+		mock_list_pods.assert_called_once_with("server-cluster", "erp", "Deployment", "bench-web")
+		mock_get_logs.assert_called_once_with(
+			cluster="server-cluster",
+			namespace="erp",
+			pod="bench-web-1",
+			container="web",
+			tail_lines=500,
+			previous=True,
+		)
+
+	@patch("kubeport.api.observability.list_resource_events", return_value=[{"reason": "Pulled"}])
+	@patch("kubeport.api.observability.helm.get_manifest")
+	@patch("kubeport.api.observability.frappe.get_doc")
+	def test_site_events_endpoint_returns_rows_via_bench_release(
+		self,
+		mock_get_doc,
+		mock_get_manifest,
+		mock_list_events,
+	):
+		mock_get_doc.side_effect = _site_get_doc(_site_doc(), _release_doc())
+		mock_get_manifest.return_value = [
+			{"kind": "Pod", "metadata": {"name": "bench-web-1"}},
+		]
+
+		result = observability.get_site_resource_events(
+			site_docname="cluster-a/erp/bench/site-1",
+			kind="Pod",
+			name="bench-web-1",
+			limit=5,
+		)
+
+		self.assertEqual(result, {"rows": [{"reason": "Pulled"}], "error": ""})
+		mock_list_events.assert_called_once_with(
+			cluster="server-cluster",
+			namespace="erp",
+			kind="Pod",
+			name="bench-web-1",
+			limit=5,
+		)
+
+	@patch("kubeport.api.observability.get_rollout_history", return_value=[{"revision": "1"}])
+	@patch("kubeport.api.observability.helm.get_manifest")
+	@patch("kubeport.api.observability.frappe.get_doc")
+	def test_site_rollout_endpoint_returns_rows_via_bench_release(
+		self,
+		mock_get_doc,
+		mock_get_manifest,
+		mock_get_rollout,
+	):
+		mock_get_doc.side_effect = _site_get_doc(_site_doc(), _release_doc())
+		mock_get_manifest.return_value = [
+			{"kind": "Deployment", "metadata": {"name": "bench-web"}},
+		]
+
+		result = observability.get_site_resource_rollout(
+			site_docname="cluster-a/erp/bench/site-1",
+			kind="Deployment",
+			name="bench-web",
+			limit=5,
+		)
+
+		self.assertEqual(result, {"rows": [{"revision": "1"}], "error": ""})
+		mock_get_rollout.assert_called_once_with(
+			cluster="server-cluster",
+			namespace="erp",
+			kind="Deployment",
+			name="bench-web",
+			limit=5,
+		)
+
+	@patch("kubeport.api.observability.frappe.throw")
+	@patch("kubeport.api.observability.helm.get_manifest")
+	@patch("kubeport.api.observability.frappe.get_doc")
+	def test_site_events_endpoint_rejects_resource_not_in_bench_manifest(
+		self,
+		mock_get_doc,
+		mock_get_manifest,
+		mock_throw,
+	):
+		mock_get_doc.side_effect = _site_get_doc(_site_doc(), _release_doc())
+		mock_get_manifest.return_value = [
+			{"kind": "Pod", "metadata": {"name": "bench-web-1"}},
+		]
+		mock_throw.side_effect = RuntimeError("not part")
+
+		with self.assertRaisesRegex(RuntimeError, "not part"):
+			observability.get_site_resource_events(
+				site_docname="cluster-a/erp/bench/site-1",
+				kind="Pod",
+				name="other-pod",
+			)
+
+		mock_throw.assert_called_once()
+
+	@patch("kubeport.api.observability.frappe.throw")
+	@patch("kubeport.api.observability.frappe.get_doc")
+	def test_site_endpoint_rejects_site_without_bench_release(
+		self,
+		mock_get_doc,
+		mock_throw,
+	):
+		site = _site_doc(bench_release="")
+		mock_get_doc.return_value = site
+		mock_throw.side_effect = RuntimeError("no bench release")
+
+		with self.assertRaisesRegex(RuntimeError, "no bench release"):
+			observability.get_site_resource_rollout(
+				site_docname="cluster-a/erp/bench/site-1",
+				kind="Deployment",
+				name="bench-web",
 			)
 
 		mock_throw.assert_called_once()

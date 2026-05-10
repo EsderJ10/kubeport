@@ -156,10 +156,10 @@ The codebase actively defends against imperfect cluster conditions:
 
 ### Discovery and Observability
 
-- Discovery is a UI payload, not a richer observed-state model. Helm Release health shows resource
-  readiness and release-scoped drilldowns for pod logs, Kubernetes events, and workload rollout
-  context, but there is still no per-Frappe-Site health surface, no real-time log streaming, and
-  no cluster-wide event timeline.
+- Discovery is a UI payload, not a richer observed-state model. Helm Release and Frappe Site forms
+  share the same workload-readiness surface with per-resource drilldowns for pod logs, Kubernetes
+  events, and rollout context (the site form scopes the bench release that hosts it). Real-time log
+  streaming and a cluster-wide event timeline remain out of scope.
 - Supported bench discovery is intentionally narrow: only official `erpnext` chart releases. Widening to other chart variants requires deliberate design.
 - Discovery data is not linked back to persisted `Helm Release` documents beyond matching names and namespaces.
 
