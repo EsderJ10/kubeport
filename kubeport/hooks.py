@@ -253,6 +253,7 @@ require_type_annotated_api_methods = True
 fixtures = [
 	{"dt": "Number Card", "filters": [["module", "=", "Kubeport"]]},
 	{"dt": "Dashboard Chart", "filters": [["module", "=", "Kubeport"]]},
+	{"dt": "Dashboard", "filters": [["module", "=", "Kubeport"]]},
 ]
 
 # default_log_clearing_doctypes = {
