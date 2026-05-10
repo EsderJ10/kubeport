@@ -602,7 +602,6 @@ class UnitTestReconciliation(UnitTestCase):
 
 		mock_log_error.assert_called_once()
 
-	@patch("kubeport.tasks.reconciliation.frappe.logger")
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
 	@patch("kubeport.tasks.reconciliation._helm_operation_is_stale", return_value=True)
