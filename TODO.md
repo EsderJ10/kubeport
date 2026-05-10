@@ -247,7 +247,7 @@
 
 ## P2 — FORMAL & SECURITY FRAMING (cheap thesis-writing wins)
 
-### TODO-09 — `docs/formal-invariants`
+### TODO-09 — `docs/formal-invariants` ✅ DONE 2026-05-10 — 790fd0b
 
 **Goal**: Restate the four design invariants as numbered Safety / Liveness / Eventual-Consistency properties with code-level witnesses.
 
