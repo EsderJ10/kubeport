@@ -999,6 +999,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 			status=SimpleNamespace(succeeded=succeeded, failed=failed),
 		)
 
+	@patch("kubeport.tasks.reconciliation.frappe.utils.now_datetime")
 	@patch("kubeport.tasks.reconciliation._extract_backup_success_metadata")
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
@@ -1013,6 +1014,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		mock_db_set_value,
 		mock_publish,
 		mock_metadata,
+		mock_now,
 	):
 		mock_get_all.return_value = [self._backup()]
 		mock_metadata.return_value = {"size_bytes": 42, "bench_archive_name": "db.sql.gz"}
@@ -1044,6 +1046,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		self.assertEqual(backup_write[2]["size_bytes"], 42)
 		mock_publish.assert_called()
 
+	@patch("kubeport.tasks.reconciliation.frappe.utils.now_datetime")
 	@patch("kubeport.tasks.reconciliation._probe_site_state")
 	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
@@ -1056,6 +1059,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		mock_db_get_value,
 		mock_db_set_value,
 		mock_probe_state,
+		mock_now,
 	):
 		mock_get_all.return_value = [self._backup(status="Restoring")]
 		mock_db_get_value.side_effect = [
@@ -1078,6 +1082,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 			{"status": "Active", "status_detail": ""},
 		)
 
+	@patch("kubeport.tasks.reconciliation.frappe.utils.now_datetime")
 	@patch("kubeport.tasks.reconciliation._extract_job_failure_detail")
 	@patch("kubeport.tasks.reconciliation._probe_site_state")
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
@@ -1094,6 +1099,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 		mock_publish,
 		mock_probe_state,
 		mock_failure_detail,
+		mock_now,
 	):
 		detail = "bench restore failed: database import failed"
 		mock_get_all.return_value = [self._backup(status="Restoring")]

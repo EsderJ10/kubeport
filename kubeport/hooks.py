@@ -241,6 +241,20 @@ export_python_type_annotations = True
 # Require all whitelisted methods to have type annotations
 require_type_annotated_api_methods = True
 
+# Fixtures
+# --------
+# Number Cards and Dashboard Charts ship as fixtures so the Kubeport
+# Operations Workspace renders out-of-the-box on a fresh install.  The
+# Workspace itself is auto-installed by Frappe via the module folder
+# convention (kubeport/workspace/kubeport_operations/).  Authoring a
+# Workspace by hand is brittle across Frappe versions — the canonical
+# workflow is: tweak inside Desk → run `bench export-fixtures` → commit
+# the regenerated JSON.
+fixtures = [
+	{"dt": "Number Card", "filters": [["module", "=", "Kubeport"]]},
+	{"dt": "Dashboard Chart", "filters": [["module", "=", "Kubeport"]]},
+]
+
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
 # }

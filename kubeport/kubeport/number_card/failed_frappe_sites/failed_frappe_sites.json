@@ -1,0 +1,20 @@
+{
+ "color": "#FF5858",
+ "doctype": "Number Card",
+ "document_type": "Frappe Site",
+ "dynamic_filters_json": "[]",
+ "filters_json": "[[\"Frappe Site\",\"status\",\"=\",\"Failed\",false]]",
+ "function": "Count",
+ "is_public": 1,
+ "is_standard": 1,
+ "label": "Failed Frappe Sites",
+ "method": null,
+ "module": "Kubeport",
+ "name": "Failed Frappe Sites",
+ "owner": "Administrator",
+ "report_function": null,
+ "report_name": null,
+ "show_percentage_stats": 0,
+ "stats_time_interval": "Daily",
+ "type": "Document Type"
+}
