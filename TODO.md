@@ -108,7 +108,7 @@
 
 ## P1 — EVALUATION HARNESS (the empirical chapter that earns most of the 9→10 delta)
 
-### TODO-04 — `feat/eval-harness`
+### TODO-04 — `feat/eval-harness` ✅ DONE 2026-05-10 — 65d7c8f
 
 **Goal**: A reproducible end-to-end evaluation harness that boots an ephemeral k3d cluster and runs the golden Kubeport workflow, emitting a machine-readable report.
 

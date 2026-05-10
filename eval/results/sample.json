@@ -1,0 +1,140 @@
+{
+  "context": {
+    "backup_docname": "eval-20260510t090342z.localhost::eval-20260510t090342z.localhost-20260510111612",
+    "chart_doc_name": "frappe/erpnext",
+    "chart_name": "erpnext",
+    "chart_version": "",
+    "cluster_doc_created": false,
+    "cluster_doc_name": "demo-k3d",
+    "deploy_skipped_already_deployed": true,
+    "helm_repo_name": "frappe",
+    "helm_repo_url": "https://helm.erpnext.com",
+    "install_apps": "erpnext",
+    "kubeconfig_context": "k3d-pacopepe",
+    "namespace": "demo",
+    "release_doc_created": false,
+    "release_doc_name": "demo-k3d/demo/demo-bench",
+    "release_name": "demo-bench",
+    "site_doc_created": true,
+    "site_doc_name": "demo-k3d/demo/demo-bench/eval-20260510t090342z.localhost",
+    "site_image": "",
+    "site_name": "eval-20260510t090342z.localhost"
+  },
+  "duration_seconds": 1709.96,
+  "finished_at": "2026-05-10T09:32:14Z",
+  "generated_at": "2026-05-10T09:32:14Z",
+  "host_wall_seconds": 1711.549,
+  "invocation": {
+    "bench_site": "frappe-k8s.localhost",
+    "chart_name": "erpnext",
+    "chart_version": "",
+    "cluster_doc_name": "demo-k3d",
+    "helm_repo_name": "frappe",
+    "helm_repo_url": "https://helm.erpnext.com",
+    "install_apps": "erpnext",
+    "namespace": "demo",
+    "release_name": "demo-bench",
+    "site_image": "",
+    "site_name": "eval-20260510t090342z.localhost"
+  },
+  "phases": [
+    {
+      "detail": "",
+      "duration_seconds": 0.465,
+      "finished_at": "2026-05-10T09:03:44Z",
+      "phase": "setup_cluster_doc",
+      "started_at": "2026-05-10T09:03:44Z",
+      "status": "passed",
+      "timeout_seconds": 60
+    },
+    {
+      "detail": "",
+      "duration_seconds": 0.663,
+      "finished_at": "2026-05-10T09:03:45Z",
+      "phase": "setup_helm_repo",
+      "started_at": "2026-05-10T09:03:44Z",
+      "status": "passed",
+      "timeout_seconds": 240
+    },
+    {
+      "detail": "",
+      "duration_seconds": 0.025,
+      "finished_at": "2026-05-10T09:03:45Z",
+      "phase": "verify_chart",
+      "started_at": "2026-05-10T09:03:45Z",
+      "status": "passed",
+      "timeout_seconds": 30
+    },
+    {
+      "detail": "",
+      "duration_seconds": 0.002,
+      "finished_at": "2026-05-10T09:03:45Z",
+      "phase": "create_release",
+      "started_at": "2026-05-10T09:03:45Z",
+      "status": "passed",
+      "timeout_seconds": 30
+    },
+    {
+      "detail": "",
+      "duration_seconds": 0.001,
+      "finished_at": "2026-05-10T09:03:45Z",
+      "phase": "deploy_release",
+      "started_at": "2026-05-10T09:03:45Z",
+      "status": "passed",
+      "timeout_seconds": 900
+    },
+    {
+      "detail": "",
+      "duration_seconds": 570.884,
+      "finished_at": "2026-05-10T09:13:16Z",
+      "phase": "create_site",
+      "started_at": "2026-05-10T09:03:45Z",
+      "status": "passed",
+      "timeout_seconds": 900
+    },
+    {
+      "detail": "",
+      "duration_seconds": 176.117,
+      "finished_at": "2026-05-10T09:16:12Z",
+      "phase": "migrate_site",
+      "started_at": "2026-05-10T09:13:16Z",
+      "status": "passed",
+      "timeout_seconds": 600
+    },
+    {
+      "detail": "",
+      "duration_seconds": 244.184,
+      "finished_at": "2026-05-10T09:20:16Z",
+      "phase": "backup_site",
+      "started_at": "2026-05-10T09:16:12Z",
+      "status": "passed",
+      "timeout_seconds": 600
+    },
+    {
+      "detail": "",
+      "duration_seconds": 472.393,
+      "finished_at": "2026-05-10T09:28:09Z",
+      "phase": "restore_site",
+      "started_at": "2026-05-10T09:20:16Z",
+      "status": "passed",
+      "timeout_seconds": 600
+    },
+    {
+      "detail": "",
+      "duration_seconds": 245.227,
+      "finished_at": "2026-05-10T09:32:14Z",
+      "phase": "drop_site",
+      "started_at": "2026-05-10T09:28:09Z",
+      "status": "passed",
+      "timeout_seconds": 600
+    }
+  ],
+  "schema_version": 1,
+  "started_at": "2026-05-10T09:03:44Z",
+  "summary": {
+    "failed": 0,
+    "passed": 10,
+    "skipped": 0,
+    "total": 10
+  }
+}

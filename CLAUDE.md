@@ -66,6 +66,7 @@ bench --site <site> run-tests --app kubeport --doctype <DocType>
 | `docs/control-plane-state.md` | Capabilities, robustness defences, open gaps |
 | `docs/codebase-summary.md` | Module-level architecture reference |
 | `docs/history/` | Archived planning documents (see its README) |
+| `eval/README.md` | End-to-end evaluation harness (`make eval`) |
 | `CHANGELOG.md` | Architecture decision log |
 
 Update docs in the same commit when changes affect discovery, tasks, or state semantics.
