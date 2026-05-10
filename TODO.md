@@ -1,524 +1,522 @@
-# Kubeport Roadmap — 9/10 → 10/10 Thesis
+# Hoja de ruta de Kubeport — Tesis 9/10 → 10/10
 
-> Execution-ordered TODO for AI coding agents. Each item is self-contained: a fresh
-> agent can pick it up cold from the linked files. Read the **Agent Preamble** first.
-> When you finish a task, mark it `✅ DONE <YYYY-MM-DD> — <commit/PR>` in place; do
-> not delete the entry.
+> Lista de tareas ordenada por ejecución para agentes de IA. Cada elemento es autocontenido: un agente nuevo puede retomarlo desde cero a partir de los ficheros enlazados. Lee primero el **Preámbulo del agente**.
+> Cuando termines una tarea, márcala como `✅ DONE <YYYY-MM-DD> — <commit/PR>` en su lugar; no elimines la entrada.
 
 ---
 
-## Agent Preamble (read before touching anything)
+## Preámbulo del agente (leer antes de tocar nada)
 
-### Hard invariants (from `AGENTS.md` and `CLAUDE.md`)
+### Invariantes estrictos (de `AGENTS.md` y `CLAUDE.md`)
 
-1. **Desired state → MariaDB. Observed state → live cluster queries. Never mix.**
-2. **All cluster mutations go through `frappe.enqueue(..., queue="long", enqueue_after_commit=True)`.** Never call Helm/K8s mutating APIs from the web thread.
-3. **Discovery is read-only.** Never persist discovered state.
-4. **Concurrency**: rotate per-run `operation_token` / `sync_token`; re-check before any state write. Never `doc.reload()` in a worker — use `frappe.db.get_value` / `db_set`.
-5. **Form rendering**: external cluster data via `frappe.xcall` + client-side rendering, never `doc.onload`.
-6. **Cluster scoping**: build clients via `get_k8s_api_client(cluster_name)`; no global state.
-7. **Type annotations on every whitelisted API method** (`require_type_annotated_api_methods = True`).
+1. **Estado deseado → MariaDB. Estado observado → consultas en vivo al clúster. Nunca mezclarlos.**
+2. **Todas las mutaciones del clúster van a través de `frappe.enqueue(..., queue="long", enqueue_after_commit=True)`.** Nunca llamar a las APIs mutantes de Helm/K8s desde el hilo web.
+3. **El descubrimiento es de solo lectura.** Nunca persistir el estado descubierto.
+4. **Concurrencia**: rotar `operation_token` / `sync_token` por ejecución; verificar de nuevo antes de cualquier escritura de estado. Nunca usar `doc.reload()` en un worker — usar `frappe.db.get_value` / `db_set`.
+5. **Renderizado de formularios**: datos externos del clúster mediante `frappe.xcall` + renderizado en el cliente, nunca en `doc.onload`.
+6. **Alcance de clúster**: construir clientes mediante `get_k8s_api_client(cluster_name)`; sin estado global.
+7. **Anotaciones de tipo en todos los métodos de API públicos** (`require_type_annotated_api_methods = True`).
 
-### Style
-- Tabs, double quotes, 110 cols, `ruff format` for Python, `prettier` for JS/CSS.
-- ASCII unless the file already has non-ASCII.
-- Default to no comments; only when the **why** is non-obvious.
+### Estilo
+- Tabuladores, comillas dobles, 110 columnas, `ruff format` para Python, `prettier` para JS/CSS.
+- Solo ASCII salvo que el fichero ya contenga caracteres no ASCII.
+- Sin comentarios por defecto; solo cuando el **porqué** no sea evidente.
 
-### Toolchain
-- **Bench runs inside the dev container, NOT on the host.** `bench` commands fail on the host. Sibling repo at `~/workspace/school/tfg` holds the dev container; container is often stopped between sessions.
-- **Do not install tooling locally.** No `pip install`, `brew`, `apt`. Use the containerised lint:
-  - `make fmt` — format in place
-  - `make lint` — report
-  - `make fix` — autofix + format
-  - `make lint-check` — exact CI dry-run
-- Pre-commit must be installed inside the bench checkout: `cd apps/kubeport && pre-commit install`.
-- Tests: `bench --site <site> run-tests --app kubeport --doctype <DocType>` — only inside the dev container.
+### Cadena de herramientas
+- **Bench se ejecuta dentro del contenedor de desarrollo, NO en el host.** Los comandos `bench` fallan en el host. El repositorio hermano en `~/workspace/school/tfg` contiene el contenedor de desarrollo; el contenedor suele estar parado entre sesiones.
+- **No instalar herramientas localmente.** Sin `pip install`, `brew`, `apt`. Usar el linter del contenedor:
+  - `make fmt` — formatear en local
+  - `make lint` — reportar
+  - `make fix` — corregir automáticamente y formatear
+  - `make lint-check` — ejecución exacta en modo CI
+- Pre-commit debe instalarse dentro del checkout de bench: `cd apps/kubeport && pre-commit install`.
+- Tests: `bench --site <site> run-tests --app kubeport --doctype <DocType>` — solo dentro del contenedor de desarrollo.
 
-### Git hygiene
-- **Conventional, single-line commit messages. No body. No `Co-Authored-By` trailer.** Match the existing `git log` style.
-- Branch names follow: `fix/`, `feat/`, `chore/`, `refactor/`, `docs/`, `style/`, `ci/`, `test/`.
-- Never amend; always create a new commit.
-- Never use `--no-verify`.
+### Higiene de Git
+- **Mensajes de commit convencionales, en una sola línea. Sin cuerpo. Sin tráiler `Co-Authored-By`.** Seguir el estilo del `git log` existente.
+- Los nombres de rama siguen el esquema: `fix/`, `feat/`, `chore/`, `refactor/`, `docs/`, `style/`, `ci/`, `test/`.
+- Nunca usar amend; crear siempre un commit nuevo.
+- Nunca usar `--no-verify`.
 
-### Documentation policy
-- If a change affects discovery, tasks, or state semantics, update the relevant doc in `docs/` **in the same commit**.
-- Docs map: `README.md` (entry), `AGENTS.md` (invariants), `CONTRIBUTING.md` (dev), `SECURITY.md` (disclosure), `docs/architecture.md` (C4 + invariants), `docs/operator-guide.md` (workflows), `docs/control-plane-state.md` (capability + gap inventory), `docs/codebase-summary.md` (per-module reference), `docs/thesis.md` (project framing), `CHANGELOG.md` (decision log).
+### Política de documentación
+- Si un cambio afecta al descubrimiento, las tareas o la semántica de estado, actualizar el documento correspondiente en `docs/` **en el mismo commit**.
+- Mapa de documentos: `README.md` (entrada), `AGENTS.md` (invariantes), `CONTRIBUTING.md` (desarrollo), `SECURITY.md` (divulgación), `docs/architecture.md` (C4 + invariantes), `docs/operator-guide.md` (flujos de trabajo), `docs/control-plane-state.md` (inventario de capacidades y brechas), `docs/codebase-summary.md` (referencia por módulo), `docs/thesis.md` (marco del proyecto), `CHANGELOG.md` (registro de decisiones).
 
 ---
 
-## P0 — STABILIZATION (blocks every later milestone)
+## P0 — ESTABILIZACIÓN (bloquea todos los hitos posteriores)
 
 ### TODO-01 — `fix/k8s-client-py314-drift` ✅ DONE 2026-05-10 — dcdb6a3
 
-**Goal**: Make `kubeport/tests/test_k8s_client.py` pass against Python 3.14 + the current `kubernetes` client.
+**Objetivo**: Hacer que `kubeport/tests/test_k8s_client.py` pase con Python 3.14 + el cliente `kubernetes` actual.
 
-**Context**: `docs/control-plane-state.md` "Next Steps" line currently lists this as a pre-existing failure: `test_k8s_client (Python 3.14 / kubernetes-client API call signature drift)`. A thesis defense cannot ship with a red test in master.
+**Contexto**: La sección "Próximos pasos" de `docs/control-plane-state.md` lista esto como un fallo preexistente: `test_k8s_client (Python 3.14 / kubernetes-client API call signature drift)`. No se puede presentar la defensa de tesis con un test en rojo en master.
 
-**Approach**:
-1. Run the test inside the dev container: `bench --site test_site run-tests --app kubeport --module kubeport.tests.test_k8s_client`.
-2. Read the failure. Likely a kwarg renamed or a signature reordered between client versions consumed by `kubeport/utils/k8s_client.py` (180 lines, single file).
-3. **Fix the consumer (`utils/k8s_client.py`)**, not the test, unless the test asserts behaviour the new client legitimately changed — then update the assertion and add a comment naming the upstream change.
-4. Re-run the full reconciliation suite to confirm no regression: `bench --site test_site run-tests --app kubeport`.
+**Enfoque**:
+1. Ejecutar el test dentro del contenedor de desarrollo: `bench --site test_site run-tests --app kubeport --module kubeport.tests.test_k8s_client`.
+2. Leer el fallo. Probablemente un kwarg renombrado o una firma reordenada entre versiones del cliente consumido por `kubeport/utils/k8s_client.py` (180 líneas, fichero único).
+3. **Corregir el consumidor (`utils/k8s_client.py`)**, no el test, salvo que el test afirme un comportamiento que el nuevo cliente haya cambiado legítimamente — en ese caso, actualizar la aserción y añadir un comentario indicando el cambio en upstream.
+4. Volver a ejecutar la suite completa de reconciliación para confirmar que no hay regresiones: `bench --site test_site run-tests --app kubeport`.
 
-**Acceptance criteria**:
-- `test_k8s_client` passes locally and in CI (`.github/workflows/ci.yml`).
-- No new failures elsewhere.
-- `make lint-check` clean.
+**Criterios de aceptación**:
+- `test_k8s_client` pasa en local y en CI (`.github/workflows/ci.yml`).
+- Sin nuevos fallos en otras partes.
+- `make lint-check` sin errores.
 
-**Files**: `kubeport/utils/k8s_client.py`, `kubeport/tests/test_k8s_client.py`.
+**Ficheros**: `kubeport/utils/k8s_client.py`, `kubeport/tests/test_k8s_client.py`.
 
 ---
 
 ### TODO-02 — `fix/reconcile-service-bundles-test` ✅ DONE 2026-05-10 — a592928
 
-**Goal**: Make the failing reconcile-service-bundles test pass.
+**Objetivo**: Hacer que el test fallido de reconciliación de service bundles pase.
 
-**Context**: Same `control-plane-state.md` line lists `test_reconcile_service_bundles` as needing investigation independent of Frappe Site work.
+**Contexto**: La misma línea de `control-plane-state.md` lista `test_reconcile_service_bundles` como pendiente de investigación, independientemente del trabajo sobre Frappe Site.
 
-**Approach**:
-1. Run: `bench --site test_site run-tests --app kubeport --module kubeport.tests.test_reconciliation` and isolate the failing case.
-2. Diagnose root cause. Service Bundle reconciliation lives in `kubeport/tasks/reconciliation.py` (1925 lines — search for `service_bundle` / `reconcile_service_bundles`). Resource existence check is in `kubeport/utils/k8s_resources.py`.
-3. Fix the underlying issue. Do not silence the test, do not add `@skip`, do not weaken the assertion.
+**Enfoque**:
+1. Ejecutar: `bench --site test_site run-tests --app kubeport --module kubeport.tests.test_reconciliation` y aislar el caso fallido.
+2. Diagnosticar la causa raíz. La reconciliación de Service Bundle se encuentra en `kubeport/tasks/reconciliation.py` (1925 líneas — buscar `service_bundle` / `reconcile_service_bundles`). La comprobación de existencia de recursos está en `kubeport/utils/k8s_resources.py`.
+3. Corregir el problema subyacente. No silenciar el test, no añadir `@skip`, no debilitar la aserción.
 
-**Acceptance criteria**:
-- All `test_reconciliation.py` tests pass in CI.
-- Root cause documented in the commit message body (one line: e.g., `fix: service bundle reconcile mishandles 404 from custom resource list`).
+**Criterios de aceptación**:
+- Todos los tests de `test_reconciliation.py` pasan en CI.
+- Causa raíz documentada en el cuerpo del mensaje de commit (una línea: p. ej., `fix: service bundle reconcile mishandles 404 from custom resource list`).
 
-**Files**: `kubeport/tasks/reconciliation.py`, `kubeport/utils/k8s_resources.py`, `kubeport/tests/test_reconciliation.py`.
+**Ficheros**: `kubeport/tasks/reconciliation.py`, `kubeport/utils/k8s_resources.py`, `kubeport/tests/test_reconciliation.py`.
 
 ---
 
 ### TODO-03 — `chore/strip-known-failures-disclaimer` ✅ DONE 2026-05-10 — 61eca03
 
-**Goal**: Remove the "Pre-existing test failures" disclaimer once TODO-01 and TODO-02 are merged.
+**Objetivo**: Eliminar el aviso de "fallos de test preexistentes" una vez que TODO-01 y TODO-02 estén fusionados.
 
-**Approach**:
-- Edit `docs/control-plane-state.md`: delete the line `6. **Pre-existing test failures**: ...` under `## Next Steps`.
-- No other doc changes; TODO-01/02 commits already covered the code.
+**Enfoque**:
+- Editar `docs/control-plane-state.md`: eliminar la línea `6. **Pre-existing test failures**: ...` bajo `## Next Steps`.
+- Sin otros cambios en la documentación; los commits de TODO-01/02 ya cubrieron el código.
 
-**Acceptance criteria**:
-- No remaining mention of "pre-existing test failures" in `docs/`.
-- CI green.
+**Criterios de aceptación**:
+- Sin mención alguna a "fallos de test preexistentes" en `docs/`.
+- CI en verde.
 
-**Depends on**: TODO-01, TODO-02.
+**Depende de**: TODO-01, TODO-02.
 
-**Files**: `docs/control-plane-state.md`.
+**Ficheros**: `docs/control-plane-state.md`.
 
 ---
 
-## P1 — EVALUATION HARNESS (the empirical chapter that earns most of the 9→10 delta)
+## P1 — CONJUNTO DE EVALUACIÓN (el capítulo empírico que aporta la mayor parte del delta 9→10)
 
 ### TODO-04 — `feat/eval-harness` ✅ DONE 2026-05-10 — 65d7c8f
 
-**Goal**: A reproducible end-to-end evaluation harness that boots an ephemeral k3d cluster and runs the golden Kubeport workflow, emitting a machine-readable report.
+**Objetivo**: Un conjunto de evaluación de extremo a extremo reproducible que arranca un clúster k3d efímero y ejecuta el flujo de trabajo dorado de Kubeport, emitiendo un informe legible por máquina.
 
-**Why this matters**: `docs/thesis.md` §5 currently claims "Met" for each objective without quantitative evidence. This harness is the source of the numbers that will populate §6 Evaluación.
+**Por qué importa**: El §5 de `docs/thesis.md` afirma actualmente "Cumplido" para cada objetivo sin evidencia cuantitativa. Este conjunto es la fuente de los números que poblarán el §6 Evaluación.
 
-**Scope**:
-1. New top-level directory: `eval/`.
-2. `eval/Makefile` (or extend root `Makefile` with `make eval`) that:
-   - Boots a fresh k3d cluster (if one is not already present, it will reuse the dev container's bench site for Kubeport itself).
-   - Drives the golden path through the Kubeport REST/Frappe API (use `frappe.client.get_list` etc. via HTTP), or via a `bench execute` helper, **not** by simulating clicks:
-     1. Create a `Kubernetes Cluster` row pointing at the k3d cluster.
-     2. Create a `Helm Repository` row for the curated `frappe/erpnext` repo.
-     3. Trigger chart sync; wait until `Helm Chart` rows appear.
-     4. Create a `Helm Release` for ERPNext using the curated `Kubeport Site Image`.
-     5. Wait until release reaches `Deployed`.
-     6. Create a `Frappe Site` linked to the release; wait until `Active`.
-     7. Trigger `bench migrate`; wait until back to `Active`.
-     8. Trigger backup; wait for `Frappe Site Backup` row to reach `Available`.
-     9. Trigger restore from that backup; wait for `Active`.
-     10. Drop the site; confirm row deletion.
-   - Per-phase wall-clock timing recorded.
-   - Emits `eval/results/<utc-timestamp>.json` with `{ phase, started_at, finished_at, duration_seconds, status }` per phase and an overall summary.
-3. A reference `eval/results/sample.json` checked in with one good run for thesis quoting.
-4. `eval/README.md` explaining setup (k3d version, prerequisites), the golden path, and how to interpret the JSON.
+**Alcance**:
+1. Nuevo directorio de primer nivel: `eval/`.
+2. `eval/Makefile` (o extensión del `Makefile` raíz con `make eval`) que:
+   - Arranca un clúster k3d limpio (si no hay uno ya presente, reutilizará el site bench del contenedor de desarrollo para el propio Kubeport).
+   - Ejecuta el flujo dorado a través de la API REST/Frappe de Kubeport (usar `frappe.client.get_list` etc. por HTTP), o mediante un helper `bench execute`, **no** simulando clics:
+     1. Crear una fila `Kubernetes Cluster` apuntando al clúster k3d.
+     2. Crear una fila `Helm Repository` para el repositorio curado `frappe/erpnext`.
+     3. Disparar la sincronización de charts; esperar hasta que aparezcan filas `Helm Chart`.
+     4. Crear una `Helm Release` para ERPNext usando la `Kubeport Site Image` curada.
+     5. Esperar hasta que la release alcance el estado `Deployed`.
+     6. Crear un `Frappe Site` vinculado a la release; esperar hasta `Active`.
+     7. Disparar `bench migrate`; esperar hasta volver a `Active`.
+     8. Disparar una copia de seguridad; esperar a que la fila `Frappe Site Backup` alcance `Available`.
+     9. Disparar la restauración desde esa copia de seguridad; esperar hasta `Active`.
+     10. Eliminar el site; confirmar la eliminación de la fila.
+   - Tiempo de reloj de pared registrado por fase.
+   - Emite `eval/results/<utc-timestamp>.json` con `{ phase, started_at, finished_at, duration_seconds, status }` por fase y un resumen global.
+3. Un `eval/results/sample.json` de referencia incluido en el repositorio con una ejecución correcta para citar en la tesis.
+4. `eval/README.md` explicando la configuración (versión de k3d, requisitos previos), el flujo dorado y cómo interpretar el JSON.
 
-**Constraints**:
-- Must run inside the existing dev container; no host-side installs (see Preamble).
-- Must not require network access to private registries — uses only the curated public GHCR Site Image.
-- Idempotent: rerunning produces a new timestamped report; never overwrites previous reports.
+**Restricciones**:
+- Debe ejecutarse dentro del contenedor de desarrollo existente; sin instalaciones en el host (ver Preámbulo).
+- Debe poder reutilizarse; al volver a ejecutarse produce un nuevo informe con marca de tiempo; nunca sobreescribe informes anteriores.
+- No debe requerir acceso de red a registros privados — usa únicamente la imagen de site pública curada en GHCR.
 
-**Acceptance criteria**:
-- `make eval` from a clean dev container produces a JSON report whose every phase is `status: "passed"`.
-- `eval/results/sample.json` is committed and matches the schema documented in `eval/README.md`.
-- Total runtime < 25 min on a stock developer laptop.
+**Criterios de aceptación**:
+- `make eval` desde un contenedor de desarrollo limpio produce un informe JSON cuya cada fase tiene `status: "passed"`.
+- `eval/results/sample.json` está incluido en el repositorio y coincide con el esquema documentado en `eval/README.md`.
+- Tiempo total de ejecución < 25 min en un portátil de desarrollador estándar.
 
-**Files**: new `eval/` tree, root `Makefile`.
+**Ficheros**: nuevo árbol `eval/`, `Makefile` raíz.
 
 ---
 
 ### TODO-05 — `feat/eval-fault-injection` ✅ DONE 2026-05-10 — 4ee574b/752d1b8/53cbfb4/f97de5f
 
-> Closing note: All four scenarios pass under `make eval-faults`
-> (fast-forward) — see `eval/results/sample-faults.json`. A real-time
-> sample (without `--fast-forward`) is the natural follow-up: TODO-04
-> already covers the reuse-mode fixture, and the remaining work is one
-> ~35-min run with `make eval-faults-real`. The scaffolding also
-> surfaced one latent bug (`fix: stale helm reconciliation reads
-> values field via dict subscript not attribute`, c9cb8be), which is
-> exactly what fault injection is supposed to do.
+> Nota de cierre: Los cuatro escenarios pasan bajo `make eval-faults`
+> (avance rápido) — ver `eval/results/sample-faults.json`. Una muestra
+> en tiempo real (sin `--fast-forward`) es el seguimiento natural: TODO-04
+> ya cubre el fixture de modo reutilización, y el trabajo restante es una
+> ejecución de ~35 min con `make eval-faults-real`. El andamiaje también
+> descubrió un bug latente (`fix: stale helm reconciliation reads
+> values field via dict subscript not attribute`, c9cb8be), que es
+> exactamente para lo que sirve la inyección de fallos.
 
-**Goal**: Empirically validate the robustness defenses listed in `docs/control-plane-state.md` §Robustness Properties.
+**Objetivo**: Validar empíricamente las defensas de robustez listadas en `docs/control-plane-state.md` §Propiedades de robustez.
 
-**Depends on**: TODO-04 (reuses the harness).
+**Depende de**: TODO-04 (reutiliza el conjunto de evaluación).
 
-**Scope**: Implement these four scenarios as `eval/faults/<name>.py` scripts driven by `make eval-faults`:
+**Alcance**: Implementar estos cuatro escenarios como scripts `eval/faults/<nombre>.py` ejecutados por `make eval-faults`:
 
-| Scenario | Inject | Expected behaviour | Measure |
+| Escenario | Inyección | Comportamiento esperado | Medición |
 |---|---|---|---|
-| `worker_kill_mid_helm_upgrade` | `kill -9` the RQ long worker after `helm upgrade --install` is invoked but before status writes back | Stale-operation reconciler recovers the row within 30 min; final status `Deployed`; spec hash matches desired | MTTR (start of inject → row reaches `Deployed`) |
-| `job_ttl_expired_before_reconcile` | Force-delete the operation Job before reconciliation tick reads it | Reconciliation falls back to ground-truth bench probe; row reaches correct terminal state, not `Failed` by default | Final status, time to terminal |
-| `pod_exec_timeout_during_site_probe` | Inject a sleep into the pod-exec call wrapping `bench list-apps` | `_probe_site_state` returns `unknown`; row stays `In Progress` for that tick; next tick recovers | Number of ticks deferred; final status |
-| `corrupt_archive_size_sidecar` | Truncate the `<archive>.size` file mid-flight on the `kubeport-backups` PVC | PVC probe returns `missing`/`unknown`; backup row is marked `Failed`, archive trash cleanup runs, archive file removed from PVC | Final status, archive file presence on PVC |
+| `worker_kill_mid_helm_upgrade` | `kill -9` al worker RQ largo tras invocar `helm upgrade --install` pero antes de que el estado vuelva a escribirse | El reconciliador de operaciones obsoletas recupera la fila en menos de 30 min; estado final `Deployed`; el hash de especificación coincide con el estado deseado | MTTR (inicio de inyección → fila alcanza `Deployed`) |
+| `job_ttl_expired_before_reconcile` | Forzar el borrado del Job de operación antes de que el tick de reconciliación lo lea | La reconciliación recurre a la sonda ground-truth de bench; la fila alcanza el estado terminal correcto, no `Failed` por defecto | Estado final, tiempo hasta terminal |
+| `pod_exec_timeout_during_site_probe` | Inyectar un sleep en la llamada pod-exec que envuelve `bench list-apps` | `_probe_site_state` devuelve `unknown`; la fila permanece en `In Progress` durante ese tick; el siguiente tick recupera | Número de ticks diferidos; estado final |
+| `corrupt_archive_size_sidecar` | Truncar el fichero `<archive>.size` a mitad de vuelo en el PVC `kubeport-backups` | La sonda PVC devuelve `missing`/`unknown`; la fila de backup se marca como `Failed`, se ejecuta la limpieza de archivos basura, el fichero de archivo se elimina del PVC | Estado final, presencia del fichero de archivo en el PVC |
 
-**Output**: `eval/results/faults-<utc-timestamp>.json` with `{ scenario, injected_at, recovered_at, mttr_seconds, expected, observed, passed }` per row.
+**Salida**: `eval/results/faults-<utc-timestamp>.json` con `{ scenario, injected_at, recovered_at, mttr_seconds, expected, observed, passed }` por fila.
 
-**Acceptance criteria**:
-- All four scenarios pass end-to-end.
-- MTTR for `worker_kill_mid_helm_upgrade` ≤ 30 min (matches the documented stale-op recovery window).
-- `eval/README.md` updated with a "Fault scenarios" table mapping each scenario to the defended invariant in `docs/control-plane-state.md`.
+**Criterios de aceptación**:
+- Los cuatro escenarios pasan de extremo a extremo.
+- MTTR para `worker_kill_mid_helm_upgrade` ≤ 30 min (coincide con la ventana de recuperación de operaciones obsoletas documentada).
+- `eval/README.md` actualizado con una tabla de "Escenarios de fallo" que mapea cada escenario al invariante defendido en `docs/control-plane-state.md`.
 
-**Files**: `eval/faults/`, `eval/results/`, `eval/README.md`, root `Makefile` (add `eval-faults` target).
+**Ficheros**: `eval/faults/`, `eval/results/`, `eval/README.md`, `Makefile` raíz (añadir objetivo `eval-faults`).
 
 ---
 
 ### TODO-06 — `feat/eval-baseline-comparison` ✅ DONE 2026-05-10 — 4ad9a4b
 
-**Goal**: Side-by-side comparison of the same workflow run with raw `kubectl + helm` vs. through Kubeport. Validates the SOTA claim in `docs/thesis.md` §2.
+**Objetivo**: Comparación lado a lado del mismo flujo de trabajo ejecutado con `kubectl + helm` puro frente a Kubeport. Valida la afirmación sobre el estado del arte en `docs/thesis.md` §2.
 
-**Depends on**: TODO-04.
+**Depende de**: TODO-04.
 
-**Scope**:
-1. `eval/baseline/run.sh` — bash script that performs the same 10-step workflow with raw `kubectl` and `helm` only (no Kubeport).
-2. Records: total wall-clock per phase, distinct shell commands issued, manual interventions required (counted as `manual_steps`).
-3. Emits `eval/results/baseline-<timestamp>.json` matching the harness schema plus `commands_issued` and `manual_steps` fields.
-4. `eval/baseline/README.md` documents the comparison methodology — same target cluster, same chart, same image, otherwise no Kubeport at all.
+**Alcance**:
+1. `eval/baseline/run.sh` — script bash que realiza el mismo flujo de 10 pasos con `kubectl` y `helm` puros (sin Kubeport).
+2. Registra: tiempo de reloj de pared total por fase, comandos de shell distintos emitidos, intervenciones manuales requeridas (contadas como `manual_steps`).
+3. Emite `eval/results/baseline-<timestamp>.json` siguiendo el esquema del conjunto de evaluación más los campos `commands_issued` y `manual_steps`.
+4. `eval/baseline/README.md` documenta la metodología de comparación — mismo clúster objetivo, mismo chart, misma imagen, sin Kubeport en absoluto.
 
-**Acceptance criteria**:
-- `make eval-baseline` produces a JSON report.
-- `eval/results/sample-baseline.json` checked in.
-- A `eval/results/comparison.md` summarises Kubeport vs. baseline in a Markdown table (phase, baseline-seconds, kubeport-seconds, commands, manual-steps).
+**Criterios de aceptación**:
+- `make eval-baseline` produce un informe JSON.
+- `eval/results/sample-baseline.json` incluido en el repositorio.
+- Un `eval/results/comparison.md` resume Kubeport frente a la línea base en una tabla Markdown (fase, segundos-baseline, segundos-kubeport, comandos, pasos-manuales).
 
-**Files**: `eval/baseline/`, `eval/results/`, root `Makefile`.
+**Ficheros**: `eval/baseline/`, `eval/results/`, `Makefile` raíz.
 
 ---
 
 ### TODO-07 — `feat/eval-scaling` ✅ DONE 2026-05-10 — c4bbc37
 
-**Goal**: Characterise how Kubeport scales with N persisted rows.
+**Objetivo**: Caracterizar cómo escala Kubeport con N filas persistidas.
 
-**Depends on**: TODO-04.
+**Depende de**: TODO-04.
 
-**Scope**:
-1. `eval/scaling/seed.py` — bulk-creates N synthetic Helm Release / Service Bundle / Frappe Site rows in `Deployed` / `Active` state without touching a real cluster (use a mock cluster fixture for read paths). Use `frappe.db.bulk_insert` to avoid hook overhead.
-2. Run reconciliation N ∈ {1, 10, 100, 1000} times, measure tick latency.
-3. Sample helm-subprocess latency from the existing logs across the harness run (TODO-04) — extract via a structured-log post-processor in `eval/scaling/extract_latencies.py`.
-4. Emit `eval/results/scaling.json` and plot to `eval/results/scaling-tick-latency.png` using matplotlib (matplotlib is already available in the dev container — confirm before adding a dep).
+**Alcance**:
+1. `eval/scaling/seed.py` — crea en masa N filas sintéticas de Helm Release / Service Bundle / Frappe Site en estado `Deployed` / `Active` sin tocar un clúster real (usar un fixture de clúster simulado para las rutas de lectura). Usar `frappe.db.bulk_insert` para evitar la sobrecarga de hooks.
+2. Ejecutar la reconciliación N ∈ {1, 10, 100, 1000} veces, medir la latencia de tick.
+3. Muestrear la latencia del subproceso helm desde los logs existentes a lo largo de la ejecución del conjunto de evaluación (TODO-04) — extraer mediante un postprocesador de logs estructurados en `eval/scaling/extract_latencies.py`.
+4. Emitir `eval/results/scaling.json` y representar gráficamente en `eval/results/scaling-tick-latency.png` usando matplotlib (matplotlib ya está disponible en el contenedor de desarrollo — confirmar antes de añadir una dependencia).
 
-**Acceptance criteria**:
-- `make eval-scaling` produces JSON + PNG.
-- Tick-latency growth shape (linear, log-linear) is annotated in the JSON `regression` field.
+**Criterios de aceptación**:
+- `make eval-scaling` produce JSON + PNG.
+- La forma de crecimiento de la latencia de tick (lineal, log-lineal) está anotada en el campo `regression` del JSON.
 
-**Files**: `eval/scaling/`, root `Makefile`.
+**Ficheros**: `eval/scaling/`, `Makefile` raíz.
 
 ---
 
 ### TODO-08 — `docs/thesis-evaluation-chapter` ✅ DONE 2026-05-10 — 72e4fdd
 
-**Goal**: A real "Evaluación" chapter in the thesis grounded in TODO-04..07 outputs.
+**Objetivo**: Un capítulo real de "Evaluación" en la tesis basado en los resultados de TODO-04..07.
 
-**Depends on**: TODO-04, TODO-05, TODO-06, TODO-07.
+**Depende de**: TODO-04, TODO-05, TODO-06, TODO-07.
 
-**Scope**:
-1. New `docs/evaluation.md` — full chapter with subsections: Functional, Reliability under fault injection, Comparative baseline, Scaling envelope. Each subsection cites the `eval/results/*.json` it draws from.
-2. Update `docs/thesis.md`:
-   - Insert §6 "Evaluación" between current §5 and §6 (renumber Limitations → §7, Future Work → §8, References → §9).
-   - The new §6 is a 1-page summary table per objective citing the measured number; full discussion lives in `docs/evaluation.md`.
-3. Update `README.md` documentation map and `CLAUDE.md` doc index to list `docs/evaluation.md`.
+**Alcance**:
+1. Nuevo `docs/evaluation.md` — capítulo completo con subsecciones: Funcional, Fiabilidad bajo inyección de fallos, Línea base comparativa, Envolvente de escalado. Cada subsección cita el `eval/results/*.json` del que extrae los datos.
+2. Actualizar `docs/thesis.md`:
+   - Insertar §6 "Evaluación" entre el §5 actual y el §6 (renumerar Limitaciones → §7, Trabajo Futuro → §8, Referencias → §9).
+   - El nuevo §6 es una tabla resumen de 1 página por objetivo citando el número medido; la discusión completa vive en `docs/evaluation.md`.
+3. Actualizar el mapa de documentación de `README.md` y el índice de documentos de `CLAUDE.md` para incluir `docs/evaluation.md`.
 
-**Acceptance criteria**:
-- Every quantitative claim in `docs/evaluation.md` cites a path under `eval/results/`.
-- `docs/thesis.md` §5 "Met" claims now reference §6 measurements rather than asserting unevidenced.
+**Criterios de aceptación**:
+- Cada afirmación cuantitativa en `docs/evaluation.md` cita una ruta bajo `eval/results/`.
+- Las afirmaciones "Cumplido" del §5 de `docs/thesis.md` ahora referencian las mediciones del §6 en lugar de afirmarlo sin evidencia.
 
-**Files**: `docs/evaluation.md`, `docs/thesis.md`, `README.md`, `CLAUDE.md`.
+**Ficheros**: `docs/evaluation.md`, `docs/thesis.md`, `README.md`, `CLAUDE.md`.
 
 ---
 
-## P2 — FORMAL & SECURITY FRAMING (cheap thesis-writing wins)
+## P2 — ENCUADRE FORMAL Y DE SEGURIDAD (mejoras baratas para la tesis)
 
 ### TODO-09 — `docs/formal-invariants` ✅ DONE 2026-05-10 — 790fd0b
 
-**Goal**: Restate the four design invariants as numbered Safety / Liveness / Eventual-Consistency properties with code-level witnesses.
+**Objetivo**: Reformular los cuatro invariantes de diseño como propiedades numeradas de Seguridad / Vivacidad / Consistencia eventual con testigos a nivel de código.
 
-**Scope**:
-1. Rewrite `docs/architecture.md` §3 ("Key Design Invariants"). Replace each prose invariant with a numbered property of the form:
-   - `P1 (Safety)`: <statement> — Witness: `<file>:<line>`.
-   - `P2 (Liveness)`: <statement> — Witness: `<file>:<line>`.
-   - `P3 (Eventual Consistency)`: <statement> — Witness: `<file>:<line>`.
-2. New `docs/fault-model.md`:
-   - Enumerated tolerated faults (worker crash, Job TTL expiry before reconcile, pod-exec transient failure, hash collision on Job names, stale operation lock, orphan Job, kubeconfig API timeout).
-   - For each: defended-by mechanism (token rotation, `activeDeadlineSeconds`, three-state probe, label validation, stale-op reconciler, orphan sweep), code-level witness, and recovery time bound.
-3. Cross-link from `docs/architecture.md` and `AGENTS.md`.
+**Alcance**:
+1. Reescribir `docs/architecture.md` §3 ("Invariantes clave de diseño"). Reemplazar cada invariante en prosa con una propiedad numerada de la forma:
+   - `P1 (Seguridad)`: <enunciado> — Testigo: `<fichero>:<línea>`.
+   - `P2 (Vivacidad)`: <enunciado> — Testigo: `<fichero>:<línea>`.
+   - `P3 (Consistencia eventual)`: <enunciado> — Testigo: `<fichero>:<línea>`.
+2. Nuevo `docs/fault-model.md`:
+   - Fallos tolerados enumerados (caída del worker, expiración de TTL del Job antes de reconciliar, fallo transitorio de pod-exec, colisión de hash en nombres de Job, bloqueo de operación obsoleta, Job huérfano, timeout de API de kubeconfig).
+   - Para cada uno: mecanismo de defensa (rotación de token, `activeDeadlineSeconds`, sonda de tres estados, validación de etiquetas, reconciliador de operaciones obsoletas, barrido de huérfanos), testigo a nivel de código y límite superior de tiempo de recuperación.
+3. Enlace cruzado desde `docs/architecture.md` y `AGENTS.md`.
 
-**Acceptance criteria**:
-- Every property in `architecture.md` §3 has a `<file>:<line>` witness that resolves on `HEAD`.
-- `docs/fault-model.md` enumerates ≥ 7 faults, each with a witness and a documented recovery upper bound.
+**Criterios de aceptación**:
+- Cada propiedad en `architecture.md` §3 tiene un testigo `<fichero>:<línea>` que se resuelve en `HEAD`.
+- `docs/fault-model.md` enumera ≥ 7 fallos, cada uno con un testigo y un límite superior de recuperación documentado.
 
-**Files**: `docs/architecture.md`, `docs/fault-model.md` (new), `AGENTS.md`, `README.md` (doc map).
+**Ficheros**: `docs/architecture.md`, `docs/fault-model.md` (nuevo), `AGENTS.md`, `README.md` (mapa de documentos).
 
 ---
 
 ### TODO-10 — `docs/threat-model` ✅ DONE 2026-05-10 — e9b1735
 
-**Goal**: A full trust-boundary analysis. Currently `SECURITY.md` exists but no boundary map.
+**Objetivo**: Un análisis completo de fronteras de confianza. Actualmente existe `SECURITY.md` pero no hay mapa de fronteras.
 
-**Scope**:
-1. New `docs/threat-model.md` with:
-   - **Trust-boundary diagram** (Mermaid): Operator → Frappe Web → RQ Worker → Helm subprocess → Kubeconfig at rest → Cluster API → Bench pod-exec.
-   - **Boundary table**: per boundary, identify the trust direction, the data crossing it, the mitigations (CSRF on whitelisted endpoints, kubeconfig encryption-at-rest via Frappe encrypted fields, scoped K8s API client, RBAC scope on the in-cluster service account, allowlisted resource kinds in Service Bundle, allowlisted commands in Kubernetes Command).
-   - **Threat catalog** (STRIDE per boundary, abbreviated).
-   - **Justification of `Kubernetes Command` Delete allowlist** (Pod, Job, ConfigMap only — explain why Secret/PVC/Deployment/StatefulSet are excluded).
-2. Cross-link from `SECURITY.md`.
+**Alcance**:
+1. Nuevo `docs/threat-model.md` con:
+   - **Diagrama de fronteras de confianza** (Mermaid): Operador → Web Frappe → Worker RQ → Subproceso Helm → Kubeconfig en reposo → API del clúster → Pod-exec de Bench.
+   - **Tabla de fronteras**: por cada frontera, identificar la dirección de confianza, los datos que la cruzan y las mitigaciones (CSRF en endpoints públicos, cifrado del kubeconfig en reposo mediante campos cifrados de Frappe, cliente K8s con alcance, RBAC en la cuenta de servicio dentro del clúster, tipos de recursos permitidos en Service Bundle, comandos permitidos en Kubernetes Command).
+   - **Catálogo de amenazas** (STRIDE por frontera, abreviado).
+   - **Justificación de la lista de permitidos de eliminación en `Kubernetes Command`** (solo Pod, Job, ConfigMap — explicar por qué se excluyen Secret/PVC/Deployment/StatefulSet).
+2. Enlace cruzado desde `SECURITY.md`.
 
-**Acceptance criteria**:
-- Every whitelisted endpoint (`kubeport/api/*.py`) and every privileged worker call (`kubeport/tasks/*.py`) appears in the boundary table.
-- STRIDE catalog has ≥ 1 entry per boundary, with mitigation linked to code.
+**Criterios de aceptación**:
+- Cada endpoint público (`kubeport/api/*.py`) y cada llamada de worker privilegiada (`kubeport/tasks/*.py`) aparece en la tabla de fronteras.
+- El catálogo STRIDE tiene ≥ 1 entrada por frontera, con mitigación enlazada al código.
 
-**Files**: `docs/threat-model.md` (new), `SECURITY.md`, `README.md` (doc map).
+**Ficheros**: `docs/threat-model.md` (nuevo), `SECURITY.md`, `README.md` (mapa de documentos).
 
 ---
 
 ### TODO-11 — `docs/sota-bibliography` ✅ DONE 2026-05-10 — 5f38eea
 
-**Goal**: Replace the 6-row product table in `docs/thesis.md` §2 with a real CS-research SOTA section + bibliography.
+**Objetivo**: Reemplazar la tabla de 6 filas de productos en `docs/thesis.md` §2 con una sección real de estado del arte en investigación CS + bibliografía.
 
-**Scope**:
-1. Expand `docs/thesis.md` §2:
-   - Keep the existing product comparison table.
-   - Add prose subsections: "Operator pattern and reconciliation loops", "Desired-state vs observed-state in declarative systems", "Background-execution patterns in business platforms".
-   - Each subsection cites primary sources from the bibliography.
-2. New `docs/references.bib` (BibTeX) with **at least 12 primary references**, suggested set:
+**Alcance**:
+1. Ampliar `docs/thesis.md` §2:
+   - Conservar la tabla de comparación de productos existente.
+   - Añadir subsecciones en prosa: "Patrón operador y bucles de reconciliación", "Estado deseado frente a estado observado en sistemas declarativos", "Patrones de ejecución en segundo plano en plataformas de negocio".
+   - Cada subsección cita fuentes primarias de la bibliografía.
+2. Nuevo `docs/references.bib` (BibTeX) con **al menos 12 referencias primarias**, conjunto sugerido:
    - Burns et al., "Borg, Omega, and Kubernetes", ACM Queue 2016.
    - Verma et al., "Large-scale cluster management at Google with Borg", EuroSys 2015.
    - Brewer, "Kubernetes: The Surprisingly Affordable Platform for Global Companies".
-   - Hightower, Burns, Beda, "Kubernetes Up & Running" (controller chapter).
-   - Helm 3 design proposal (`helm/community` repo).
-   - GitOps whitepaper (Weaveworks).
-   - Lamport, "Time, Clocks, and the Ordering of Events" (eventual consistency).
+   - Hightower, Burns, Beda, "Kubernetes Up & Running" (capítulo de controladores).
+   - Propuesta de diseño de Helm 3 (repositorio `helm/community`).
+   - Libro blanco de GitOps (Weaveworks).
+   - Lamport, "Time, Clocks, and the Ordering of Events" (consistencia eventual).
    - Vogels, "Eventually Consistent" CACM 2009.
-   - Brewer, CAP theorem.
-   - Frappe Framework documentation (canonical URL).
-   - Dean & Ghemawat, "MapReduce" (background work decomposition rationale).
-   - The K8s controller manifesto / operator pattern paper (Red Hat / CoreOS).
-3. Add `docs/thesis.md` §9 "Bibliografía" listing the references in IEEE or ACM style.
+   - Brewer, teorema CAP.
+   - Documentación del framework Frappe (URL canónica).
+   - Dean & Ghemawat, "MapReduce" (justificación de la descomposición del trabajo en segundo plano).
+   - El manifiesto del controlador K8s / artículo sobre el patrón operador (Red Hat / CoreOS).
+3. Añadir `docs/thesis.md` §9 "Bibliografía" listando las referencias en estilo IEEE o ACM.
 
-**Acceptance criteria**:
-- ≥ 12 entries in `docs/references.bib`.
-- Each citation in `docs/thesis.md` resolves to a `.bib` entry.
-- `docs/thesis.md` §2 prose subsections each cite ≥ 2 references.
+**Criterios de aceptación**:
+- ≥ 12 entradas en `docs/references.bib`.
+- Cada cita en `docs/thesis.md` se resuelve en una entrada `.bib`.
+- Las subsecciones en prosa del §2 de `docs/thesis.md` citan cada una ≥ 2 referencias.
 
-**Files**: `docs/thesis.md`, `docs/references.bib` (new), `README.md` (doc map).
+**Ficheros**: `docs/thesis.md`, `docs/references.bib` (nuevo), `README.md` (mapa de documentos).
 
 ---
 
-## P3 — CS-MAJOR-GRADE DIFFERENTIATORS
+## P3 — DIFERENCIADORES DE NIVEL CARRERA CS
 
 ### TODO-12 — `test/property-fsm-frappe-site` ✅ DONE 2026-05-10 — a1ac296
 
-**Goal**: Hypothesis-based property tests for the `Frappe Site` finite state machine.
+**Objetivo**: Tests de propiedades basados en Hypothesis para la máquina de estados finitos de `Frappe Site`.
 
-**Context**: The state machine is documented at `docs/control-plane-state.md` §Frappe Site Provisioning: `Draft → In Progress → Active | Failed`, plus `Active → Migrating → Active | Failed` and `Active|Failed → Deleting → [doc deleted] | Failed`. Property tests turn this from prose into a checked invariant.
+**Contexto**: La máquina de estados está documentada en `docs/control-plane-state.md` §Aprovisionamiento de Frappe Site: `Draft → In Progress → Active | Failed`, más `Active → Migrating → Active | Failed` y `Active|Failed → Deleting → [doc eliminado] | Failed`. Los tests de propiedades convierten esto de prosa en un invariante verificado.
 
-**Scope**:
-1. New `kubeport/tests/test_property_fsm_frappe_site.py`.
-2. Use `hypothesis.stateful.RuleBasedStateMachine`. Rules: `create`, `cancel`, `migrate`, `backup`, `restore`, `drop`, `tick_reconciliation`. Use mock K8s clients (existing fixtures in `kubeport/tests/`) so the test is hermetic.
-3. Invariants:
-   - `inv_no_terminal_inflight`: after a finite sequence terminating in a `tick_reconciliation`, the row is never simultaneously in an in-flight status and `operation_token` rotated by a concurrent worker.
-   - `inv_transitions_documented`: every observed transition appears in the documented arrow list (encode the arrows as a constant in the test).
-   - `inv_archive_outlives_site`: dropping a `Frappe Site` while it has an `Available` `Frappe Site Backup` leaves the backup row intact.
-4. Run ≥ 1000 examples in CI (set `@settings(max_examples=1000)`).
+**Alcance**:
+1. Nuevo `kubeport/tests/test_property_fsm_frappe_site.py`.
+2. Usar `hypothesis.stateful.RuleBasedStateMachine`. Reglas: `create`, `cancel`, `migrate`, `backup`, `restore`, `drop`, `tick_reconciliation`. Usar clientes K8s simulados (fixtures existentes en `kubeport/tests/`) para que el test sea hermético.
+3. Invariantes:
+   - `inv_no_terminal_inflight`: tras una secuencia finita que termina en `tick_reconciliation`, la fila nunca está simultáneamente en un estado en vuelo y con `operation_token` rotado por un worker concurrente.
+   - `inv_transitions_documented`: cada transición observada aparece en la lista de flechas documentada (codificar las flechas como una constante en el test).
+   - `inv_archive_outlives_site`: eliminar un `Frappe Site` que tiene un `Frappe Site Backup` en estado `Available` deja la fila de backup intacta.
+4. Ejecutar ≥ 1000 ejemplos en CI (establecer `@settings(max_examples=1000)`).
 
-**Acceptance criteria**:
-- Test passes with `max_examples=1000` in `.github/workflows/ci.yml`.
-- All three invariants checked.
-- Hypothesis is added to dev dependencies, not runtime — confirm `pyproject.toml` doesn't pull it into the install.
+**Criterios de aceptación**:
+- El test pasa con `max_examples=1000` en `.github/workflows/ci.yml`.
+- Los tres invariantes están verificados.
+- Hypothesis se añade a las dependencias de desarrollo, no de ejecución — confirmar que `pyproject.toml` no lo incluye en la instalación.
 
-**Files**: `kubeport/tests/test_property_fsm_frappe_site.py` (new), `pyproject.toml`.
+**Ficheros**: `kubeport/tests/test_property_fsm_frappe_site.py` (nuevo), `pyproject.toml`.
 
 ---
 
 ### TODO-13 — `test/property-fsm-helm-release` ✅ DONE 2026-05-10 — f7c9130
 
-**Goal**: Same as TODO-12, for the Helm Release FSM.
+**Objetivo**: Igual que TODO-12, para la FSM de Helm Release.
 
-**Context**: `Draft → In Progress → Deployed | Degraded | Failed → Uninstalling → Draft` (`docs/control-plane-state.md` §Helm Release Management).
+**Contexto**: `Draft → In Progress → Deployed | Degraded | Failed → Uninstalling → Draft` (`docs/control-plane-state.md` §Gestión de Helm Release).
 
-**Scope**:
-1. New `kubeport/tests/test_property_fsm_helm_release.py`.
-2. Rules: `deploy`, `upgrade`, `rollback`, `uninstall`, `force_uninstall`, `tick_reconciliation`.
-3. Invariants:
-   - `inv_dependent_site_blocks_uninstall`: an uninstall while a linked `Frappe Site` is `Active` always blocks unless `force=True`.
-   - `inv_failed_cannot_be_directly_deleted`: deleting a `Failed` row outside of `Draft` is rejected.
-   - `inv_spec_hash_monotonic`: `last_applied_spec_hash` only changes after a successful deploy/upgrade/rollback.
+**Alcance**:
+1. Nuevo `kubeport/tests/test_property_fsm_helm_release.py`.
+2. Reglas: `deploy`, `upgrade`, `rollback`, `uninstall`, `force_uninstall`, `tick_reconciliation`.
+3. Invariantes:
+   - `inv_dependent_site_blocks_uninstall`: una desinstalación mientras un `Frappe Site` vinculado está `Active` siempre se bloquea salvo que `force=True`.
+   - `inv_failed_cannot_be_directly_deleted`: eliminar una fila `Failed` fuera de `Draft` se rechaza.
+   - `inv_spec_hash_monotonic`: `last_applied_spec_hash` solo cambia tras un deploy/upgrade/rollback exitoso.
 
-**Acceptance criteria**:
-- Same as TODO-12: 1000 examples, all invariants checked, hermetic.
+**Criterios de aceptación**:
+- Igual que TODO-12: 1000 ejemplos, todos los invariantes verificados, hermético.
 
-**Files**: `kubeport/tests/test_property_fsm_helm_release.py` (new).
+**Ficheros**: `kubeport/tests/test_property_fsm_helm_release.py` (nuevo).
 
-**Depends on**: TODO-12 (share the Hypothesis dev-dep wiring).
+**Depende de**: TODO-12 (compartir el cableado de dependencia de desarrollo de Hypothesis)
 
 ---
 
 ### TODO-14 — `feat/internal-observability` ✅ DONE 2026-05-10 — 4f477e0
 
-**Goal**: Make Kubeport itself measurable. Counters and histograms surfaced on the existing operator workspace dashboard, plus correlation-ID-threaded structured logs.
+**Objetivo**: Hacer que Kubeport sea medible internamente. Contadores e histogramas expuestos en el panel de control del operador existente, más logs estructurados enlazados por ID de correlación.
 
-**Scope**:
-1. New module `kubeport/utils/metrics.py`:
-   - In-memory counters (process-local) for `reconcile_ticks_total`, `stale_ops_recovered_total`, `orphan_jobs_swept_total`.
-   - A small histogram type for helm subprocess latency, queryable via percentile.
-   - Optional: persist a daily aggregate row to a new `Kubeport Metric Sample` doctype if it fits — only if it doesn't violate desired/observed split (it doesn't: this is internal observed state of Kubeport itself, not of the cluster). Defer if it stretches the milestone.
-2. Wire counters into the existing reconciliation loop at `kubeport/tasks/reconciliation.py` and the helm subprocess wrapper at `kubeport/utils/helm.py`.
-3. Add a `correlation_id` parameter (UUID4) generated at enqueue time, threaded through `frappe.enqueue` kwargs, included in every log line emitted by the worker via a `frappe.logger().bind` style helper.
-4. Surface metrics on the existing operator workspace (`kubeport/kubeport/workspace/...`) as new number cards reading from `kubeport/api/dashboard.py`.
+**Alcance**:
+1. Nuevo módulo `kubeport/utils/metrics.py`:
+   - Contadores en memoria (locales al proceso) para `reconcile_ticks_total`, `stale_ops_recovered_total`, `orphan_jobs_swept_total`.
+   - Un tipo de histograma pequeño para la latencia del subproceso helm, consultable por percentil.
+   - Opcional: persistir un agregado diario en una nueva doctype `Kubeport Metric Sample` si encaja — solo si no viola la separación deseado/observado (no la viola: es el estado observado interno de Kubeport, no del clúster). Aplazar si alarga el hito.
+2. Conectar los contadores al bucle de reconciliación existente en `kubeport/tasks/reconciliation.py` y al wrapper del subproceso helm en `kubeport/utils/helm.py`.
+3. Añadir un parámetro `correlation_id` (UUID4) generado en el momento de encolar, propagado a través de los kwargs de `frappe.enqueue`, incluido en cada línea de log emitida por el worker mediante un helper estilo `frappe.logger().bind`.
+4. Exponer las métricas en el espacio de trabajo del operador existente (`kubeport/kubeport/workspace/...`) como nuevas tarjetas numéricas que leen de `kubeport/api/dashboard.py`.
 
-**Constraints**:
-- Don't add Prometheus or external metrics deps. Keep it Frappe-native.
-- Don't violate the desired/observed invariant: any persisted metric is metadata about Kubeport itself, never about the cluster.
+**Restricciones**:
+- No añadir Prometheus ni dependencias externas de métricas. Mantenerlo nativo de Frappe.
+- No violar el invariante deseado/observado: cualquier métrica persistida es metadato sobre el propio Kubeport, nunca sobre el clúster.
 
-**Acceptance criteria**:
-- `frappe.local` log of one operation contains the same `correlation_id` from web → enqueue → worker.
-- Operator workspace shows live counters that increment under load.
-- Tests in `kubeport/tests/test_api_dashboard.py` extended to cover the new metrics.
+**Criterios de aceptación**:
+- El log de `frappe.local` de una operación contiene el mismo `correlation_id` desde web → encolar → worker.
+- El espacio de trabajo del operador muestra contadores en vivo que se incrementan bajo carga.
+- Los tests en `kubeport/tests/test_api_dashboard.py` ampliados para cubrir las nuevas métricas.
 
-**Files**: `kubeport/utils/metrics.py` (new), `kubeport/tasks/reconciliation.py`, `kubeport/utils/helm.py`, `kubeport/api/dashboard.py`, `kubeport/kubeport/workspace/`, `kubeport/tests/test_api_dashboard.py`.
+**Ficheros**: `kubeport/utils/metrics.py` (nuevo), `kubeport/tasks/reconciliation.py`, `kubeport/utils/helm.py`, `kubeport/api/dashboard.py`, `kubeport/kubeport/workspace/`, `kubeport/tests/test_api_dashboard.py`.
 
 ---
 
 ### TODO-15 — `feat/chaos-ci` ✅ DONE 2026-05-10 — 68c6224
 
-**Goal**: One CI job that empirically demonstrates recovery under a realistic fault.
+**Objetivo**: Un job de CI que demuestre empíricamente la recuperación bajo un fallo realista.
 
-**Depends on**: TODO-04 (eval harness), TODO-05 (fault scenarios).
+**Depende de**: TODO-04 (conjunto de evaluación), TODO-05 (escenarios de fallo).
 
-**Scope**:
-1. New `.github/workflows/chaos.yml`:
-   - Spins up k3d on a GitHub-hosted runner.
-   - Boots a Frappe v16 bench (reuse the `test` job pattern in `.github/workflows/ci.yml`).
-   - Runs the `worker_kill_mid_helm_upgrade` scenario from TODO-05.
-   - Asserts the Helm Release row reaches `Deployed` within the documented stale-op recovery window.
-2. Required-status on PR (after one green run; ship with `continue-on-error: true` on the first iteration, mirroring the pattern in CHANGELOG `2026-05-09 — Code-quality cleanup pass and CI test gating`).
+**Alcance**:
+1. Nuevo `.github/workflows/chaos.yml`:
+   - Arranca k3d en un runner alojado en GitHub.
+   - Inicia un bench Frappe v16 (reutilizar el patrón del job `test` en `.github/workflows/ci.yml`).
+   - Ejecuta el escenario `worker_kill_mid_helm_upgrade` de TODO-05.
+   - Afirma que la fila Helm Release alcanza `Deployed` dentro de la ventana de recuperación de operaciones obsoletas documentada.
+2. Estado requerido en PR (tras una ejecución en verde; publicar con `continue-on-error: true` en la primera iteración, siguiendo el patrón del CHANGELOG `2026-05-09 — Limpieza de calidad de código y gating de tests en CI`).
 
-**Acceptance criteria**:
-- Workflow runs on PR.
-- One scenario passes end-to-end.
-- Documented in `docs/evaluation.md` as the basis for the fault-injection §.
+**Criterios de aceptación**:
+- El flujo de trabajo se ejecuta en PR.
+- Un escenario pasa de extremo a extremo.
+- Documentado en `docs/evaluation.md` como base de la sección de inyección de fallos.
 
-**Files**: `.github/workflows/chaos.yml` (new), `docs/evaluation.md`.
+**Ficheros**: `.github/workflows/chaos.yml` (nuevo), `docs/evaluation.md`.
 
 ---
 
-## P4 — PRODUCTION READINESS
+## P4 — PREPARACIÓN PARA PRODUCCIÓN
 
 ### TODO-16 — `docs/deploy-guide` ✅ DONE 2026-05-10 — 5b2ac82
 
-**Goal**: Operator-deployable guide. `docs/control-plane-state.md` §Open Gaps "Operator Documentation" lists this as missing.
+**Objetivo**: Guía desplegable por el operador. `docs/control-plane-state.md` §Brechas abiertas "Documentación del operador" lo lista como ausente.
 
-**Scope**:
-1. New `docs/deploy.md` covering:
-   - Topology: Kubeport-in-cluster vs. Kubeport-out-of-cluster, when to choose each.
-   - In-cluster auth setup with the SA / Role / RoleBinding ship in TODO-17.
-   - Helm binary packaging (Dockerfile snippet adding `helm` to a Frappe bench image; the kubernetes-client wheel matrix on Python 3.14).
-   - Resource limits (CPU/RAM recommendations for web, RQ long worker, scheduler).
-   - Monitoring: where to scrape the metrics from TODO-14.
-   - Control-plane backup: how to back up the Frappe site running Kubeport itself.
-2. Cross-link from `README.md` install section.
+**Alcance**:
+1. Nuevo `docs/deploy.md` que cubre:
+   - Topología: Kubeport dentro del clúster frente a Kubeport fuera del clúster, cuándo elegir cada opción.
+   - Configuración de autenticación dentro del clúster con la SA / Role / RoleBinding incluida en TODO-17.
+   - Empaquetado del binario Helm (fragmento de Dockerfile que añade `helm` a una imagen de bench Frappe; la matriz de wheels de kubernetes-client en Python 3.14).
+   - Límites de recursos (recomendaciones de CPU/RAM para web, worker RQ largo, planificador).
+   - Monitorización: dónde recoger las métricas de TODO-14.
+   - Copia de seguridad del plano de control: cómo hacer copia de seguridad del site Frappe que ejecuta el propio Kubeport.
+2. Enlace cruzado desde la sección de instalación de `README.md`.
 
-**Acceptance criteria**:
-- A reviewer can follow `docs/deploy.md` end-to-end on a fresh cluster without consulting external docs.
-- Includes a "Quick smoke" section pointing at `make eval` (TODO-04).
+**Criterios de aceptación**:
+- Un revisor puede seguir `docs/deploy.md` de extremo a extremo en un clúster nuevo sin consultar documentación externa.
+- Incluye una sección "Verificación rápida" que apunta a `make eval` (TODO-04).
 
-**Files**: `docs/deploy.md` (new), `README.md`, `CLAUDE.md` (doc map).
+**Ficheros**: `docs/deploy.md` (nuevo), `README.md`, `CLAUDE.md` (mapa de documentos).
 
 ---
 
 ### TODO-17 — `feat/rbac-manifests` ✅ DONE 2026-05-10 — 032106e
 
-**Goal**: Ship least-privilege Kubernetes RBAC manifests for the in-cluster auth mode.
+**Objetivo**: Publicar manifiestos Kubernetes RBAC de mínimo privilegio para el modo de autenticación dentro del clúster.
 
-**Scope**:
-1. New `deploy/rbac/`:
-   - `serviceaccount.yaml` — `kubeport` SA in the namespace where Kubeport runs.
-   - `role.yaml` / `clusterrole.yaml` — minimum verbs Kubeport actually needs (audit `kubeport/utils/k8s_resources.py` and `kubeport/tasks/*.py` for the actual API calls; do not over-grant).
+**Alcance**:
+1. Nuevo `deploy/rbac/`:
+   - `serviceaccount.yaml` — SA `kubeport` en el namespace donde se ejecuta Kubeport.
+   - `role.yaml` / `clusterrole.yaml` — verbos mínimos que Kubeport realmente necesita (auditar `kubeport/utils/k8s_resources.py` y `kubeport/tasks/*.py` para las llamadas API reales; no conceder permisos en exceso).
    - `rolebinding.yaml` / `clusterrolebinding.yaml`.
-   - `kustomization.yaml` for `kubectl apply -k deploy/rbac/`.
-2. `deploy/rbac/README.md` documenting:
-   - Which verbs were granted and why (cite the API call site for each).
-   - Namespaced vs. cluster-scoped: prefer namespaced where possible; cluster-scoped only for `Namespace`, `StorageClass` discovery, `ClusterRole/ClusterRoleBinding` Service-Bundle apply.
-3. Smoke: `make rbac-smoke` runs `kubectl auth can-i` for each call site against the bound SA.
+   - `kustomization.yaml` para `kubectl apply -k deploy/rbac/`.
+2. `deploy/rbac/README.md` documentando:
+   - Qué verbos se concedieron y por qué (citar el punto de llamada API para cada uno).
+   - Con alcance de namespace frente a alcance de clúster: preferir el de namespace donde sea posible; alcance de clúster solo para el descubrimiento de `Namespace`, `StorageClass`, y la aplicación de `ClusterRole/ClusterRoleBinding` en Service Bundle.
+3. Verificación: `make rbac-smoke` ejecuta `kubectl auth can-i` para cada punto de llamada contra la SA vinculada.
 
-**Acceptance criteria**:
-- `kubectl apply -k deploy/rbac/` is sufficient for a freshly created Kubeport bench in the same cluster to operate with `auth_mode: in_cluster`.
-- README has a verb-justification matrix (verb, resource, justification path).
+**Criterios de aceptación**:
+- `kubectl apply -k deploy/rbac/` es suficiente para que un bench Kubeport recién creado en el mismo clúster opere con `auth_mode: in_cluster`.
+- El README tiene una matriz de justificación de verbos (verbo, recurso, ruta de justificación).
 
-**Files**: `deploy/rbac/` (new tree), root `Makefile` (add `rbac-smoke`).
+**Ficheros**: árbol `deploy/rbac/` (nuevo), `Makefile` raíz (añadir `rbac-smoke`).
 
-**Depends on**: TODO-16 (the deploy guide will reference these manifests).
+**Depende de**: TODO-16 (la guía de despliegue referenciará estos manifiestos).
 
 ---
 
-## P5 — DEPTH FEATURES (pick 1–2; demonstrating closure beats listing five aspirations)
+## P5 — FUNCIONALIDADES EN PROFUNDIDAD (elegir 1–2; demostrar cierre vale más que listar cinco aspiraciones)
 
-These close gaps already named in `docs/control-plane-state.md` §Open Gaps. **Pick one or two**, do them well, list the others as future work.
+Estas cierran brechas ya nombradas en `docs/control-plane-state.md` §Brechas abiertas. **Elige una o dos**, hazlas bien, lista las demás como trabajo futuro.
 
 ### TODO-18 — `feat/helm-diff-preview` ✅ DONE 2026-05-10 — 84c9f56
 
-**Goal**: A "Preview" button on `Helm Release` form that shows the diff between live state and the next render before deploying.
+**Objetivo**: Un botón "Vista previa" en el formulario `Helm Release` que muestra la diferencia entre el estado en vivo y el siguiente renderizado antes de desplegar.
 
-**Scope**:
-1. New whitelisted endpoint `kubeport.api.helm_diff.preview_release(name: str) -> dict`.
-2. Implementation: render values via the existing `kubeport/tasks/helm_tasks.py` machinery, call `helm template` (read-only, OK from web thread because it's local-only — confirm by reading the Helm CLI docs: `helm template` does not contact the cluster), then diff against `helm get manifest` output. Use a small Python diff helper, no new system dep.
-3. Form UI: button beside Deploy that opens a panel showing the diff.
+**Alcance**:
+1. Nuevo endpoint público `kubeport.api.helm_diff.preview_release(name: str) -> dict`.
+2. Implementación: renderizar valores mediante la maquinaria existente de `kubeport/tasks/helm_tasks.py`, llamar a `helm template` (solo lectura, permitido desde el hilo web porque es solo local — confirmar leyendo la documentación de la CLI de Helm: `helm template` no contacta el clúster), luego comparar con la salida de `helm get manifest`. Usar un pequeño helper de diff en Python, sin nueva dependencia de sistema.
+3. Interfaz del formulario: botón junto a Desplegar que abre un panel mostrando la diferencia.
 
-**Acceptance criteria**:
-- Preview reports an empty diff after a successful deploy when no values change.
-- Tests added in `kubeport/tests/test_helm_tasks.py` covering value-only changes and chart-version changes.
+**Criterios de aceptación**:
+- La vista previa reporta una diferencia vacía tras un despliegue exitoso cuando no cambian los valores.
+- Tests añadidos en `kubeport/tests/test_helm_tasks.py` cubriendo cambios solo de valores y cambios de versión de chart.
 
-**Files**: `kubeport/api/helm_diff.py` (new), `kubeport/kubeport/doctype/helm_release/helm_release.{js,py}`, `kubeport/tests/test_helm_tasks.py`.
+**Ficheros**: `kubeport/api/helm_diff.py` (nuevo), `kubeport/kubeport/doctype/helm_release/helm_release.{js,py}`, `kubeport/tests/test_helm_tasks.py`.
 
 ---
 
 ### TODO-19 — `feat/site-health-surface` ✅ DONE 2026-05-10 — 57f8aea
 
-**Goal**: Mirror the Helm Release observability panel on `Frappe Site`.
+**Objetivo**: Reflejar el panel de observabilidad de Helm Release en `Frappe Site`.
 
-**Context**: Closes the gap in `docs/control-plane-state.md` §Open Gaps "no per-Frappe-Site health surface".
+**Contexto**: Cierra la brecha en `docs/control-plane-state.md` §Brechas abiertas "sin superficie de salud por Frappe Site".
 
-**Scope**: Site-scoped pod logs, scoped events, bench-pod readiness — reusing helpers from `kubeport/utils/observability.py` (576 lines, already designed for resource-scope reuse).
+**Alcance**: Logs de pods con alcance de site, eventos con alcance, preparación del pod bench — reutilizando helpers de `kubeport/utils/observability.py` (576 líneas, ya diseñados para reutilización con alcance de recurso).
 
-**Acceptance criteria**: Site form renders three sub-views (logs, events, rollout) that respect the same staleness/auth model as the existing Helm Release panel.
+**Criterios de aceptación**: El formulario de site renderiza tres subvistas (logs, eventos, rollout) que respetan el mismo modelo de antigüedad/autenticación que el panel de Helm Release existente.
 
 ---
 
 ### TODO-20 — `feat/scheduled-backups` ✅ DONE 2026-05-10 — a1f1d26
 
-**Goal**: Operator-scheduled backups via cron on `Frappe Site`.
+**Objetivo**: Copias de seguridad programadas por el operador mediante cron en `Frappe Site`.
 
-**Scope**: New cron-string field on `Frappe Site`; reconciliation tick enqueues a new `Frappe Site Backup` row when the cron is due. Integrate with retention (max-N rows or max-age).
+**Alcance**: Nuevo campo de cadena cron en `Frappe Site`; el tick de reconciliación encola una nueva fila `Frappe Site Backup` cuando el cron es debido. Integrar con retención (máximo N filas o antigüedad máxima).
 
-**Acceptance criteria**: A site with `backup_schedule = "0 2 * * *"` produces one new `Available` backup per day; old backups beyond retention are auto-trashed (which already cleans up the PVC archive per `2026-05-04` CHANGELOG entry).
+**Criterios de aceptación**: Un site con `backup_schedule = "0 2 * * *"` produce una nueva copia de seguridad `Available` al día; las copias antiguas más allá de la retención se eliminan automáticamente (lo que ya limpia el archivo en el PVC según la entrada del CHANGELOG `2026-05-04`).
 
 ---
 
-## Maintenance hygiene (run before every commit)
+## Higiene de mantenimiento (ejecutar antes de cada commit)
 
 ```bash
-make fmt           # format
-make lint-check    # exact CI dry-run
-# inside dev container only:
+make fmt           # formatear
+make lint-check    # ejecución exacta en modo CI
+# solo dentro del contenedor de desarrollo:
 bench --site test_site run-tests --app kubeport
 ```
 
-If any of these fail, fix before committing. Never `--no-verify`.
+Si alguno de estos falla, corregir antes de hacer commit. Nunca usar `--no-verify`.
