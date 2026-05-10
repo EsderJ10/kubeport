@@ -48,7 +48,7 @@
 
 ## P0 — STABILIZATION (blocks every later milestone)
 
-### TODO-01 — `fix/k8s-client-py314-drift`
+### TODO-01 — `fix/k8s-client-py314-drift` ✅ DONE 2026-05-10 — dcdb6a3
 
 **Goal**: Make `kubeport/tests/test_k8s_client.py` pass against Python 3.14 + the current `kubernetes` client.
 
