@@ -107,10 +107,9 @@ cd $PATH_TO_YOUR_BENCH
 bench get-app kubeport <repository-url> --branch main
 bench install-app kubeport
 bench --site <site> migrate
-bench build --app kubeport
 ```
 
-The first `bench install-app` enqueues the curated site-image catalogue sync onto the `long` queue. The 5-minute reconciliation loop is registered automatically by `hooks.py`. `bench build --app kubeport` publishes the Kubeport logo and SVG icon sprite to `/assets/kubeport/`; without it the navbar logo and `/apps` tile fall back to broken images.
+The first `bench install-app` enqueues the curated site-image catalogue sync onto the `long` queue. The 5-minute reconciliation loop is registered automatically by `hooks.py`.
 
 For non-development deployments (in-cluster vs. out-of-cluster topology, the bench-image Helm packaging snippet, in-cluster RBAC, resource limits, monitoring, and control-plane backup), follow [`docs/deploy.md`](docs/deploy.md).
 
