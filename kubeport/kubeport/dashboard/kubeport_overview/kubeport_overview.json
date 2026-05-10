@@ -1,0 +1,42 @@
+{
+ "cards": [
+  {
+   "card": "Degraded Helm Releases"
+  },
+  {
+   "card": "Failed Frappe Sites"
+  },
+  {
+   "card": "Failed Frappe Site Backups"
+  },
+  {
+   "card": "Stale Operations"
+  }
+ ],
+ "chart_options": "",
+ "charts": [
+  {
+   "chart": "Helm Release Status Distribution",
+   "width": "Half"
+  },
+  {
+   "chart": "Frappe Site Status Distribution",
+   "width": "Half"
+  },
+  {
+   "chart": "Service Bundle Status Distribution",
+   "width": "Half"
+  },
+  {
+   "chart": "Helm Release Operations Per Day",
+   "width": "Full"
+  }
+ ],
+ "dashboard_name": "Kubeport Overview",
+ "doctype": "Dashboard",
+ "is_default": 0,
+ "is_standard": 1,
+ "module": "Kubeport",
+ "name": "Kubeport Overview",
+ "owner": "Administrator"
+}
