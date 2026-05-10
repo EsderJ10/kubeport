@@ -82,6 +82,7 @@ class UnitTestHelmTasks(UnitTestCase):
 			{"repo_name": "repo-a", "status": "Synced"},
 			doctype="Helm Repository",
 			docname="repo-a",
+			after_commit=True,
 		)
 
 	@patch("kubeport.tasks.helm_tasks.frappe.logger")
@@ -439,6 +440,7 @@ class UnitTestHelmTasks(UnitTestCase):
 			},
 			doctype="Helm Release",
 			docname="bench-a",
+			after_commit=True,
 		)
 
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
@@ -653,6 +655,7 @@ class UnitTestHelmTasks(UnitTestCase):
 			},
 			doctype="Helm Release",
 			docname="cluster-a/tfg/bench-a",
+			after_commit=True,
 		)
 
 	@patch("kubeport.tasks.helm_tasks.frappe.logger")

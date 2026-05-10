@@ -37,6 +37,19 @@ frappe.ui.form.on('Helm Release', {
                     }
                 }
             });
+            // Detail-only updates: status is unchanged so a `reload_doc()`
+            // would churn the form and trip the modified-timestamp guard.
+            // Patch `helm_status_detail` in place and re-render the panel.
+            frappe.realtime.on('helm_release_detail_update', (data) => {
+                if (data.release_docname !== frm.doc.name) return;
+                if (typeof data.helm_status_detail === 'string') {
+                    frm.doc.helm_status_detail = data.helm_status_detail;
+                    if (frm.fields_dict.helm_status_detail) {
+                        frm.refresh_field('helm_status_detail');
+                    }
+                }
+                kubeport_render_release_health(frm);
+            });
         }
 
         kubeport_render_release_health(frm);

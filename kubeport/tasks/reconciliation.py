@@ -1102,6 +1102,7 @@ def _finalize_site_status(
 		{"site_docname": site.name, "status": next_status},
 		doctype="Frappe Site",
 		docname=site.name,
+		after_commit=True,
 	)
 	return True
 
@@ -1164,6 +1165,7 @@ def _finalize_backup_status(
 		{"site_docname": backup.frappe_site, "backup_docname": backup.name, "status": next_status},
 		doctype="Frappe Site Backup",
 		docname=backup.name,
+		after_commit=True,
 	)
 	return True
 
@@ -1213,6 +1215,7 @@ def _finalize_restore_status(
 		{"site_docname": backup.frappe_site, "backup_docname": backup.name, "status": "Available"},
 		doctype="Frappe Site Backup",
 		docname=backup.name,
+		after_commit=True,
 	)
 	return True
 
@@ -1251,6 +1254,7 @@ def _finalize_site_deletion(site: "frappe._dict") -> bool:
 		{"site_docname": site.name, "status": "Deleted"},
 		doctype="Frappe Site",
 		docname=site.name,
+		after_commit=True,
 	)
 	frappe.delete_doc(
 		"Frappe Site",
@@ -1955,6 +1959,20 @@ def _set_helm_reconciliation_state(
 			truncated_detail,
 			update_modified=False,
 		)
+		# Push the new detail to any open form via a side-channel event so
+		# the panel reflects reality without a `reload_doc()` (which would
+		# trip the modified-timestamp check the operator just made saveable).
+		frappe.publish_realtime(
+			"helm_release_detail_update",
+			{
+				"release_docname": release_docname,
+				"status": next_status,
+				"helm_status_detail": truncated_detail,
+			},
+			doctype="Helm Release",
+			docname=release_docname,
+			after_commit=True,
+		)
 		return False
 
 	frappe.db.set_value(
@@ -1970,6 +1988,7 @@ def _set_helm_reconciliation_state(
 		{"release_docname": release_docname, "status": next_status},
 		doctype="Helm Release",
 		docname=release_docname,
+		after_commit=True,
 	)
 	return True
 
@@ -2033,6 +2052,7 @@ def _set_stale_helm_operation_state(
 		},
 		doctype="Helm Release",
 		docname=release_docname,
+		after_commit=True,
 	)
 	return True
 

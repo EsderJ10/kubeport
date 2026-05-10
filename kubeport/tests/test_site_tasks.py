@@ -1373,6 +1373,7 @@ class UnitTestRestoreSubmissionFailure(UnitTestCase):
 			},
 			doctype="Frappe Site Backup",
 			docname="demo.example.com::demo-20260430120000",
+			after_commit=True,
 		)
 
 

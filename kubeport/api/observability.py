@@ -180,6 +180,11 @@ def _get_release_scope(release_docname: str) -> dict[str, Any]:
 		frappe.throw(f"Helm Release '{release_docname}' is missing cluster information.")
 	if not scope.get("release_name"):
 		frappe.throw(f"Helm Release '{release_docname}' is missing release name information.")
+	# Drop the request's transaction before the caller shells out to helm /
+	# the kubernetes API; otherwise the held read snapshot can collide with
+	# reconciliation's UPDATE on the same row and surface as a "Server was
+	# too busy" QueryTimeoutError on the form.
+	frappe.db.commit()
 	return scope
 
 
@@ -346,6 +351,9 @@ def _get_release_scope_from_site(site_docname: str) -> dict[str, Any]:
 		frappe.throw(f"Bench release '{bench_release}' is missing cluster information.")
 	if not scope.get("release_name"):
 		frappe.throw(f"Bench release '{bench_release}' is missing release name information.")
+	# See `_get_release_scope` — release the request transaction before the
+	# caller shells out to helm / kubernetes.
+	frappe.db.commit()
 	return scope
 
 

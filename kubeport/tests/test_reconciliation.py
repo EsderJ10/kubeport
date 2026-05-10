@@ -340,7 +340,20 @@ class UnitTestReconciliation(UnitTestCase):
 			"deployed (no workload resources)",
 			update_modified=False,
 		)
-		mock_publish.assert_not_called()
+		# Detail-only updates emit a side-channel event so the open form
+		# patches the detail panel in place (no `reload_doc()` — that would
+		# trip the modified-timestamp guard the no-modified write protects).
+		mock_publish.assert_called_once_with(
+			"helm_release_detail_update",
+			{
+				"release_docname": "bench-a",
+				"status": "Deployed",
+				"helm_status_detail": "deployed (no workload resources)",
+			},
+			doctype="Helm Release",
+			docname="bench-a",
+			after_commit=True,
+		)
 
 	@patch("kubeport.tasks.reconciliation.frappe.log_error")
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
@@ -1508,6 +1521,7 @@ class UnitTestReconcileFrappeSiteBackups(UnitTestCase):
 			},
 			doctype="Frappe Site Backup",
 			docname="demo.example.com::demo-20260430120000",
+			after_commit=True,
 		)
 
 

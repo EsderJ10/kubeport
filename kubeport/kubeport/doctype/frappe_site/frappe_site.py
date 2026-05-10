@@ -503,15 +503,23 @@ class FrappeSite(Document):
 		if not self.bench_release:
 			return {"rows": [], "error": "This site has no bench release."}
 
+		# Drop the request's transaction before shelling out so the held
+		# connection cannot collide with reconciliation writes on the parent
+		# Helm Release row (the "Server was too busy" QueryTimeoutError
+		# pathway).
+		bench_release = self.bench_release
+		site_docname = self.name
+		frappe.db.commit()
+
 		try:
 			return {
-				"rows": [r.to_dict() for r in walk(self.bench_release)],
+				"rows": [r.to_dict() for r in walk(bench_release)],
 				"error": "",
 			}
 		except Exception as e:
 			frappe.logger("kubeport").warning(
 				"Could not read Frappe Site health for '%s': %s",
-				self.name,
+				site_docname,
 				e,
 			)
 			return {"rows": [], "error": _format_observed_state_error(e)}
@@ -614,6 +622,7 @@ class FrappeSite(Document):
 			{"site_docname": self.name, "status": "Failed"},
 			doctype="Frappe Site",
 			docname=self.name,
+			after_commit=True,
 		)
 		frappe.msgprint(
 			f"Cancellation requested for '{self.site_name}'.",
@@ -733,6 +742,7 @@ def _cancel_inflight_backups_for_site(site_docname: str, *, reason: str) -> None
 			{"site_docname": site_docname, "backup_docname": row.name, "status": "Failed"},
 			doctype="Frappe Site Backup",
 			docname=row.name,
+			after_commit=True,
 		)
 		if row.operation_job_name and row.cluster:
 			correlation_id = metrics.new_correlation_id()
