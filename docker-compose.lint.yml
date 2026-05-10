@@ -1,0 +1,22 @@
+# Containerised lint/format toolchain.
+#
+# Contributors do not need ruff installed on the host; this compose file
+# pins the same ruff image and version that .github/workflows/ci.yml uses,
+# so `make lint` is byte-for-byte equivalent to the CI lint job.
+#
+# When bumping ruff, update all three pins together:
+#   - .github/workflows/ci.yml          (CI lint job)
+#   - .pre-commit-config.yaml           (pre-commit hooks)
+#   - docker-compose.lint.yml           (this file)
+
+name: kubeport-lint
+
+services:
+  ruff:
+    image: ghcr.io/astral-sh/ruff:0.14.10
+    working_dir: /repo
+    volumes:
+      - .:/repo
+    init: true
+    # The upstream image has `ruff` as ENTRYPOINT; pass the subcommand
+    # (format / check / ...) and arguments via `compose run`.

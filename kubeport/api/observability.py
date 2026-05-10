@@ -62,7 +62,7 @@ def get_release_resource_logs(
 			"pods": [],
 			"logs_by_pod": {},
 			"errors_by_pod": {},
-			"error": str(e),
+			"error": _format_observed_state_error(e),
 		}
 
 	logs_by_pod: dict[str, str] = {}
@@ -123,7 +123,7 @@ def get_release_resource_events(
 	except ValueError as e:
 		frappe.throw(str(e))
 	except Exception as e:
-		return {"rows": [], "error": str(e)}
+		return {"rows": [], "error": _format_observed_state_error(e)}
 
 
 @frappe.whitelist()
@@ -156,7 +156,7 @@ def get_release_resource_rollout(
 	except ValueError as e:
 		frappe.throw(str(e))
 	except Exception as e:
-		return {"rows": [], "error": str(e)}
+		return {"rows": [], "error": _format_observed_state_error(e)}
 
 
 def _get_release_scope(release_docname: str) -> dict[str, Any]:
@@ -194,6 +194,12 @@ def _select_pod_name(pods: list[dict[str, Any]], pod_name: str | None) -> str:
 	if selected not in available_names:
 		raise ValueError("Selected pod is not part of this resource.")
 	return selected
+
+
+def _format_observed_state_error(error: Exception) -> str:
+	if helm.is_release_not_found_error(error):
+		return "No Helm release exists yet for this row. Deploy the release successfully before reading live state."
+	return str(error)
 
 
 def _assert_release_resource_member(

@@ -67,7 +67,22 @@ cd apps/kubeport
 pre-commit install
 ```
 
-The pre-commit ruff version is pinned in `.pre-commit-config.yaml`. The CI lint job (`.github/workflows/ci.yml`) pins to the same version. If you bump one, bump the other.
+The pre-commit ruff version is pinned in `.pre-commit-config.yaml`. The CI lint job (`.github/workflows/ci.yml`) pins to the same version. If you bump one, bump the other (and `docker-compose.lint.yml` — see below).
+
+### Containerised lint (no host install)
+
+If you do not want ruff on the host, use the bundled compose stack — it pins the same image and version as CI:
+
+```bash
+make fmt         # format in place
+make lint        # report findings
+make fix         # auto-fix + format
+make lint-check  # exact CI dry-run (format --check + check)
+```
+
+`make` shells out to `docker compose -f docker-compose.lint.yml`. Files written by the container are owned by your host UID. If you bump ruff, bump it in `.github/workflows/ci.yml`, `.pre-commit-config.yaml`, **and** `docker-compose.lint.yml`.
+
+A companion workflow (`.github/workflows/lint-autofix.yml`) runs `ruff check --fix` + `ruff format` on every PR and commits the result back to the PR branch, so mechanically fixable drift never blocks the `Lint` check.
 
 ---
 
