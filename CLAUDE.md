@@ -66,6 +66,7 @@ bench --site <site> run-tests --app kubeport --doctype <DocType>
 | `docs/control-plane-state.md` | Capabilities, robustness defences, open gaps |
 | `docs/codebase-summary.md` | Module-level architecture reference |
 | `docs/evaluation.md` | Empirical evaluation chapter (functional, reliability, baseline, scaling) |
+| `docs/references.bib` | BibTeX bibliography for `docs/thesis.md` §2 and §9 citations |
 | `docs/history/` | Archived planning documents (see its README) |
 | `eval/README.md` | End-to-end evaluation harness (`make eval`) |
 | `CHANGELOG.md` | Architecture decision log |
