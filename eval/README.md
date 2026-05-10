@@ -170,9 +170,102 @@ timeouts are set generously above expected medians to absorb image
 pulls and pod scheduling delays; tighten them for CI use. A fresh
 end-to-end run adds another ~5-10 min for the ERPNext Helm deploy.
 
+## Fault scenarios (TODO-05)
+
+The fault-injection harness lives under `eval/faults/` and is driven by
+`eval/faults/run.py`.  Each scenario empirically validates one
+robustness defence listed in `docs/control-plane-state.md` §Robustness
+Properties.  Reports land at `eval/results/faults-<utc-timestamp>.json`
+and the `make eval-faults` / `make eval-faults-real` targets cover the
+default invocation shapes.
+
+| Scenario | Defended invariant | Witness | Status |
+|---|---|---|---|
+| `worker_kill_mid_helm_upgrade` | Stale-operation reconciler recovers worker-stranded Helm Release rows within `STALE_OPERATION_THRESHOLD_MINUTES` (30 min) | [`kubeport/tasks/reconciliation.py:_reconcile_stale_helm_operations`](../kubeport/tasks/reconciliation.py) | Implemented |
+| `job_ttl_expired_before_reconcile` | Reconciliation falls back to ground-truth bench probe when the operation Job is gone before the tick reads it | [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
+| `pod_exec_timeout_during_site_probe` | Three-state probe returns `unknown` on transient pod-exec failure; row stays In Progress for the tick and recovers next tick | [`kubeport/utils/discovery.py:_exec_list_sites`](../kubeport/utils/discovery.py) and [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
+| `corrupt_archive_size_sidecar` | PVC sidecar probe marks backup `Failed` when the `<archive>.size` sidecar is truncated; row delete enqueues archive trash cleanup that removes the archive from the PVC | [`kubeport/tasks/reconciliation.py:_probe_backup_archive_on_pvc`](../kubeport/tasks/reconciliation.py) and [`kubeport/tasks/site_tasks.py:delete_backup_archive_task`](../kubeport/tasks/site_tasks.py) | Implemented |
+
+### Running the implemented scenarios
+
+`worker_kill_mid_helm_upgrade` requires:
+
+- An existing `Helm Release` row in `Deployed` (or `Degraded`) state — the harness drives a no-op upgrade against it. Default: `demo-k3d/demo/demo-bench` (the same release used by `make eval`).
+- The dev container, long-queue worker, and bench scheduler running per the Prerequisites section above.
+
+`job_ttl_expired_before_reconcile` and `pod_exec_timeout_during_site_probe` both require:
+
+- An existing `Frappe Site` row in `Active` state whose underlying site
+  is **actually functional** on the bench (`bench list-apps` exits 0
+  inside the bench pod).  Default: `demo-k3d/demo/demo-bench/erp.cluster.local`.
+  If your bench has a different known-good site, override with
+  `--site-doc-name <docname>`.
+- The probe contract relies on the existing release/cluster the row
+  points at — no extra cluster setup is needed beyond a healthy bench.
+
+`pod_exec_timeout_during_site_probe` additionally monkey-patches
+`kubeport.utils.discovery._exec_list_sites` for one reconcile tick to
+raise a synthetic `urllib3.exceptions.ReadTimeoutError`; the patch is
+restored in a `finally` block before the second tick so the dev
+container is left in the same state it was found.
+
+`corrupt_archive_size_sidecar` requires the `kubeport-backups` PVC to
+be present in the target namespace (auto-created by Kubeport on the
+first backup) and the bench long-queue worker for the post-Failed row
+delete to enqueue the archive cleanup Job.  The scenario submits two
+short-lived `busybox` Jobs that mount the PVC: one to truncate
+`<archive>.size` to zero bytes, one to verify the archive is absent
+after trash cleanup runs.  Both Jobs carry the standard
+`app.kubernetes.io/managed-by=kubeport` label and a 60s
+`ttlSecondsAfterFinished` so they self-clean.
+
+```bash
+# Fast path: for both scenarios, backdate the staleness clock or
+# directly invoke the per-doctype reconciler so recovery is observed
+# in seconds; the report records fast_forward_used=true per scenario.
+make eval-faults
+
+# Realistic path: wait for the natural 5-min cron tick (and, for
+# scenario 1, the 30-min staleness window). Wall-clock typically
+# 30-35 min for scenario 1; ~5 min for scenario 2.
+make eval-faults-real
+```
+
+After every scenario the harness checks whether the long-queue worker
+is still up and restarts it if needed (scenario 1 kills it
+deliberately).  Pass `--no-restart-worker` to `eval/faults/run.py` to
+skip the restart (useful when investigating).  The dev container is
+left in the same state it was found.
+
+### Report schema
+
+Top-level matches the golden-path report shape (`schema_version`,
+`generated_at`, `started_at`, `finished_at`, `duration_seconds`,
+`context`, `summary`).  Each entry in `scenarios[]` carries:
+
+```json
+{
+  "scenario": "worker_kill_mid_helm_upgrade",
+  "defended_invariant": "Stale operation reconciler recovers worker-stranded Helm Release rows",
+  "witness": { "reconciler": "<file:symbol>", "threshold_minutes": 30 },
+  "injected_at":   "2026-05-10T18:00:00Z",
+  "recovered_at":  "2026-05-10T18:00:12Z",
+  "mttr_seconds":  12.0,
+  "expected_mttr_bound_seconds": 1800,
+  "fast_forward_used": true,
+  "observed":  { "final_status": "Deployed", "operation_token_rotated": true },
+  "passed":    true,
+  "detail":    "Stale-op reconciler recovered the stranded row to 'Deployed' in 12.0s (fast-forwarded).",
+  "steps": [ ... ordered timeline of every observation and mutation ... ]
+}
+```
+
+The reference run is checked in at `eval/results/sample-faults.json`
+for thesis quoting.
+
 ## Cross-references
 
 - Invariants the harness exercises: AGENTS.md §Design Invariants.
 - Per-DocType state machines: `docs/control-plane-state.md`.
-- Extended fault scenarios on top of this harness:
-  upcoming TODO-05 in `TODO.md`.
+- Robustness properties matched to scenarios:
+  `docs/control-plane-state.md` §Robustness Properties.

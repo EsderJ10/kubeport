@@ -148,7 +148,16 @@
 
 ---
 
-### TODO-05 — `feat/eval-fault-injection`
+### TODO-05 — `feat/eval-fault-injection` ✅ DONE 2026-05-10 — 4ee574b/752d1b8/53cbfb4/f97de5f
+
+> Closing note: All four scenarios pass under `make eval-faults`
+> (fast-forward) — see `eval/results/sample-faults.json`. A real-time
+> sample (without `--fast-forward`) is the natural follow-up: TODO-04
+> already covers the reuse-mode fixture, and the remaining work is one
+> ~35-min run with `make eval-faults-real`. The scaffolding also
+> surfaced one latent bug (`fix: stale helm reconciliation reads
+> values field via dict subscript not attribute`, c9cb8be), which is
+> exactly what fault injection is supposed to do.
 
 **Goal**: Empirically validate the robustness defenses listed in `docs/control-plane-state.md` §Robustness Properties.
 

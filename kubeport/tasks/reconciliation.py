@@ -213,7 +213,7 @@ def _reconcile_stale_helm_operations():
 					chart_version=release.chart_version,
 					namespace=release.namespace,
 					release_name=release.release_name,
-					values_yaml=release.values,
+					values_yaml=release.get("values"),
 					site_image=getattr(release, "site_image", None),
 					site_image_digest=_get_site_image_digest_for_hash(getattr(release, "site_image", None)),
 				)

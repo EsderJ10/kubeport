@@ -5,6 +5,7 @@ from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import frappe
 from frappe.tests import UnitTestCase
 
 from kubeport.kubeport.doctype.helm_release.helm_release import calculate_release_spec_hash
@@ -467,19 +468,25 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_get_value,
 		mock_publish,
 	):
+		# Use frappe._dict (a dict subclass) — the same shape that
+		# frappe.get_all returns in production. Plain SimpleNamespace
+		# masks the ``release.values`` vs ``release.get("values")`` field
+		# resolution path; see test_reconcile_stale_helm_operation_reads_values_via_get.
 		mock_get_all.return_value = [
-			SimpleNamespace(
-				name="cluster-a/default/bench-a",
-				cluster="cluster-a",
-				namespace="default",
-				release_name="bench-a",
-				chart="repo/erpnext",
-				chart_version="8.0.41",
-				values="",
-				status="In Progress",
-				operation_token="tok-1",
-				operation_started_at="2026-04-12 10:00:00",
-				modified="2026-04-12 10:00:00",
+			frappe._dict(
+				{
+					"name": "cluster-a/default/bench-a",
+					"cluster": "cluster-a",
+					"namespace": "default",
+					"release_name": "bench-a",
+					"chart": "repo/erpnext",
+					"chart_version": "8.0.41",
+					"values": "",
+					"status": "In Progress",
+					"operation_token": "tok-1",
+					"operation_started_at": "2026-04-12 10:00:00",
+					"modified": "2026-04-12 10:00:00",
+				}
 			),
 		]
 		mock_helm_status.return_value = {"info": {"status": "deployed"}}
@@ -517,19 +524,21 @@ class UnitTestReconciliation(UnitTestCase):
 		_mock_publish,
 	):
 		mock_get_all.return_value = [
-			SimpleNamespace(
-				name="cluster-a/default/bench-a",
-				cluster="cluster-a",
-				namespace="default",
-				release_name="bench-a",
-				chart="repo/erpnext",
-				chart_version="8.0.41",
-				values="workers:\n  replicaCount: 2\n",
-				site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-				status="In Progress",
-				operation_token="tok-1",
-				operation_started_at="2026-04-12 10:00:00",
-				modified="2026-04-12 10:00:00",
+			frappe._dict(
+				{
+					"name": "cluster-a/default/bench-a",
+					"cluster": "cluster-a",
+					"namespace": "default",
+					"release_name": "bench-a",
+					"chart": "repo/erpnext",
+					"chart_version": "8.0.41",
+					"values": "workers:\n  replicaCount: 2\n",
+					"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+					"status": "In Progress",
+					"operation_token": "tok-1",
+					"operation_started_at": "2026-04-12 10:00:00",
+					"modified": "2026-04-12 10:00:00",
+				}
 			),
 		]
 		mock_helm_status.return_value = {"info": {"status": "deployed"}}
@@ -554,6 +563,77 @@ class UnitTestReconciliation(UnitTestCase):
 			values_yaml="workers:\n  replicaCount: 2\n",
 			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
 			site_image_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		)
+		self.assertEqual(fields["desired_spec_hash"], expected_hash)
+		self.assertEqual(fields["last_applied_spec_hash"], expected_hash)
+
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.tasks.reconciliation._helm_operation_is_stale", return_value=True)
+	@patch("kubeport.utils.release_health.walk")
+	@patch("kubeport.utils.helm.status")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_stale_helm_operation_reads_values_via_get_not_attribute(
+		self,
+		mock_get_all,
+		mock_set_value,
+		mock_helm_status,
+		mock_walk,
+		_mock_is_stale,
+		mock_get_value,
+		_mock_publish,
+	):
+		"""Regression for the field/method name clash on ``frappe._dict``.
+
+		``release.values`` resolves to the inherited ``dict.values`` method,
+		not the YAML field — so the previous reconciler implementation
+		threw ``AttributeError`` from ``yaml.safe_load`` and unconditionally
+		marked stale rows ``Failed`` instead of recovering them. This test
+		pins the spec hash to the *content* of the YAML, which only matches
+		when the reconciler reads the field via ``release.get("values")``
+		(or subscript). If the bug regresses, ``yaml.safe_load`` raises and
+		the assertion below catches the wrong terminal state.
+		"""
+		values_yaml = "workers:\n  replicaCount: 2\nresources:\n  cpu: 500m\n"
+		mock_get_all.return_value = [
+			frappe._dict(
+				{
+					"name": "cluster-a/default/bench-a",
+					"cluster": "cluster-a",
+					"namespace": "default",
+					"release_name": "bench-a",
+					"chart": "repo/erpnext",
+					"chart_version": "8.0.41",
+					"values": values_yaml,
+					"site_image": "",
+					"status": "In Progress",
+					"operation_token": "tok-1",
+					"operation_started_at": "2026-04-12 10:00:00",
+					"modified": "2026-04-12 10:00:00",
+				}
+			),
+		]
+		mock_helm_status.return_value = {"info": {"status": "deployed"}}
+		mock_walk.return_value = []
+		# Empty site_image short-circuits _get_site_image_digest_for_hash
+		# without hitting the DB, so the only get_value call is the
+		# token/status guard inside _set_stale_helm_operation_state.
+		mock_get_value.return_value = {"operation_token": "tok-1", "status": "In Progress"}
+
+		_reconcile_stale_helm_operations()
+
+		mock_set_value.assert_called_once()
+		_, _, fields = mock_set_value.call_args.args
+		self.assertEqual(fields["status"], "Deployed")
+		expected_hash = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="default",
+			release_name="bench-a",
+			values_yaml=values_yaml,
+			site_image="",
+			site_image_digest="",
 		)
 		self.assertEqual(fields["desired_spec_hash"], expected_hash)
 		self.assertEqual(fields["last_applied_spec_hash"], expected_hash)
