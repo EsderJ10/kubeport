@@ -1,0 +1,150 @@
+{
+  "context": {
+    "chart_name": "erpnext",
+    "helm_repo_name": "frappe",
+    "helm_repo_url": "https://helm.erpnext.com",
+    "install_apps": "erpnext",
+    "kubeconfig_context": "k3d-pacopepe",
+    "namespace": "demo",
+    "release_name": "demo-bench",
+    "site_name": "eval-baseline-20260510t101245z.localhost"
+  },
+  "duration_seconds": 273.94,
+  "finished_at": "2026-05-10T10:17:19Z",
+  "generated_at": "2026-05-10T10:17:19Z",
+  "host_wall_seconds": 274.57,
+  "invocation": {
+    "chart_name": "erpnext",
+    "container": "tfg_devcontainer-frappe-1",
+    "gateway_ip": "172.22.0.1",
+    "helm_repo_name": "frappe",
+    "helm_repo_url": "https://helm.erpnext.com",
+    "install_apps": "erpnext",
+    "kubeconfig_context": "k3d-pacopepe",
+    "namespace": "demo",
+    "release_name": "demo-bench",
+    "site_name": "eval-baseline-20260510t101245z.localhost"
+  },
+  "phases": [
+    {
+      "commands_issued": 1,
+      "detail": "",
+      "duration_seconds": 0.222,
+      "finished_at": "2026-05-10T10:12:46Z",
+      "manual_steps": 1,
+      "phase": "setup_cluster_doc",
+      "started_at": "2026-05-10T10:12:46Z",
+      "status": "passed",
+      "timeout_seconds": 60
+    },
+    {
+      "commands_issued": 2,
+      "detail": "",
+      "duration_seconds": 1.359,
+      "finished_at": "2026-05-10T10:12:48Z",
+      "manual_steps": 0,
+      "phase": "setup_helm_repo",
+      "started_at": "2026-05-10T10:12:46Z",
+      "status": "passed",
+      "timeout_seconds": 240
+    },
+    {
+      "commands_issued": 1,
+      "detail": "",
+      "duration_seconds": 12.725,
+      "finished_at": "2026-05-10T10:13:01Z",
+      "manual_steps": 0,
+      "phase": "verify_chart",
+      "started_at": "2026-05-10T10:12:48Z",
+      "status": "passed",
+      "timeout_seconds": 30
+    },
+    {
+      "commands_issued": 0,
+      "detail": "",
+      "duration_seconds": 0.158,
+      "finished_at": "2026-05-10T10:13:01Z",
+      "manual_steps": 1,
+      "phase": "create_release",
+      "started_at": "2026-05-10T10:13:01Z",
+      "status": "passed",
+      "timeout_seconds": 30
+    },
+    {
+      "commands_issued": 2,
+      "detail": "",
+      "duration_seconds": 1.526,
+      "finished_at": "2026-05-10T10:13:03Z",
+      "manual_steps": 1,
+      "phase": "deploy_release",
+      "started_at": "2026-05-10T10:13:01Z",
+      "status": "passed",
+      "timeout_seconds": 900
+    },
+    {
+      "commands_issued": 2,
+      "detail": "",
+      "duration_seconds": 174.355,
+      "finished_at": "2026-05-10T10:15:58Z",
+      "manual_steps": 3,
+      "phase": "create_site",
+      "started_at": "2026-05-10T10:13:03Z",
+      "status": "passed",
+      "timeout_seconds": 900
+    },
+    {
+      "commands_issued": 2,
+      "detail": "",
+      "duration_seconds": 43.302,
+      "finished_at": "2026-05-10T10:16:41Z",
+      "manual_steps": 1,
+      "phase": "migrate_site",
+      "started_at": "2026-05-10T10:15:58Z",
+      "status": "passed",
+      "timeout_seconds": 600
+    },
+    {
+      "commands_issued": 7,
+      "detail": "",
+      "duration_seconds": 9.058,
+      "finished_at": "2026-05-10T10:16:51Z",
+      "manual_steps": 3,
+      "phase": "backup_site",
+      "started_at": "2026-05-10T10:16:42Z",
+      "status": "passed",
+      "timeout_seconds": 600
+    },
+    {
+      "commands_issued": 5,
+      "detail": "",
+      "duration_seconds": 21.701,
+      "finished_at": "2026-05-10T10:17:13Z",
+      "manual_steps": 2,
+      "phase": "restore_site",
+      "started_at": "2026-05-10T10:16:51Z",
+      "status": "passed",
+      "timeout_seconds": 600
+    },
+    {
+      "commands_issued": 2,
+      "detail": "",
+      "duration_seconds": 5.513,
+      "finished_at": "2026-05-10T10:17:19Z",
+      "manual_steps": 1,
+      "phase": "drop_site",
+      "started_at": "2026-05-10T10:17:13Z",
+      "status": "passed",
+      "timeout_seconds": 600
+    }
+  ],
+  "schema_version": 1,
+  "started_at": "2026-05-10T10:12:46Z",
+  "summary": {
+    "commands_issued_total": 24,
+    "failed": 0,
+    "manual_steps_total": 13,
+    "passed": 10,
+    "skipped": 0,
+    "total": 10
+  }
+}

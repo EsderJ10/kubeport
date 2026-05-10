@@ -1,4 +1,7 @@
-# Each harness run writes eval/results/<utc-timestamp>.json. Only the
-# checked-in reference run (sample.json) is tracked.
+# Each harness run writes eval/results/<utc-timestamp>.json (and
+# baseline-<utc>.json for the baseline-comparison run). Only the
+# checked-in reference runs (sample.json, sample-baseline.json) are
+# tracked.
 *.json
 !sample.json
+!sample-baseline.json
