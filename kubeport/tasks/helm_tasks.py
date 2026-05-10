@@ -38,9 +38,10 @@ _UNINSTALLING_WORKER_STATUS = "Uninstalling"
 
 # Bitnami's MariaDB OCI chart.  Pinned for reproducibility — bumps go through
 # code review since a Bitnami breaking change would silently break every
-# bundled-MariaDB Frappe release on the next install/upgrade.
+# bundled-MariaDB Frappe release on the next install/upgrade.  Verify any
+# bump exists with: ``helm show chart oci://registry-1.docker.io/bitnamicharts/mariadb --version <X.Y.Z>``.
 _BUNDLED_MARIADB_CHART_REF = "oci://registry-1.docker.io/bitnamicharts/mariadb"
-_BUNDLED_MARIADB_CHART_VERSION = "21.0.5"
+_BUNDLED_MARIADB_CHART_VERSION = "25.1.1"
 
 # ---------------------------------------------------------------------------
 # Repository Tasks
