@@ -148,7 +148,7 @@
 
 ---
 
-### TODO-05 — `feat/eval-fault-injection` ✅ DONE 2026-05-10 — 4ee574b/752d1b8/53cbfb4/<commit-4>
+### TODO-05 — `feat/eval-fault-injection` ✅ DONE 2026-05-10 — 4ee574b/752d1b8/53cbfb4/f97de5f
 
 > Closing note: All four scenarios pass under `make eval-faults`
 > (fast-forward) — see `eval/results/sample-faults.json`. A real-time
