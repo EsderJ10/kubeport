@@ -9,11 +9,12 @@ For installation see the [`README.md`](../README.md). For the architecture behin
 ## 0. Prerequisites
 
 - A running Frappe / ERPNext bench with the `kubeport` app installed (see the README install steps).
+- `bench build --app kubeport` has been run after install so the Kubeport logo and SVG icon sprite are served from `/assets/kubeport/`. Without it the navbar logo, the `/apps` tile, and the workspace's branded sidebar icon all fall back to broken images.
 - Helm 3 on the bench host's `PATH`.
 - Network reachability from the bench host (or pod) to the Kubernetes API server you plan to register.
 - Operator's Frappe user has the `System Manager` role.
 
-All workflows below assume the operator has the Kubeport workspace open in the Desk (`/app/kubeport-operations`).
+All workflows below assume the operator has the Kubeport workspace open in the Desk (`/app/kubeport-operations`). On a single-app bench the `app_home` hook redirects there automatically; on a multi-app bench, click the **Kubeport** tile on `/apps`.
 
 ---
 

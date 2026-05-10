@@ -10,16 +10,15 @@ app_license = "mit"
 
 # required_apps = []
 
-# Each item in the list will be shown as an app in the apps page
-# add_to_apps_screen = [
-# 	{
-# 		"name": "kubeport",
-# 		"logo": "/assets/kubeport/logo.png",
-# 		"title": "Kubeport",
-# 		"route": "/kubeport",
-# 		"has_permission": "kubeport.api.permission.has_app_permission"
-# 	}
-# ]
+# `has_permission` is intentionally omitted — Frappe drops the entry if the callback fails to import.
+add_to_apps_screen = [
+	{
+		"name": "kubeport",
+		"logo": "/assets/kubeport/images/logo.svg",
+		"title": "Kubeport",
+		"route": "/app/kubeport-operations",
+	}
+]
 
 # Includes in <head>
 # ------------------
@@ -51,10 +50,14 @@ app_license = "mit"
 # Svg Icons
 # ------------------
 # include app icons in desk
-# app_include_icons = "kubeport/public/icons.svg"
+app_include_icons = "kubeport/public/icons.svg"
+app_logo_url = "/assets/kubeport/images/logo.svg"
 
 # Home Pages
 # ----------
+
+# Single-app benches land users directly on the workspace.
+app_home = "/app/kubeport-operations"
 
 # application home page (will override Website Settings)
 # home_page = "login"
