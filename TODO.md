@@ -224,7 +224,7 @@
 
 ---
 
-### TODO-08 — `docs/thesis-evaluation-chapter`
+### TODO-08 — `docs/thesis-evaluation-chapter` ✅ DONE 2026-05-10 — 72e4fdd
 
 **Goal**: A real "Evaluación" chapter in the thesis grounded in TODO-04..07 outputs.
 
