@@ -1,39 +1,39 @@
-# Contributing to Kubeport
+# Contribuir a Kubeport
 
-Kubeport is a Frappe app. Contributions follow standard Frappe app conventions plus a few invariants specific to this project (see [`AGENTS.md`](AGENTS.md) for the full list).
+Kubeport es una aplicación Frappe. Las contribuciones siguen las convenciones estándar de aplicaciones Frappe más algunos invariantes específicos de este proyecto (consulta [`AGENTS.md`](AGENTS.md) para la lista completa).
 
 ---
 
-## Development environment
+## Entorno de desarrollo
 
-Kubeport is developed inside a Frappe Bench. The supported workflow is a dev container, which provides Frappe v16, MariaDB, Redis, Helm, and `kubectl` pre-installed.
+Kubeport se desarrolla dentro de un Frappe Bench. El flujo de trabajo soportado es un contenedor de desarrollo, que proporciona Frappe v16, MariaDB, Redis, Helm y `kubectl` preinstalados.
 
-A minimal manual setup looks like:
+Una configuración manual mínima tiene el siguiente aspecto:
 
 ```bash
-# Inside an existing Frappe Bench checkout
+# Dentro de un checkout existente de Frappe Bench
 bench get-app kubeport <repository-url> --branch main
 bench install-app kubeport
 bench --site <site> migrate
 ```
 
-Required runtime dependencies on the bench host:
+Dependencias de ejecución requeridas en el host del bench:
 
 - Python ≥ 3.14
-- Helm 3 on `PATH`
-- A reachable Kubernetes cluster (kubeconfig, bearer token, or in-cluster service account) for any feature that exercises real cluster I/O
+- Helm 3 en `PATH`
+- Un clúster de Kubernetes accesible (kubeconfig, token de portador o cuenta de servicio dentro del clúster) para cualquier funcionalidad que ejercite E/S real con el clúster
 
 ---
 
-## Branching and pull requests
+## Ramas y pull requests
 
-- The default branch is `main`. All changes land via pull request against `main`.
-- Feature branches should use a topic-style prefix: `feat/...`, `fix/...`, `chore/...`, `refactor/...`, `docs/...`.
-- Keep PRs reviewable: one cohesive change per PR, with the `CHANGELOG.md` updated in the same commit when the change is architecturally meaningful.
+- La rama predeterminada es `main`. Todos los cambios llegan mediante pull request contra `main`.
+- Las ramas de funcionalidad deben usar un prefijo temático: `feat/...`, `fix/...`, `chore/...`, `refactor/...`, `docs/...`.
+- Mantén los PRs revisables: un único cambio cohesionado por PR, con `CHANGELOG.md` actualizado en el mismo commit cuando el cambio sea arquitectónicamente significativo.
 
-### Commit messages
+### Mensajes de commit
 
-Commit messages follow the existing project style: a single-line conventional summary, no body, no `Co-Authored-By` trailer. Examples from `git log`:
+Los mensajes de commit siguen el estilo existente del proyecto: un resumen convencional en una sola línea, sin cuerpo, sin tráiler `Co-Authored-By`. Ejemplos del `git log`:
 
 ```
 fix: integrate main and resolve CI lint and reconciliation test failures
@@ -41,124 +41,124 @@ refactor: remove obsolete migration patch tests
 ci: enforce test job gating now that bench-in-CI is green
 ```
 
-### CHANGELOG entries
+### Entradas del CHANGELOG
 
-`CHANGELOG.md` is an **architecture decision log**, not a release notes file. Add an entry when the PR records a design decision worth preserving (a chosen approach, the rejected alternatives, the reason). Bug fixes and refactors that do not change architecture do not require an entry. The format is documented at the top of `CHANGELOG.md`.
+`CHANGELOG.md` es un **registro de decisiones de arquitectura**, no un fichero de notas de versión. Añade una entrada cuando el PR registre una decisión de diseño que valga la pena preservar (el enfoque elegido, las alternativas descartadas, el motivo). Las correcciones de bugs y refactorizaciones que no cambian la arquitectura no requieren entrada. El formato está documentado al principio de `CHANGELOG.md`.
 
 ---
 
-## Code style
+## Estilo de código
 
-| Concern | Rule | Tool |
+| Aspecto | Regla | Herramienta |
 |---|---|---|
-| Python indentation | tabs | `ruff format` |
-| Python quotes | double | `ruff format` |
-| Python line length | 110 chars | `ruff` |
-| Python target | 3.14 | `pyproject.toml` (`target-version = "py314"`) |
-| JS / CSS formatting | prettier defaults | `prettier` |
-| JS linting | repo `.eslintrc` | `eslint` |
-| Type annotations | required on every `@frappe.whitelist()` method | `require_type_annotated_api_methods = True` in `hooks.py` |
-| DocType field types | `frappe.types.DF` | `export_python_type_annotations = True` in `hooks.py` |
+| Sangría Python | tabuladores | `ruff format` |
+| Comillas Python | dobles | `ruff format` |
+| Longitud de línea Python | 110 caracteres | `ruff` |
+| Versión objetivo Python | 3.14 | `pyproject.toml` (`target-version = "py314"`) |
+| Formato JS / CSS | valores predeterminados de prettier | `prettier` |
+| Linting JS | `.eslintrc` del repositorio | `eslint` |
+| Anotaciones de tipo | obligatorias en todos los métodos `@frappe.whitelist()` | `require_type_annotated_api_methods = True` en `hooks.py` |
+| Tipos de campos DocType | `frappe.types.DF` | `export_python_type_annotations = True` en `hooks.py` |
 
-Pre-commit runs the formatters and linters automatically. Install it once per checkout:
+Pre-commit ejecuta los formateadores y linters automáticamente. Instálalo una vez por checkout:
 
 ```bash
 cd apps/kubeport
 pre-commit install
 ```
 
-The pre-commit ruff version is pinned in `.pre-commit-config.yaml`. The CI lint job (`.github/workflows/ci.yml`) pins to the same version. If you bump one, bump the other (and `docker-compose.lint.yml` — see below).
+La versión de ruff en pre-commit está anclada en `.pre-commit-config.yaml`. El job de lint de CI (`.github/workflows/ci.yml`) usa la misma versión. Si actualizas una, actualiza la otra (y `docker-compose.lint.yml` — ver más abajo).
 
-### Containerised lint (no host install)
+### Lint en contenedor (sin instalación en el host)
 
-If you do not want ruff on the host, use the bundled compose stack — it pins the same image and version as CI:
+Si no quieres ruff en el host, usa la pila compose incluida — ancla la misma imagen y versión que CI:
 
 ```bash
-make fmt         # format in place
-make lint        # report findings
-make fix         # auto-fix + format
-make lint-check  # exact CI dry-run (format --check + check)
+make fmt         # formatear en local
+make lint        # reportar hallazgos
+make fix         # corregir automáticamente + formatear
+make lint-check  # ejecución exacta en modo CI (format --check + check)
 ```
 
-`make` shells out to `docker compose -f docker-compose.lint.yml`. Files written by the container are owned by your host UID. If you bump ruff, bump it in `.github/workflows/ci.yml`, `.pre-commit-config.yaml`, **and** `docker-compose.lint.yml`.
+`make` delega en `docker compose -f docker-compose.lint.yml`. Los ficheros escritos por el contenedor pertenecen al UID de tu host. Si actualizas ruff, actualízalo en `.github/workflows/ci.yml`, `.pre-commit-config.yaml` **y** `docker-compose.lint.yml`.
 
-A companion workflow (`.github/workflows/lint-autofix.yml`) runs `ruff check --fix` + `ruff format` on every PR and commits the result back to the PR branch, so mechanically fixable drift never blocks the `Lint` check.
+Un flujo de trabajo complementario (`.github/workflows/lint-autofix.yml`) ejecuta `ruff check --fix` + `ruff format` en cada PR y hace commit del resultado de vuelta a la rama del PR, de modo que la deriva corregible mecánicamente nunca bloquea la comprobación `Lint`.
 
 ---
 
 ## Tests
 
-Run the full Kubeport suite from a working bench:
+Ejecuta la suite completa de Kubeport desde un bench en funcionamiento:
 
 ```bash
 bench --site <site> run-tests --app kubeport
 ```
 
-Run a single DocType's tests:
+Ejecuta los tests de un único DocType:
 
 ```bash
 bench --site <site> run-tests --app kubeport --doctype "Helm Release"
 ```
 
-When the bench environment is unavailable, prefer focused unit tests and syntax checks near the changed module rather than a full bench run.
+Cuando el entorno bench no esté disponible, prefiere tests unitarios focalizados y comprobaciones de sintaxis cerca del módulo modificado en lugar de una ejecución completa del bench.
 
-### Test conventions
+### Convenciones de tests
 
-- Default to `IntegrationTestCase`. Use `UnitTestCase` only for pure, isolated logic.
-- When you add or change a whitelisted API, add a test close to the changed module.
-- For changes that affect Frappe Site provisioning, run the manual smoke procedure documented in §10 of [`docs/operator-guide.md`](docs/operator-guide.md) and record the result in the PR description before merging.
+- Usa `IntegrationTestCase` por defecto. Usa `UnitTestCase` solo para lógica pura y aislada.
+- Cuando añadas o modifiques una API pública, añade un test cerca del módulo modificado.
+- Para cambios que afecten al aprovisionamiento de Frappe Site, ejecuta el procedimiento manual de verificación documentado en el §10 de [`docs/operator-guide.md`](docs/operator-guide.md) y registra el resultado en la descripción del PR antes de fusionar.
 
 ### CI
 
-Every PR runs `.github/workflows/ci.yml`:
+Cada PR ejecuta `.github/workflows/ci.yml`:
 
-- `lint` job: `ruff format --check` + `ruff check` against the whole repo.
-- `test` job: bootstraps a Frappe v16 bench against MariaDB 10.6 and Redis 7 service containers, installs `kubeport`, and runs `bench --site test_site run-tests --app kubeport`.
+- Job `lint`: `ruff format --check` + `ruff check` sobre todo el repositorio.
+- Job `test`: arranca un bench Frappe v16 contra contenedores de servicio MariaDB 10.6 y Redis 7, instala `kubeport` y ejecuta `bench --site test_site run-tests --app kubeport`.
 
-Both jobs are required to pass before merge.
-
----
-
-## Architectural invariants you must respect
-
-These are non-negotiable. The full list is in [`AGENTS.md`](AGENTS.md). The short version:
-
-1. **Desired state lives in MariaDB. Observed state is queried live.** Discovery code paths must never write to MariaDB.
-2. **All cluster mutations run through `frappe.enqueue(..., queue="long")`.** No `helm` or cluster-mutating `kubernetes-client` calls from the web request thread.
-3. **Background workers re-check the document's `operation_token` (or `sync_token`) before any state write.** A stale worker must never overwrite a newer operation.
-4. **State writes in workers are targeted (`db_set` / `frappe.db.set_value`).** Never `doc.reload()` in a worker — it races concurrent updates from the form.
-5. **External cluster data is fetched async by the form (`frappe.xcall`), not via `doc.onload`.**
-6. **K8s API clients are scoped per cluster via `get_k8s_api_client(cluster_name)`.** No shared global client state between requests.
-7. **Backup archives are independent of the source site.** A backup row in `Available` must remain restorable even after the source `Frappe Site` row is deleted.
-
-A change that blurs any of these is a design change, not a bug fix — open a discussion in the PR before landing it.
+Ambos jobs deben pasar antes de fusionar.
 
 ---
 
-## Documentation
+## Invariantes arquitectónicos que debes respetar
 
-When a change affects discovery, background-task behaviour, or desired-state semantics, update the relevant document **in the same commit**:
+Estos son innegociables. La lista completa está en [`AGENTS.md`](AGENTS.md). La versión corta:
 
-| Document | Update when |
+1. **El estado deseado vive en MariaDB. El estado observado se consulta en vivo.** Las rutas de código de descubrimiento nunca deben escribir en MariaDB.
+2. **Todas las mutaciones del clúster se ejecutan a través de `frappe.enqueue(..., queue="long")`.** Sin llamadas a `helm` ni a `kubernetes-client` que muten el clúster desde el hilo de la petición web.
+3. **Los workers en segundo plano vuelven a comprobar el `operation_token` (o `sync_token`) del documento antes de cualquier escritura de estado.** Un worker obsoleto nunca debe sobreescribir una operación más reciente.
+4. **Las escrituras de estado en los workers son dirigidas (`db_set` / `frappe.db.set_value`).** Nunca usar `doc.reload()` en un worker — compite con las actualizaciones concurrentes del formulario.
+5. **Los datos externos del clúster los obtiene el formulario de forma asíncrona (`frappe.xcall`), no mediante `doc.onload`.**
+6. **Los clientes de la API de K8s tienen alcance por clúster mediante `get_k8s_api_client(cluster_name)`.** Sin estado de cliente global compartido entre peticiones.
+7. **Los archivos de copia de seguridad son independientes del site origen.** Una fila de backup en estado `Available` debe poder restaurarse incluso después de que la fila `Frappe Site` origen haya sido eliminada.
+
+Un cambio que difumine cualquiera de estos es un cambio de diseño, no una corrección de bug — abre una discusión en el PR antes de fusionarlo.
+
+---
+
+## Documentación
+
+Cuando un cambio afecte al descubrimiento, al comportamiento de tareas en segundo plano o a la semántica del estado deseado, actualiza el documento correspondiente **en el mismo commit**:
+
+| Documento | Actualizar cuando |
 |---|---|
-| [`README.md`](README.md) | The user-facing feature surface changes (added or removed capabilities). |
-| [`docs/architecture.md`](docs/architecture.md) | A new layer, container, sequence, or invariant is introduced. |
-| [`docs/operator-guide.md`](docs/operator-guide.md) | An operator-visible workflow changes (new fields, new buttons, new lifecycle states). |
-| [`docs/control-plane-state.md`](docs/control-plane-state.md) | Capability surface or robustness defences change. |
-| [`docs/codebase-summary.md`](docs/codebase-summary.md) | A module's responsibility or boundary changes. |
-| [`AGENTS.md`](AGENTS.md) | An invariant changes — rare. |
-| [`CHANGELOG.md`](CHANGELOG.md) | Any architecturally meaningful decision. |
+| [`README.md`](README.md) | La superficie de funcionalidades visible para el usuario cambia (capacidades añadidas o eliminadas). |
+| [`docs/architecture.md`](docs/architecture.md) | Se introduce una nueva capa, contenedor, secuencia o invariante. |
+| [`docs/operator-guide.md`](docs/operator-guide.md) | Un flujo de trabajo visible para el operador cambia (nuevos campos, nuevos botones, nuevos estados del ciclo de vida). |
+| [`docs/control-plane-state.md`](docs/control-plane-state.md) | La superficie de capacidades o las defensas de robustez cambian. |
+| [`docs/codebase-summary.md`](docs/codebase-summary.md) | La responsabilidad o los límites de un módulo cambian. |
+| [`AGENTS.md`](AGENTS.md) | Un invariante cambia — poco frecuente. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Cualquier decisión arquitectónicamente significativa. |
 
-For documentation-only PRs, the `lint` CI job still runs (markdown is not linted today, but Python files are).
+Para PRs exclusivamente de documentación, el job de CI `lint` sigue ejecutándose (el markdown no se comprueba hoy en día, pero los ficheros Python sí).
 
 ---
 
-## Reporting bugs and proposing features
+## Reportar bugs y proponer funcionalidades
 
-Open an issue with:
+Abre un issue con:
 
-- A clear reproduction (commands, DocType operations, observed vs. expected).
-- The relevant cluster context (Kubernetes version, chart version, auth mode).
-- For backups, sites, or Helm releases: the row's status, `operation_token`, and `operation_job_name` if applicable.
+- Una reproducción clara (comandos, operaciones de DocType, comportamiento observado frente al esperado).
+- El contexto del clúster relevante (versión de Kubernetes, versión del chart, modo de autenticación).
+- Para copias de seguridad, sites o releases de Helm: el estado de la fila, `operation_token` y `operation_job_name` si aplica.
 
-For security issues, follow [`SECURITY.md`](SECURITY.md) instead — do not open a public issue.
+Para problemas de seguridad, sigue [`SECURITY.md`](SECURITY.md) — no abras un issue público.
