@@ -11,20 +11,24 @@ HOST_GID    := $(shell id -g)
 RUFF        := $(COMPOSE) run --rm --user $(HOST_UID):$(HOST_GID) ruff
 
 EVAL_K3D_CLUSTER ?= frappe-cluster
+EVAL_FAULT_RELEASE ?= demo-k3d/demo/demo-bench
+EVAL_FAULT_SCENARIOS ?= worker_kill_mid_helm_upgrade
 
 .DEFAULT_GOAL := help
-.PHONY: help fmt lint fix lint-check eval eval-clean
+.PHONY: help fmt lint fix lint-check eval eval-clean eval-faults eval-faults-real
 
 help:
 	@echo "Containerised lint targets (ghcr.io/astral-sh/ruff:0.14.10):"
-	@echo "  make fmt         Format Python code in place"
-	@echo "  make lint        Report ruff lint findings"
-	@echo "  make fix         Auto-fix ruff findings, then format"
-	@echo "  make lint-check  CI-equivalent dry run (format --check + check)"
+	@echo "  make fmt              Format Python code in place"
+	@echo "  make lint             Report ruff lint findings"
+	@echo "  make fix              Auto-fix ruff findings, then format"
+	@echo "  make lint-check       CI-equivalent dry run (format --check + check)"
 	@echo ""
 	@echo "Evaluation harness (eval/README.md):"
-	@echo "  make eval        Run the golden-path harness against the local k3d cluster"
-	@echo "  make eval-clean  Remove all eval/results/*.json reports"
+	@echo "  make eval             Run the golden-path harness against the local k3d cluster"
+	@echo "  make eval-clean       Remove all eval/results/*.json reports"
+	@echo "  make eval-faults      Run fault-injection scenarios with fast-forward (seconds)"
+	@echo "  make eval-faults-real Run fault-injection scenarios at real-time (~30 min)"
 
 fmt:
 	$(RUFF) format .
@@ -45,3 +49,14 @@ eval:
 
 eval-clean:
 	@find eval/results -type f -name '*.json' -print -delete
+
+eval-faults:
+	python3 eval/faults/run.py \
+	    --release-doc-name $(EVAL_FAULT_RELEASE) \
+	    --scenarios $(EVAL_FAULT_SCENARIOS) \
+	    --fast-forward
+
+eval-faults-real:
+	python3 eval/faults/run.py \
+	    --release-doc-name $(EVAL_FAULT_RELEASE) \
+	    --scenarios $(EVAL_FAULT_SCENARIOS)

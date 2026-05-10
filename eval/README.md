@@ -170,9 +170,74 @@ timeouts are set generously above expected medians to absorb image
 pulls and pod scheduling delays; tighten them for CI use. A fresh
 end-to-end run adds another ~5-10 min for the ERPNext Helm deploy.
 
+## Fault scenarios (TODO-05)
+
+The fault-injection harness lives under `eval/faults/` and is driven by
+`eval/faults/run.py`.  Each scenario empirically validates one
+robustness defence listed in `docs/control-plane-state.md` §Robustness
+Properties.  Reports land at `eval/results/faults-<utc-timestamp>.json`
+and the `make eval-faults` / `make eval-faults-real` targets cover the
+default invocation shapes.
+
+| Scenario | Defended invariant | Witness | Status |
+|---|---|---|---|
+| `worker_kill_mid_helm_upgrade` | Stale-operation reconciler recovers worker-stranded Helm Release rows within `STALE_OPERATION_THRESHOLD_MINUTES` (30 min) | [`kubeport/tasks/reconciliation.py:_reconcile_stale_helm_operations`](../kubeport/tasks/reconciliation.py) | Implemented |
+| `job_ttl_expired_before_reconcile` | Reconciliation falls back to ground-truth bench probe when the operation Job is gone before the tick reads it | `kubeport/tasks/reconciliation.py:_probe_site_state` | Planned (next commit) |
+| `pod_exec_timeout_during_site_probe` | Three-state probe returns `unknown` on transient pod-exec failure; row stays In Progress for the tick and recovers next tick | `kubeport/utils/observability.py` | Planned (next commit) |
+| `corrupt_archive_size_sidecar` | PVC-side completion probe marks backup `Failed` and the archive trash cleanup runs when the `<archive>.size` sidecar disappears | `kubeport/tasks/reconciliation.py:reconcile_site_backups` | Planned (next commit) |
+
+### Running the implemented scenario
+
+`worker_kill_mid_helm_upgrade` requires:
+
+- An existing `Helm Release` row in `Deployed` (or `Degraded`) state — the harness drives a no-op upgrade against it. Default: `demo-k3d/demo/demo-bench` (the same release used by `make eval`).
+- The dev container, long-queue worker, and bench scheduler running per the Prerequisites section above.
+
+```bash
+# Fast path: backdate operation_started_at past the staleness threshold
+# and invoke _reconcile_stale_helm_operations directly. Recovery is
+# observed in seconds; the report records fast_forward_used=true.
+make eval-faults
+
+# Realistic path: wait for the natural 5-min cron tick + 30-min
+# staleness window. Total wall-clock typically 30-35 min.
+make eval-faults-real
+```
+
+After the scenario completes the harness restarts the long-queue worker
+that was killed, so the dev container is left in the same state it was
+found.  Pass `--no-restart-worker` to `eval/faults/run.py` to skip the
+restart (useful when investigating).
+
+### Report schema
+
+Top-level matches the golden-path report shape (`schema_version`,
+`generated_at`, `started_at`, `finished_at`, `duration_seconds`,
+`context`, `summary`).  Each entry in `scenarios[]` carries:
+
+```json
+{
+  "scenario": "worker_kill_mid_helm_upgrade",
+  "defended_invariant": "Stale operation reconciler recovers worker-stranded Helm Release rows",
+  "witness": { "reconciler": "<file:symbol>", "threshold_minutes": 30 },
+  "injected_at":   "2026-05-10T18:00:00Z",
+  "recovered_at":  "2026-05-10T18:00:12Z",
+  "mttr_seconds":  12.0,
+  "expected_mttr_bound_seconds": 1800,
+  "fast_forward_used": true,
+  "observed":  { "final_status": "Deployed", "operation_token_rotated": true },
+  "passed":    true,
+  "detail":    "Stale-op reconciler recovered the stranded row to 'Deployed' in 12.0s (fast-forwarded).",
+  "steps": [ ... ordered timeline of every observation and mutation ... ]
+}
+```
+
+The reference run is checked in at `eval/results/sample-faults.json`
+for thesis quoting.
+
 ## Cross-references
 
 - Invariants the harness exercises: AGENTS.md §Design Invariants.
 - Per-DocType state machines: `docs/control-plane-state.md`.
-- Extended fault scenarios on top of this harness:
-  upcoming TODO-05 in `TODO.md`.
+- Robustness properties matched to scenarios:
+  `docs/control-plane-state.md` §Robustness Properties.

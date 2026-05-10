@@ -1,0 +1,108 @@
+{
+  "context": {
+    "bench_site": "frappe-k8s.localhost",
+    "cluster_doc_name": "demo-k3d",
+    "container": "tfg_devcontainer-frappe-1",
+    "fast_forward": true,
+    "mttr_bound_seconds": 1800,
+    "release_doc_name": "demo-k3d/demo/demo-bench"
+  },
+  "duration_seconds": 8.503,
+  "finished_at": "2026-05-10T10:10:49Z",
+  "generated_at": "2026-05-10T10:10:49Z",
+  "scenarios": [
+    {
+      "defended_invariant": "Stale operation reconciler recovers worker-stranded Helm Release rows",
+      "detail": "Stale-op reconciler recovered the stranded row to 'Deployed' in 1.5s (fast-forwarded).",
+      "expected_mttr_bound_seconds": 1800,
+      "fast_forward_used": true,
+      "injected_at": "2026-05-10T10:10:45Z",
+      "mttr_seconds": 1.51,
+      "observed": {
+        "final_helm_status_detail": "Recovered stale operation: deployed | 19/19 ready",
+        "final_status": "Deployed",
+        "operation_token_rotated": false
+      },
+      "passed": true,
+      "recovered_at": "2026-05-10T10:10:46Z",
+      "scenario": "worker_kill_mid_helm_upgrade",
+      "steps": [
+        {
+          "at": "2026-05-10T10:10:43Z",
+          "operation_token": "8ec658a93201ca3cd692bab8f3ca8f71",
+          "status": "Deployed",
+          "step": "pre_status"
+        },
+        {
+          "at": "2026-05-10T10:10:43Z",
+          "step": "deploy_release_enqueued"
+        },
+        {
+          "at": "2026-05-10T10:10:43Z",
+          "operation_token": "95dd97dfa9275cc3e5bb7b56d7316672",
+          "step": "in_progress_observed"
+        },
+        {
+          "at": "2026-05-10T10:10:45Z",
+          "step": "helm_subprocess_observed"
+        },
+        {
+          "at": "2026-05-10T10:10:45Z",
+          "killed": [
+            95889,
+            100464,
+            100490
+          ],
+          "parents": [
+            95889,
+            100464
+          ],
+          "step": "worker_killed",
+          "targets": [
+            95889,
+            100464,
+            100490
+          ]
+        },
+        {
+          "at": "2026-05-10T10:10:45Z",
+          "step": "worker_exit_confirmed"
+        },
+        {
+          "at": "2026-05-10T10:10:45Z",
+          "operation_token": "95dd97dfa9275cc3e5bb7b56d7316672",
+          "status": "In Progress",
+          "step": "post_kill_state"
+        },
+        {
+          "at": "2026-05-10T10:10:45Z",
+          "backdated_to": "2026-05-10 11:35:45.205492",
+          "minutes_subtracted": 35,
+          "step": "fast_forward_backdated"
+        },
+        {
+          "at": "2026-05-10T10:10:46Z",
+          "step": "reconciler_invoked"
+        },
+        {
+          "at": "2026-05-10T10:10:46Z",
+          "helm_status_detail": "Recovered stale operation: deployed | 19/19 ready",
+          "operation_token": "95dd97dfa9275cc3e5bb7b56d7316672",
+          "status": "Deployed",
+          "step": "recovered"
+        }
+      ],
+      "witness": {
+        "reconciler": "kubeport/tasks/reconciliation.py:_reconcile_stale_helm_operations",
+        "threshold_minutes": 30
+      }
+    }
+  ],
+  "schema_version": 1,
+  "started_at": "2026-05-10T10:10:41Z",
+  "summary": {
+    "failed": 0,
+    "passed": 1,
+    "total": 1
+  }
+}
