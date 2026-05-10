@@ -348,7 +348,7 @@
 
 ---
 
-### TODO-13 — `test/property-fsm-helm-release`
+### TODO-13 — `test/property-fsm-helm-release` ✅ DONE 2026-05-10 — f7c9130
 
 **Goal**: Same as TODO-12, for the Helm Release FSM.
 
