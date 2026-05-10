@@ -35,6 +35,11 @@
   "cancel_site_btn",
   "delete_site_btn",
   "section_break_backups",
+  "backup_schedule",
+  "backup_retention_count",
+  "column_break_backup_schedule",
+  "backup_retention_days",
+  "backup_schedule_last_run",
   "backups_html"
  ],
  "fields": [
@@ -219,6 +224,38 @@
    "label": "Backups"
   },
   {
+   "description": "Five-field cron expression (e.g. '0 2 * * *' for daily at 02:00). Reconciliation enqueues one backup at most per missed slot; long downtime triggers one catch-up, not a flood. Leave empty to disable scheduling.",
+   "fieldname": "backup_schedule",
+   "fieldtype": "Data",
+   "label": "Backup Schedule (cron)"
+  },
+  {
+   "description": "Maximum number of Available backups to retain for this site. Older Available rows are auto-trashed by reconciliation (which deletes the PVC archive via Frappe Site Backup on_trash). 0 disables count-based retention. Failed and Restoring rows are never auto-trashed.",
+   "fieldname": "backup_retention_count",
+   "fieldtype": "Int",
+   "label": "Retention: Max Backups",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "column_break_backup_schedule",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Maximum age in days for Available backups. Older Available rows are auto-trashed by reconciliation. 0 disables age-based retention. Applied alongside the count cap.",
+   "fieldname": "backup_retention_days",
+   "fieldtype": "Int",
+   "label": "Retention: Max Age (days)",
+   "non_negative": 1
+  },
+  {
+   "description": "Timestamp of the most recent scheduled backup enqueue. Used as the croniter base for the next-run computation; updated by reconciliation when a scheduled backup is enqueued.",
+   "fieldname": "backup_schedule_last_run",
+   "fieldtype": "Datetime",
+   "hidden": 1,
+   "label": "Last Scheduled Run",
+   "read_only": 1
+  },
+  {
    "fieldname": "backups_html",
    "fieldtype": "HTML",
    "label": "Backups"
@@ -227,7 +264,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-04-17 00:00:00.000000",
+ "modified": "2026-05-10 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Kubeport",
  "name": "Frappe Site",

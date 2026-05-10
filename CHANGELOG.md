@@ -6,6 +6,91 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-10 — Scheduled backups and retention for Frappe Site
+
+### Context
+
+`Frappe Site` shipped with manual backup and restore, but operators had to
+click **Backup Now** by hand and prune old archives themselves.  TODO-20
+(P5) closes the gap: a per-site cron schedule that the reconciler honours,
+and per-site retention bounds so unbounded archive accumulation does not
+fill the `kubeport-backups` PVC.
+
+### Decision
+
+Three optional fields on `Frappe Site`: `backup_schedule` (five-field
+cron), `backup_retention_count` (max `Available` rows), and
+`backup_retention_days` (max age in days).  Plus a hidden read-only
+`backup_schedule_last_run` marker that drives the cron next-run
+computation.
+
+The schedule is honoured in the existing `reconcile_site_backups` tick
+(every 5 min, separate scheduled job from `reconcile_all_releases`).  Tick
+order is finalise in-flight rows → enqueue scheduled backups → prune
+retention, so a just-finalised `Available` row is visible to the pruner
+the same tick rather than waiting another 5 minutes.
+
+Cron evaluation uses Frappe's bundled `croniter`.  The base for
+`get_next` is `backup_schedule_last_run` (or `creation` on first run).
+The marker is advanced **before** the backup is enqueued, so a concurrent
+tick observing the same slot sees the marker has moved and skips.  After
+the marker advance, the scheduler re-fetches the site doc and re-checks
+status + `_has_in_flight_backup()` to handle the manual-vs-scheduler race
+(operator clicks **Backup Now** between the read and the enqueue).  The
+manual path's `backup_site` whitelisted method now delegates to a shared
+private `_enqueue_backup` helper so manual and scheduled flows produce
+identical backup row shape and lifecycle.
+
+Long downtime triggers exactly **one** catch-up backup per overdue slot,
+not a flood — `croniter.get_next(base)` returns the first missed slot,
+and the marker advance bounds the next tick's computation.
+
+Retention pruning only considers rows with status `Available`.  `Failed`
+rows stay for diagnostics, and `In Progress` / `Restoring` rows are
+already protected by `FrappeSiteBackup.on_trash`.  The pruner uses
+`frappe.delete_doc` so the existing on_trash path tears down the PVC
+archive — retention shares its cleanup with manual trash.
+
+### Rejected alternatives
+
+- **A separate scheduler cron entry per site.**  Would create N cron
+  entries on the Frappe scheduler — fragile to add/remove and outside
+  Kubeport's reconciliation window.  Reusing the every-5-min tick costs
+  at most 5 minutes of granularity (the design accepts this) and keeps
+  the scheduling logic alongside the rest of the backup tick.
+- **A `trigger_source` field on `Frappe Site Backup`.**  Tempting for
+  analytics ("manual" vs "scheduled"), but no existing consumer needs it.
+  `triggered_by = "Administrator"` for scheduled runs is sufficient for
+  now; provenance metadata can be a later TODO.
+- **Pruning during the in-flight loop.**  Coupling the two would make
+  retention's transactional behaviour bleed into a path that already
+  juggles probe budgets and Job re-reads.  A separate pass that runs
+  after finalisation is simpler and easier to reason about.
+
+### Implementation details
+
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`: new
+  `backup_schedule` (Data), `backup_retention_count` (Int, non_negative),
+  `backup_retention_days` (Int, non_negative), and
+  `backup_schedule_last_run` (Datetime, hidden) fields, grouped under
+  the existing Backups section break.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: extracted
+  `_enqueue_backup(triggered_by)` helper from `backup_site`; added
+  `_validate_backup_schedule` (uses `croniter.is_valid`); refused
+  negative retention bounds.
+- `kubeport/tasks/reconciliation.py`: new `_run_scheduled_backups` and
+  `_prune_backup_retention`, wired into `reconcile_site_backups` after
+  the existing in-flight finalisation.
+- `kubeport/tests/test_reconciliation.py`: extended the delegation test
+  with the two new sweeps; added `UnitTestRunScheduledBackups` (six
+  cases including catch-up, in-flight skip, marker race, status race)
+  and `UnitTestPruneBackupRetention` (count cap, age cap, union of both,
+  no-op when no sites configured).
+- `docs/control-plane-state.md`, `docs/operator-guide.md`,
+  `docs/codebase-summary.md`: described the new behaviour and edge cases.
+
+---
+
 ## 2026-05-10 — Helm Release diff preview
 
 ### Context
