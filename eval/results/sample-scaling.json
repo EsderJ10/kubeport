@@ -1,0 +1,128 @@
+{
+  "context": {
+    "ns": [
+      1,
+      10,
+      100,
+      1000
+    ],
+    "reconciliation_entrypoint": "kubeport.tasks.reconciliation.reconcile_all_releases",
+    "repeats": 5,
+    "results_dir": "/workspace/development/bench-16/apps/kubeport/eval/results"
+  },
+  "duration_seconds": 78.514,
+  "finished_at": "2026-05-10T10:54:16Z",
+  "generated_at": "2026-05-10T10:54:16Z",
+  "helm_subprocess_latency": {
+    "samples": [
+      {
+        "duration_seconds": 0.663,
+        "helm_call": true,
+        "phase": "setup_helm_repo",
+        "source": "sample.json"
+      },
+      {
+        "duration_seconds": 0.025,
+        "helm_call": false,
+        "phase": "verify_chart",
+        "source": "sample.json"
+      },
+      {
+        "duration_seconds": 0.001,
+        "helm_call": true,
+        "phase": "deploy_release",
+        "source": "sample.json"
+      }
+    ],
+    "summary": {
+      "max_seconds": 0.663,
+      "mean_seconds": 0.332,
+      "median_seconds": 0.332,
+      "min_seconds": 0.001,
+      "p95_seconds": 0.63,
+      "sample_count": 2
+    }
+  },
+  "host_wall_seconds": 79.898,
+  "regression": {
+    "intercept": -3.194,
+    "shape": "sublinear",
+    "slope": 0.745
+  },
+  "schema_version": 1,
+  "started_at": "2026-05-10T10:52:57Z",
+  "sweep": {
+    "post_run": {
+      "Frappe Site": 1000,
+      "Helm Release": 1000,
+      "Service Bundle": 1000
+    },
+    "pre_run": {
+      "Frappe Site": 0,
+      "Helm Release": 0,
+      "Service Bundle": 0
+    }
+  },
+  "tick_latency": [
+    {
+      "max_seconds": 0.1423,
+      "mean_seconds": 0.0839,
+      "median_seconds": 0.081,
+      "min_seconds": 0.0381,
+      "n": 1,
+      "repeats": 5,
+      "tick_seconds": [
+        0.1423,
+        0.1106,
+        0.081,
+        0.0478,
+        0.0381
+      ]
+    },
+    {
+      "max_seconds": 0.1023,
+      "mean_seconds": 0.0914,
+      "median_seconds": 0.0881,
+      "min_seconds": 0.0818,
+      "n": 10,
+      "repeats": 5,
+      "tick_seconds": [
+        0.0986,
+        0.1023,
+        0.0881,
+        0.0861,
+        0.0818
+      ]
+    },
+    {
+      "max_seconds": 1.9686,
+      "mean_seconds": 1.2373,
+      "median_seconds": 1.102,
+      "min_seconds": 0.8972,
+      "n": 100,
+      "repeats": 5,
+      "tick_seconds": [
+        1.0808,
+        1.1382,
+        1.9686,
+        0.8972,
+        1.102
+      ]
+    },
+    {
+      "max_seconds": 10.8962,
+      "mean_seconds": 10.4612,
+      "median_seconds": 10.6415,
+      "min_seconds": 9.6329,
+      "n": 1000,
+      "repeats": 5,
+      "tick_seconds": [
+        9.6329,
+        10.6415,
+        10.2608,
+        10.8962,
+        10.8746
+      ]
+    }
+  ]
+}
