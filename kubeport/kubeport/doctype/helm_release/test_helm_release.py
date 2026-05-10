@@ -14,6 +14,7 @@ from kubeport.kubeport.doctype.helm_release.helm_release import (
 	build_release_docname,
 	calculate_release_spec_hash,
 	prepare_release_values,
+	render_bundled_database_values,
 	render_chart_starter_values,
 	render_ingress_values,
 	render_site_image_values,
@@ -285,6 +286,127 @@ class UnitTestHelmRelease(UnitTestCase):
 		with self.assertRaisesRegex(RuntimeError, "default StorageClass"):
 			render_chart_starter_values("", chart_doc, cluster_name="cluster-a")
 
+	def test_render_bundled_database_values_noop_for_non_frappe_chart(self):
+		chart_doc = SimpleNamespace(chart_name="postgres")
+		self.assertEqual(
+			render_bundled_database_values(
+				"foo: bar\n", chart_doc, use_external_database=False, release_name="rel-a"
+			),
+			"foo: bar\n",
+		)
+
+	def test_render_bundled_database_values_noop_when_user_chose_external_db(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		self.assertEqual(
+			render_bundled_database_values("", chart_doc, use_external_database=True, release_name="rel-a"),
+			"",
+		)
+
+	def test_render_bundled_database_values_preserves_user_supplied_dbhost(self):
+		# When the operator already pinned dbHost, we don't touch it — they
+		# may be pointing at an external DB even without ticking the toggle.
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = render_bundled_database_values(
+			"dbHost: my-mariadb.svc\n",
+			chart_doc,
+			use_external_database=False,
+			release_name="rel-a",
+		)
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["dbHost"], "my-mariadb.svc")
+
+	def test_render_bundled_database_values_injects_sibling_dbhost_for_frappe_default(self):
+		# Default flow: chart values get dbHost=<release>-mariadb so the
+		# bench's common_site_config.json points at the sibling release the
+		# install/upgrade task is about to provision.
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = render_bundled_database_values("", chart_doc, use_external_database=False, release_name="rel-a")
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["dbHost"], "rel-a-mariadb")
+
+	def test_render_bundled_database_values_skips_when_release_name_missing(self):
+		# Form preview before the operator types a release name should not
+		# inject a half-formed "<empty>-mariadb" hostname; the deploy task
+		# always has the real name.
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		self.assertEqual(
+			render_bundled_database_values("", chart_doc, use_external_database=False, release_name=""),
+			"",
+		)
+
+	def test_render_bundled_database_values_overrides_chart_default_mariadb_enabled(self):
+		# The frappe/erpnext chart ships values.yaml with vestigial
+		# `mariadb.enabled: false` (the chart has no mariadb subchart).
+		# Earlier we incorrectly treated that as "operator opted out" and
+		# refused to inject dbHost — so the bundled flow silently broke.
+		# The toggle is the source of truth, not the values blob.
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = render_bundled_database_values(
+			"mariadb:\n  enabled: false\n",
+			chart_doc,
+			use_external_database=False,
+			release_name="rel-a",
+		)
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["dbHost"], "rel-a-mariadb")
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
+	def test_prepare_release_values_pipeline_injects_sibling_dbhost_for_frappe_default(
+		self, _mock_discover_default_storage_class, mock_get_value
+	):
+		"""Wiring guard: prepare_release_values must call render_bundled_database_values
+		so the Frappe-chart default flow ends up with dbHost=<release>-mariadb.  If a
+		refactor ever drops the call from the pipeline, this test catches it before
+		the install/upgrade task's sibling provisioning silently goes unused."""
+		mock_get_value.return_value = None
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = prepare_release_values(
+			"",
+			chart_doc,
+			cluster_name="cluster-a",
+			use_external_database=False,
+			release_name="rel-a",
+		)
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["dbHost"], "rel-a-mariadb")
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
+	def test_prepare_release_values_pipeline_skips_dbhost_injection_for_external_db(
+		self, _mock_discover_default_storage_class, mock_get_value
+	):
+		mock_get_value.return_value = None
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		out = prepare_release_values(
+			"",
+			chart_doc,
+			cluster_name="cluster-a",
+			use_external_database=True,
+			release_name="rel-a",
+		)
+		parsed = yaml.safe_load(out) or {}
+		self.assertNotIn("dbHost", parsed)
+
+	def test_calculate_release_spec_hash_changes_when_use_external_database_toggled(self):
+		hash_a = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="",
+			use_external_database=False,
+		)
+		hash_b = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="",
+			use_external_database=True,
+		)
+		self.assertNotEqual(hash_a, hash_b)
+
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
 	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
 	def test_prepare_release_values_can_override_chart_default_image_for_starter_values(
@@ -402,7 +524,7 @@ class UnitTestHelmRelease(UnitTestCase):
 		parsed = yaml.safe_load(out)
 		self.assertNotIn("className", parsed["ingress"])
 
-	def test_render_ingress_values_preserves_user_supplied_ingress(self):
+	def test_render_ingress_values_replaces_disabled_chart_default_ingress(self):
 		chart_doc = SimpleNamespace(chart_name="erpnext")
 		raw = "ingress:\n  enabled: false\n"
 
@@ -416,7 +538,63 @@ class UnitTestHelmRelease(UnitTestCase):
 			release_name="bench-a",
 		)
 
+		parsed = yaml.safe_load(out)
+		self.assertTrue(parsed["ingress"]["enabled"])
+		self.assertEqual(parsed["ingress"]["hosts"][0]["host"], "erp.example.com")
+		self.assertEqual(parsed["ingress"]["className"], "nginx")
+
+	def test_render_ingress_values_preserves_enabled_user_supplied_ingress(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		raw = (
+			"ingress:\n"
+			"  enabled: true\n"
+			"  annotations:\n"
+			"    nginx.ingress.kubernetes.io/proxy-body-size: 50m\n"
+			"  hosts:\n"
+			"    - host: custom.example.com\n"
+			"      paths:\n"
+			"        - path: /custom\n"
+			"          pathType: Prefix\n"
+		)
+
+		out = render_ingress_values(
+			raw,
+			chart_doc,
+			ingress_enabled=1,
+			hostname="erp.example.com",
+			class_name="nginx",
+			cluster_issuer="letsencrypt-prod",
+			release_name="bench-a",
+		)
+
 		self.assertEqual(out, raw)
+
+	def test_render_ingress_values_replaces_stale_simple_enabled_ingress(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		raw = (
+			"ingress:\n"
+			"  enabled: true\n"
+			"  className: nginx\n"
+			"  hosts:\n"
+			"    - host: erp.local\n"
+			"      paths:\n"
+			"        - path: /\n"
+			"          pathType: ImplementationSpecific\n"
+		)
+
+		out = render_ingress_values(
+			raw,
+			chart_doc,
+			ingress_enabled=1,
+			hostname="test-ingress.172.23.0.2.nip.io",
+			class_name="traefik",
+			cluster_issuer="",
+			release_name="bench-a",
+		)
+
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["ingress"]["hosts"][0]["host"], "test-ingress.172.23.0.2.nip.io")
+		self.assertEqual(parsed["ingress"]["className"], "traefik")
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
 	def test_render_ingress_values_throws_when_hostname_blank(self, mock_throw):

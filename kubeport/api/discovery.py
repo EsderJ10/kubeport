@@ -12,7 +12,14 @@ from typing import Any
 import frappe
 import yaml
 
-from kubeport.utils.discovery import discover_cluster_releases, discover_release_sites
+from kubeport.utils.discovery import (
+	build_nip_io_hostname,
+	discover_cluster_issuers,
+	discover_cluster_releases,
+	discover_ingress_classes,
+	discover_ingress_controller_addresses,
+	discover_release_sites,
+)
 from kubeport.utils.k8s_client import get_k8s_api_client
 
 
@@ -24,6 +31,7 @@ def get_cluster_discovery(cluster_name: str) -> dict[str, Any]:
 		"generated_at": frappe.utils.now(),
 		"benches": [],
 		"sites": [],
+		"capabilities": _empty_cluster_capabilities(),
 		"errors": [],
 	}
 
@@ -35,6 +43,8 @@ def get_cluster_discovery(cluster_name: str) -> dict[str, Any]:
 			}
 		)
 		return response
+
+	response["capabilities"] = _discover_cluster_capabilities(cluster_name, response["errors"])
 
 	try:
 		releases = discover_cluster_releases(cluster_name)
@@ -89,6 +99,137 @@ def get_cluster_discovery(cluster_name: str) -> dict[str, Any]:
 			)
 
 	return response
+
+
+@frappe.whitelist()
+def get_ingress_suggestions(cluster_name: str, release_name: str | None = None) -> dict[str, Any]:
+	"""Return live ingress suggestions for the Helm Release form.
+
+	This endpoint is read-only.  It never persists discovered cluster state.
+	"""
+	response: dict[str, Any] = {
+		"cluster": cluster_name or "",
+		"release_name": release_name or "",
+		"ingress_classes": [],
+		"default_ingress_class": "",
+		"cluster_issuers": [],
+		"default_cluster_issuer": "",
+		"controller_addresses": [],
+		"suggested_hostname": "",
+		"capabilities": _empty_cluster_capabilities(),
+		"errors": [],
+	}
+
+	if not cluster_name:
+		response["errors"].append(
+			{
+				"scope": "cluster",
+				"message": "Cluster name is required.",
+			}
+		)
+		return response
+
+	_capability_bits = _discover_cluster_capabilities(cluster_name, response["errors"])
+	response["capabilities"] = _capability_bits
+	response["ingress_classes"] = _capability_bits["ingress"]["ingress_classes"]
+	response["cluster_issuers"] = _capability_bits["cert_manager"]["cluster_issuers"]
+	response["controller_addresses"] = _capability_bits["ingress"]["controller_addresses"]
+	response["default_ingress_class"] = _pick_default_ingress_class(response["ingress_classes"])
+	response["default_cluster_issuer"] = _pick_default_cluster_issuer(response["cluster_issuers"])
+	response["suggested_hostname"] = _suggest_hostname(
+		release_name,
+		response["controller_addresses"],
+	)
+	return response
+
+
+def _empty_cluster_capabilities() -> dict[str, Any]:
+	return {
+		"ingress": {
+			"available": False,
+			"ingress_classes": [],
+			"controller_addresses": [],
+		},
+		"cert_manager": {
+			"available": False,
+			"cluster_issuers": [],
+		},
+	}
+
+
+def _discover_cluster_capabilities(cluster_name: str, errors: list[dict[str, str]]) -> dict[str, Any]:
+	capabilities = _empty_cluster_capabilities()
+
+	try:
+		ingress_classes = discover_ingress_classes(cluster_name)
+		capabilities["ingress"]["ingress_classes"] = ingress_classes
+	except Exception as e:
+		frappe.log_error(title=f"IngressClass Discovery Failed: {cluster_name}", message=str(e))
+		errors.append(
+			{
+				"scope": "ingress_classes",
+				"message": f"Failed to list IngressClasses: {e}",
+			}
+		)
+
+	try:
+		controller_addresses = discover_ingress_controller_addresses(cluster_name)
+		capabilities["ingress"]["controller_addresses"] = controller_addresses
+	except Exception as e:
+		frappe.log_error(title=f"Ingress Controller Discovery Failed: {cluster_name}", message=str(e))
+		errors.append(
+			{
+				"scope": "ingress_controller",
+				"message": f"Failed to inspect ingress controller Services: {e}",
+			}
+		)
+
+	ingress_classes = capabilities["ingress"]["ingress_classes"]
+	controller_addresses = capabilities["ingress"]["controller_addresses"]
+	capabilities["ingress"]["available"] = bool(ingress_classes or controller_addresses)
+
+	try:
+		issuer_state = discover_cluster_issuers(cluster_name)
+		capabilities["cert_manager"]["available"] = bool(issuer_state.get("available"))
+		capabilities["cert_manager"]["cluster_issuers"] = issuer_state.get("issuers", [])
+	except Exception as e:
+		frappe.log_error(title=f"ClusterIssuer Discovery Failed: {cluster_name}", message=str(e))
+		errors.append(
+			{
+				"scope": "cluster_issuers",
+				"message": f"Failed to list cert-manager ClusterIssuers: {e}",
+			}
+		)
+
+	return capabilities
+
+
+def _pick_default_ingress_class(rows: list[dict[str, Any]]) -> str:
+	default_row = next((row for row in rows if row.get("is_default")), None)
+	if default_row:
+		return str(default_row.get("name") or "")
+	if len(rows) == 1:
+		return str(rows[0].get("name") or "")
+	return ""
+
+
+def _pick_default_cluster_issuer(rows: list[dict[str, Any]]) -> str:
+	ready_row = next((row for row in rows if row.get("ready")), None)
+	if ready_row:
+		return str(ready_row.get("name") or "")
+	if rows:
+		return str(rows[0].get("name") or "")
+	return ""
+
+
+def _suggest_hostname(release_name: str | None, controller_addresses: list[dict[str, Any]]) -> str:
+	for row in controller_addresses:
+		if row.get("address_type") != "ip":
+			continue
+		hostname = build_nip_io_hostname(release_name, str(row.get("address") or ""))
+		if hostname:
+			return hostname
+	return ""
 
 
 @frappe.whitelist()

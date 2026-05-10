@@ -94,14 +94,85 @@ class FrappeSite(Document):
 					"Only deployed or degraded releases can host site creation."
 				)
 
-		if not self.db_root_password and not self.db_root_secret:
-			frappe.throw(
-				"Either DB Root Password or DB Root Secret must be provided. "
-				"DB Root Secret (referencing an existing Kubernetes Secret) is recommended."
-			)
+		# DB root credentials are optional at validate time.  When the bench
+		# release bundles MariaDB (the default for Frappe charts), the
+		# ``create_site`` action auto-wires the chart's ``<release>-mariadb``
+		# Secret onto this doc.  Operators using external-DB topology must
+		# supply credentials; ``create_site`` enforces that explicitly.
 
 		self._validate_install_apps()
 		self._validate_backup_schedule()
+
+	def _preflight_db_topology(self) -> None:
+		"""Refuse to enqueue a create-site Job when the DB wiring obviously won't work.
+
+		Cheap synchronous Service/Secret lookup against the target cluster.  A
+		green pre-flight is necessary but not sufficient — the worker still
+		runs the full resolution chain and may discover host info via configMap
+		mounts the pre-flight skips.  A red pre-flight reliably means the
+		bundled-MariaDB happy path is broken (no release-owned MariaDB exists),
+		so we surface that as a UI-thread error instead of letting the Job get
+		submitted just to fail seconds later.
+		"""
+		from kubernetes import client as k8s_client
+
+		from kubeport.tasks.site_tasks import (
+			_resolve_db_root_secret_for_release,
+			can_resolve_db_host_for_release,
+		)
+		from kubeport.utils.k8s_client import get_k8s_api_client
+
+		release = frappe.get_doc("Helm Release", self.bench_release)
+		cluster = release.cluster
+		namespace = release.namespace or "default"
+		release_name = release.release_name
+		use_external_db = bool(getattr(release, "use_external_database", 0))
+
+		if use_external_db:
+			# External DB topology: operator owns the dbHost wiring (chart
+			# values or container_env) and must supply credentials on the
+			# Frappe Site doc.  Skip Service-based pre-flight; trust values.
+			if not self.db_root_password and not self.db_root_secret:
+				frappe.throw(
+					"This release uses an external database. Set DB Root Password "
+					"or DB Root Secret on this Frappe Site before creating it."
+				)
+			return
+
+		# Bundled flow: chart should have provisioned <release>-mariadb in
+		# the release namespace.  If not, the worker has nothing to resolve.
+		if not can_resolve_db_host_for_release(cluster, namespace, release_name):
+			frappe.throw(
+				f"No release-owned MariaDB Service was found for Helm release "
+				f"'{release_name}' in namespace '{namespace}'. Either deploy the "
+				"release with bundled MariaDB enabled (the Kubeport default), or "
+				"check 'Use External Database' on the Helm Release form and set "
+				"'dbHost' in the values yourself."
+			)
+
+		# Bundled flow with no operator-supplied creds: the worker auto-wires
+		# the chart's ``<release>-mariadb`` Secret. If even that is missing,
+		# the operator needs to act — fail early instead of in the worker.
+		if not self.db_root_password and not self.db_root_secret:
+			try:
+				api_client = get_k8s_api_client(cluster)
+				core_v1 = k8s_client.CoreV1Api(api_client=api_client)
+			except Exception:
+				# Transient client-build failure: let the worker handle it
+				# rather than blocking the click.
+				return
+			secret_name, _ = _resolve_db_root_secret_for_release(
+				core_v1=core_v1,
+				namespace=namespace,
+				release_name=release_name,
+			)
+			if not secret_name:
+				frappe.throw(
+					f"Helm release '{release_name}' did not expose a MariaDB "
+					"root Secret named '<release>-mariadb' (Bitnami convention). "
+					"Set DB Root Password or DB Root Secret on this Frappe Site, "
+					"or redeploy the release with bundled MariaDB enabled."
+				)
 
 	def _validate_site_name(self):
 		if not self.site_name:
@@ -164,6 +235,18 @@ class FrappeSite(Document):
 			frappe.throw("Site creation is already in progress.")
 		if self.status == "Active" and not self.force_create:
 			frappe.throw("This site already exists. Enable Force Create to recreate it.")
+
+		self._preflight_db_topology()
+
+		# Retry from Failed: Frappe's ``make_site_config`` never overwrites an
+		# existing ``site_config.json`` and ``bench new-site --force`` does not
+		# clear it either.  A prior partial creation (e.g. the one that just
+		# failed) silently poisons the next attempt.  Auto-engage force_create
+		# so the bench Job's pre-clean runs and the bench-side ``--force`` fires
+		# — the operator should not have to hunt for a toggle to retry.
+		if self.status == "Failed" and not self.force_create:
+			self.db_set("force_create", 1)
+			self.force_create = 1
 
 		operation_token = secrets.token_hex(16)
 		correlation_id = metrics.new_correlation_id()

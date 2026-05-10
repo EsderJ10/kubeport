@@ -9,8 +9,10 @@ from frappe.tests import UnitTestCase
 from kubeport.api.helm_diff import preview_release
 from kubeport.kubeport.doctype.helm_release.helm_release import calculate_release_spec_hash
 from kubeport.tasks.helm_tasks import (
+	_ensure_bundled_mariadb_release,
 	_group_chart_inventory,
 	_sync_charts,
+	_uninstall_bundled_mariadb_release,
 	install_or_upgrade_release,
 	rollback_release,
 	sync_all_repos,
@@ -701,8 +703,17 @@ class UnitTestHelmTasks(UnitTestCase):
 
 		uninstall_release("cluster-a/tfg/bench-a", "tok-1")
 
-		mock_uninstall.assert_called_once_with(
+		# uninstall_release now cascades to the sibling Bitnami MariaDB release
+		# named ``<release>-mariadb`` (idempotent + 404-tolerant).  Two calls
+		# expected: parent first, then the sibling cleanup.
+		self.assertEqual(mock_uninstall.call_count, 2)
+		mock_uninstall.assert_any_call(
 			release_name="bench-a",
+			namespace="tfg",
+			cluster_name="cluster-a",
+		)
+		mock_uninstall.assert_any_call(
+			release_name="bench-a-mariadb",
 			namespace="tfg",
 			cluster_name="cluster-a",
 		)
@@ -870,6 +881,88 @@ def _deployment(replicas: int, image: str = "nginx:1.25"):
 			"template": {"spec": {"containers": [{"name": "nginx", "image": image}]}},
 		},
 	}
+
+
+class UnitTestBundledMariaDB(UnitTestCase):
+	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
+	def test_ensure_bundled_mariadb_skips_for_non_frappe_chart(self, mock_install):
+		_ensure_bundled_mariadb_release(
+			parent_release_name="rel-a",
+			namespace="ns",
+			cluster_name="cluster-a",
+			chart_doc=SimpleNamespace(chart_name="postgres"),
+			use_external_database=False,
+		)
+		mock_install.assert_not_called()
+
+	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
+	def test_ensure_bundled_mariadb_skips_when_external_db_chosen(self, mock_install):
+		_ensure_bundled_mariadb_release(
+			parent_release_name="rel-a",
+			namespace="ns",
+			cluster_name="cluster-a",
+			chart_doc=SimpleNamespace(chart_name="erpnext"),
+			use_external_database=True,
+		)
+		mock_install.assert_not_called()
+
+	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
+	def test_ensure_bundled_mariadb_installs_sibling_for_frappe_default(self, mock_install):
+		_ensure_bundled_mariadb_release(
+			parent_release_name="rel-a",
+			namespace="ns",
+			cluster_name="cluster-a",
+			chart_doc=SimpleNamespace(chart_name="erpnext"),
+			use_external_database=False,
+		)
+		mock_install.assert_called_once()
+		kwargs = mock_install.call_args.kwargs
+		self.assertEqual(kwargs["release_name"], "rel-a-mariadb")
+		self.assertEqual(kwargs["namespace"], "ns")
+		self.assertEqual(kwargs["cluster_name"], "cluster-a")
+		self.assertTrue(kwargs["chart_ref"].startswith("oci://"))
+		# Pinned version — bumps go through code review.
+		self.assertTrue(kwargs["chart_version"])
+		# fullnameOverride must align the chart's resources to <release>-mariadb
+		# so dbHost and Kubeport's auto-wire find them by Bitnami convention.
+		self.assertIn("fullnameOverride: rel-a-mariadb", kwargs["values_yaml"])
+
+	@patch("kubeport.tasks.helm_tasks.helm.uninstall")
+	def test_uninstall_bundled_mariadb_removes_sibling(self, mock_uninstall):
+		_uninstall_bundled_mariadb_release(
+			parent_release_name="rel-a",
+			namespace="ns",
+			cluster_name="cluster-a",
+		)
+		mock_uninstall.assert_called_once_with(
+			release_name="rel-a-mariadb",
+			namespace="ns",
+			cluster_name="cluster-a",
+		)
+
+	@patch("kubeport.tasks.helm_tasks.helm.is_release_not_found_error", return_value=True)
+	@patch("kubeport.tasks.helm_tasks.helm.uninstall", side_effect=RuntimeError("not found"))
+	def test_uninstall_bundled_mariadb_swallows_release_not_found(self, _mock_uninstall, _mock_not_found):
+		# 404 must not bubble up — sibling already gone is a successful state.
+		_uninstall_bundled_mariadb_release(
+			parent_release_name="rel-a",
+			namespace="ns",
+			cluster_name="cluster-a",
+		)
+
+	@patch("kubeport.tasks.helm_tasks.frappe.log_error")
+	@patch("kubeport.tasks.helm_tasks.helm.is_release_not_found_error", return_value=False)
+	@patch("kubeport.tasks.helm_tasks.helm.uninstall", side_effect=RuntimeError("kaboom"))
+	def test_uninstall_bundled_mariadb_logs_other_errors_but_does_not_raise(
+		self, _mock_uninstall, _mock_not_found, mock_log_error
+	):
+		# Non-404 errors get logged but must not block the parent's uninstall.
+		_uninstall_bundled_mariadb_release(
+			parent_release_name="rel-a",
+			namespace="ns",
+			cluster_name="cluster-a",
+		)
+		mock_log_error.assert_called_once()
 
 
 class UnitTestHelmDiffPreview(UnitTestCase):

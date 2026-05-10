@@ -20,6 +20,7 @@ Design rationale (direct Job submission, not Helm upgrade):
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -778,6 +779,18 @@ def _run_site_op(
 		if prepare_ref_spec is not None:
 			prepare_ref_spec(doc, release, namespace, api_client, ref_spec)
 
+		# Auto-wire a release-owned MariaDB root Secret onto the doc when the
+		# operator hasn't supplied one.  Runs before build_creds_secret so the
+		# creds-Secret build sees the updated db_root_secret/db_root_secret_key.
+		# Best-effort for all op kinds — for create-site this is what makes
+		# the bundled-MariaDB happy path zero-config.
+		_auto_wire_db_root_secret(
+			core_v1=core_v1,
+			doc=doc,
+			namespace=namespace,
+			release_name=release_name,
+		)
+
 		job_name = _job_name(doc.site_name, operation_token)
 		job_name_for_cleanup = job_name
 
@@ -789,6 +802,14 @@ def _run_site_op(
 
 		bench_cmd = build_command(doc)
 		container_env = build_env(doc, creds_secret_name)
+		_inject_resolved_db_host(
+			core_v1=core_v1,
+			namespace=namespace,
+			release_name=release_name,
+			ref_spec=ref_spec,
+			container_env=container_env,
+			op_kind=config.op_kind,
+		)
 		job_manifest = _build_op_job_manifest(
 			job_name=job_name,
 			namespace=namespace,
@@ -941,13 +962,30 @@ def _merge_env(
 
 
 def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool) -> str:
-	"""Build the ``bench new-site`` shell command string."""
+	"""Build the ``bench new-site`` shell command string.
+
+	When ``force`` is set we also wipe the site directory on the bench PVC
+	before invoking bench.  Frappe's ``make_site_config`` never overwrites an
+	existing ``site_config.json``, and ``bench new-site --force`` does not
+	reset that file either — it only allows bench to proceed past the
+	"site exists" check.  If a previous attempt left a partial config behind
+	(e.g. one written before ``--db-host`` was passed), every subsequent
+	retry would silently inherit the broken config and default to 127.0.0.1.
+	Pre-cleaning under ``--force`` makes retries deterministic.
+	"""
+	preamble: list[str] = [
+		'test -n "$DB_HOST" || { echo "DB_HOST is not set; cannot create site"; exit 1; };',
+	]
+	if force:
+		preamble.append('rm -rf "sites/$SITE_NAME";')
 	parts = [
+		*preamble,
 		"bench",
 		"new-site",
 		'"$SITE_NAME"',
 		"--mariadb-user-host-login-scope='%'",
 		'--db-type="$DB_TYPE"',
+		'--db-host="$DB_HOST"',
 		'--mariadb-root-username="$DB_ROOT_USER"',
 		'--mariadb-root-password="$DB_ROOT_PASSWORD"',
 		'--admin-password="$ADMIN_PASSWORD"',
@@ -957,6 +995,294 @@ def _bench_new_site_command(site_name: str, install_apps: list[str], force: bool
 	if force:
 		parts.append("--force")
 	return " ".join(parts)
+
+
+def _inject_resolved_db_host(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	release_name: str,
+	ref_spec: dict[str, Any],
+	container_env: list[dict[str, Any]],
+	op_kind: str = "",
+) -> None:
+	"""Inject ``DB_HOST`` into ``container_env`` if we can resolve a host.
+
+	For create-site we **require** resolution: the new site has no
+	``site_config.json`` yet, so bench has nowhere else to learn ``db_host``
+	from, and a missing value silently defaults to 127.0.0.1.  For other
+	operations (migrate, drop) bench reads ``db_host`` from the existing
+	site's ``site_config.json`` on the bench PVC, so resolution is
+	best-effort and a miss is non-fatal.
+	"""
+	db_host = (
+		_resolve_db_host_from_env_entries(ref_spec.get("container_env") or [])
+		or _resolve_db_host_from_env_refs(core_v1, namespace, ref_spec.get("container_env") or [])
+		or _resolve_db_host_from_env_from(core_v1, namespace, ref_spec.get("container_env_from") or [])
+		or _resolve_db_host_from_configmap_mounts(core_v1, namespace, ref_spec)
+		or _resolve_db_host_from_services(core_v1, namespace, release_name)
+	)
+	if db_host:
+		container_env.append({"name": "DB_HOST", "value": db_host})
+		return
+	if op_kind == "create":
+		raise RuntimeError(
+			f"Could not resolve DB host for Helm release '{release_name}' in "
+			f"namespace '{namespace}'. The bench pod has no DB_HOST env, no "
+			"mounted common_site_config.json with db_host, and no "
+			"release-owned mariadb/mysql Service. Set 'dbHost' in the chart "
+			"values, enable the bundled MariaDB, or expose a release-owned "
+			"MariaDB Service before retrying."
+		)
+
+
+def _resolve_db_host_from_env_entries(env_entries: list[dict[str, Any]]) -> str:
+	for entry in env_entries:
+		if entry.get("name") == "DB_HOST" and entry.get("value"):
+			return str(entry.get("value") or "")
+	return ""
+
+
+def _resolve_db_host_from_env_refs(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	env_entries: list[dict[str, Any]],
+) -> str:
+	for entry in env_entries:
+		if entry.get("name") != "DB_HOST":
+			continue
+		config_map_ref = (
+			(entry.get("valueFrom") or {}).get("configMapKeyRef")
+			or (entry.get("value_from") or {}).get("config_map_key_ref")
+			or {}
+		)
+		name = config_map_ref.get("name")
+		key = config_map_ref.get("key")
+		if name and key:
+			value = _read_config_map_key(core_v1, namespace, name, key)
+			if value:
+				return value
+	return ""
+
+
+def _resolve_db_host_from_env_from(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	env_from: list[dict[str, Any]],
+) -> str:
+	for entry in env_from:
+		config_map_ref = entry.get("configMapRef") or entry.get("config_map_ref") or {}
+		name = config_map_ref.get("name")
+		if not name:
+			continue
+		value = _read_config_map_key(core_v1, namespace, name, "DB_HOST")
+		if value:
+			return value
+	return ""
+
+
+def _resolve_db_host_from_configmap_mounts(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	ref_spec: dict[str, Any],
+) -> str:
+	config_map_volumes = {
+		volume.get("name"): (volume.get("configMap") or volume.get("config_map") or {})
+		for volume in ref_spec.get("volumes") or []
+		if volume.get("configMap") or volume.get("config_map")
+	}
+	for mount in ref_spec.get("volume_mounts") or []:
+		mount_path = str(mount.get("mountPath") or mount.get("mount_path") or "")
+		if not mount_path.startswith(FRAPPE_BENCH_SITES_PATH):
+			continue
+		config_map = config_map_volumes.get(mount.get("name")) or {}
+		name = config_map.get("name")
+		if not name:
+			continue
+		for key in _config_map_candidate_keys(config_map, mount_path):
+			value = _db_host_from_common_site_config(_read_config_map_key(core_v1, namespace, name, key))
+			if value:
+				return value
+	return ""
+
+
+def _config_map_candidate_keys(config_map: dict[str, Any], mount_path: str) -> list[str]:
+	keys: list[str] = []
+	for item in config_map.get("items") or []:
+		key = item.get("key")
+		path = item.get("path")
+		if key and (path == "common_site_config.json" or mount_path.endswith(str(path or ""))):
+			keys.append(str(key))
+	if not keys:
+		keys.append("common_site_config.json")
+	return keys
+
+
+def _db_host_from_common_site_config(raw_config: str) -> str:
+	if not raw_config:
+		return ""
+	try:
+		parsed = json.loads(raw_config)
+	except Exception:
+		return ""
+	if not isinstance(parsed, dict):
+		return ""
+	return str(parsed.get("db_host") or parsed.get("db_host_name") or "")
+
+
+def _resolve_db_host_from_services(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	release_name: str,
+) -> str:
+	"""Find a mariadb/mysql Service strictly owned by this Helm release.
+
+	We require ownership evidence — either a release-prefixed name (Helm
+	chart convention, e.g. ``<release>-mariadb``) or the standard Helm
+	``app.kubernetes.io/instance`` label.  We deliberately do NOT fall
+	back to any mariadb/mysql Service in the namespace: silently routing
+	a new-site Job at a foreign tenant's database is a far worse failure
+	mode than failing loudly with no host at all.
+	"""
+	release_name = str(release_name or "")
+	if not release_name:
+		return ""
+	try:
+		services = core_v1.list_namespaced_service(namespace=namespace, _request_timeout=10).items
+	except Exception:
+		return ""
+	prefix = f"{release_name}-"
+	for service in services:
+		metadata = getattr(service, "metadata", None)
+		name = str(getattr(metadata, "name", "") or "")
+		if not name:
+			continue
+		normalized = name.lower()
+		if "mariadb" not in normalized and "mysql" not in normalized:
+			continue
+		labels = getattr(metadata, "labels", None) or {}
+		owns_via_name = name == release_name or name.startswith(prefix)
+		owns_via_label = labels.get("app.kubernetes.io/instance") == release_name
+		if owns_via_name or owns_via_label:
+			return name
+	return ""
+
+
+def _read_config_map_key(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	name: str,
+	key: str,
+) -> str:
+	try:
+		config_map = core_v1.read_namespaced_config_map(name=name, namespace=namespace, _request_timeout=10)
+	except Exception:
+		return ""
+	data = getattr(config_map, "data", None) or {}
+	if not isinstance(data, dict):
+		return ""
+	return str(data.get(key) or "")
+
+
+# Bitnami's MariaDB chart (used as the dependency by Frappe/ERPNext) puts the
+# generated root password into a Secret named ``<release>-mariadb`` under key
+# ``mariadb-root-password``.  Encoding that convention here lets us auto-wire
+# the Frappe Site doc's db_root_secret without requiring the operator to copy
+# the secret name out of kubectl.
+_BUNDLED_DB_ROOT_SECRET_KEY = "mariadb-root-password"
+
+
+def _resolve_db_root_secret_for_release(
+	core_v1: "client.CoreV1Api",
+	namespace: str,
+	release_name: str,
+) -> tuple[str, str]:
+	"""Return ``(secret_name, key)`` for a release-owned MariaDB root Secret, or ``("", "")``.
+
+	Same ownership rule as ``_resolve_db_host_from_services``: name prefix or
+	the Helm ``app.kubernetes.io/instance`` label.  We never return a Secret
+	owned by a different release — that would route the Job at the wrong
+	credentials, the very failure mode we're protecting against in the host
+	resolver.
+	"""
+	release_name = str(release_name or "")
+	if not release_name:
+		return "", ""
+	try:
+		secrets_list = core_v1.list_namespaced_secret(namespace=namespace, _request_timeout=10).items
+	except Exception:
+		return "", ""
+	prefix = f"{release_name}-"
+	for secret in secrets_list:
+		metadata = getattr(secret, "metadata", None)
+		name = str(getattr(metadata, "name", "") or "")
+		if not name:
+			continue
+		normalized = name.lower()
+		if "mariadb" not in normalized and "mysql" not in normalized:
+			continue
+		labels = getattr(metadata, "labels", None) or {}
+		owns_via_name = name == release_name or name.startswith(prefix)
+		owns_via_label = labels.get("app.kubernetes.io/instance") == release_name
+		if not (owns_via_name or owns_via_label):
+			continue
+		data = getattr(secret, "data", None) or {}
+		if _BUNDLED_DB_ROOT_SECRET_KEY in data:
+			return name, _BUNDLED_DB_ROOT_SECRET_KEY
+	return "", ""
+
+
+def _auto_wire_db_root_secret(
+	core_v1: "client.CoreV1Api",
+	doc: Any,
+	namespace: str,
+	release_name: str,
+) -> None:
+	"""Populate ``doc.db_root_secret`` from a release-owned MariaDB Secret if empty.
+
+	A no-op when the operator already chose a Secret reference or there is no
+	release-owned Secret (e.g. external-DB topology).  When we do auto-wire we
+	persist via ``db_set`` so a worker reload (or the read inside
+	``_create_creds_secret`` further down ``_run_site_op``) sees the value.
+	"""
+	if str(getattr(doc, "db_root_secret", "") or "").strip():
+		return
+	secret_name, secret_key = _resolve_db_root_secret_for_release(
+		core_v1=core_v1,
+		namespace=namespace,
+		release_name=release_name,
+	)
+	if not secret_name:
+		return
+	doc.db_root_secret = secret_name
+	doc.db_root_secret_key = secret_key
+	doc.db_set("db_root_secret", secret_name, update_modified=False)
+	doc.db_set("db_root_secret_key", secret_key, update_modified=False)
+
+
+def can_resolve_db_host_for_release(
+	cluster: str,
+	namespace: str,
+	release_name: str,
+) -> bool:
+	"""Pre-flight: would create-site's DB-host resolver find anything for this release?
+
+	Synchronous, fast (one Service list).  Used by the Frappe Site controller
+	to surface an actionable error in the same UI click as the user's
+	``Create Site`` action, instead of waiting for the worker to fail.
+
+	A True return is necessary but not sufficient — the worker still runs the
+	full resolution chain and may discover host info via configMap mounts the
+	pre-flight skips.  A False return reliably means the bundled-MariaDB
+	default flow is broken (no release-owned Service exists yet).
+	"""
+	try:
+		api_client = get_k8s_api_client(cluster)
+		core_v1 = client.CoreV1Api(api_client=api_client)
+	except Exception:
+		# If we can't even build a client, the worker will fail with a clearer
+		# cluster-side error.  Don't block the click on a transient network blip.
+		return True
+	return bool(_resolve_db_host_from_services(core_v1, namespace, release_name))
 
 
 def _bench_drop_site_command(site_name: str) -> str:

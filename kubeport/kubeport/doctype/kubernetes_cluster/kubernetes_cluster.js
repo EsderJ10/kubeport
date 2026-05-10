@@ -180,6 +180,7 @@ function _render_discovery_response(frm, payload) {
     const benches = Array.isArray(payload.benches) ? payload.benches : [];
     const sites = Array.isArray(payload.sites) ? payload.sites : [];
     const errors = Array.isArray(payload.errors) ? payload.errors : [];
+    const capabilities = payload.capabilities || {};
     const generated_at = payload.generated_at || '';
 
     let status_message = __('Live discovery fetched successfully.');
@@ -206,6 +207,7 @@ function _render_discovery_response(frm, payload) {
     html += '<div class="text-muted small" style="margin-top: 6px;">' +
         frappe.utils.escape_html(meta_bits.join(' | ')) +
         '</div>';
+    html += _render_cluster_capabilities(capabilities);
 
     if (errors.length) {
         html += '<div class="alert alert-warning small" style="margin-top: 12px; margin-bottom: 0;">';
@@ -219,6 +221,41 @@ function _render_discovery_response(frm, payload) {
     _set_wrapper_html(frm, 'discovery_status_html', html);
     _render_release_table(frm, benches);
     _render_site_table(frm, sites);
+}
+
+function _render_cluster_capabilities(capabilities) {
+    const ingress = capabilities.ingress || {};
+    const cert_manager = capabilities.cert_manager || {};
+    const ingress_label = ingress.available
+        ? __('Ingress controller ready')
+        : __('Ingress controller not detected');
+    const cert_label = cert_manager.available
+        ? __('cert-manager ready')
+        : __('cert-manager not detected');
+    const ingress_count = Array.isArray(ingress.ingress_classes) ? ingress.ingress_classes.length : 0;
+    const address_count = Array.isArray(ingress.controller_addresses)
+        ? ingress.controller_addresses.length
+        : 0;
+    const issuer_count = Array.isArray(cert_manager.cluster_issuers)
+        ? cert_manager.cluster_issuers.length
+        : 0;
+
+    return `
+        <div class="small" style="margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap;">
+            <span class="indicator-pill ${ingress.available ? 'green' : 'orange'}">
+                ${frappe.utils.escape_html(ingress_label)}
+            </span>
+            <span class="text-muted">
+                ${__('classes')}: ${ingress_count} | ${__('addresses')}: ${address_count}
+            </span>
+            <span class="indicator-pill ${cert_manager.available ? 'green' : 'orange'}">
+                ${frappe.utils.escape_html(cert_label)}
+            </span>
+            <span class="text-muted">
+                ${__('issuers')}: ${issuer_count}
+            </span>
+        </div>
+    `;
 }
 
 function _render_release_table(frm, benches) {
