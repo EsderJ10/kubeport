@@ -105,7 +105,7 @@ By default the Frappe/ERPNext chart deploys with `ingress.enabled=false`, so the
 
 These fields apply only to Frappe charts (matched by chart name containing "frappe" or "erpnext"). For other charts, configure ingress via the raw `Values` YAML.
 
-**Escape hatch.** If the raw `Values` YAML already contains an `ingress` key, Kubeport leaves it alone — the form fields are a convenience layer, not a lock-in. Use this for advanced configurations like multi-host SAN certs, custom annotations, or alternate path types.
+**Escape hatch.** Kubeport classifies the user's `ingress` block as **advanced** when it has more than one host, a path other than `/` with `pathType: ImplementationSpecific`, custom annotations beyond `cert-manager.io/cluster-issuer`, or any top-level key beyond `{enabled, className, hosts, annotations, tls}`. Advanced overrides preserve the raw YAML untouched — that is your hatch for multi-host SAN certs, custom path types, or extra annotations. Simple or empty `ingress:` blocks (chart defaults, leftover snippets) are replaced by the structured rendering, so the form fields stay authoritative for the common case.
 
 Ingress suggestions are live, read-only cluster discovery. They are not persisted anywhere except the Helm Release fields you explicitly save, and the fields remain editable when nothing is detected.
 

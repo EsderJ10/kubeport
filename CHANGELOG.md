@@ -132,7 +132,7 @@ materialises chart values from the database.
 
 ---
 
-## 2026-05-10 — Ingress UX: read-only discovery hints and authoritative structured rendering
+## 2026-05-10 — Ingress UX: read-only discovery hints and "advanced override" escape hatch
 
 ### Context
 
@@ -142,41 +142,50 @@ about *what* to type. New operators stared at an empty `Ingress Class`
 and `cert-manager ClusterIssuer` not knowing whether the cluster had a
 default `IngressClass`, whether cert-manager was even installed, or
 what hostname to use on a `kind` / `k3d` cluster with no DNS zone. A
-secondary issue surfaced in testing: a release whose raw `Values` YAML
-contained a partial `ingress:` block was getting that block silently
-overridden by the structured fields' rendering on some paths and
-preserved on others — the authoritative split between "form fields" and
-"raw YAML" was not consistent.
+secondary issue surfaced in testing: an empty / chart-default
+`ingress:` block in the user's raw `Values` YAML was leaking through
+and silently overriding the structured fields, while a non-trivial
+multi-host or custom-annotation block was being clobbered by them —
+the authoritative split between "structured form fields" and "raw
+YAML escape hatch" was not consistent and depended on which path
+materialised values first.
 
 ### Decision
 
-Add live, read-only ingress discovery to the Helm Release form. While
-editing, the form populates non-persisted suggestions:
+Add live, read-only ingress discovery to the Helm Release form via a
+single whitelisted endpoint `kubeport.api.discovery.get_ingress_suggestions(cluster_name, release_name)`
+that returns `{ingress_classes, default_ingress_class, cluster_issuers,
+default_cluster_issuer, controller_addresses, suggested_hostname,
+capabilities, errors}` in one round-trip. The form uses it to populate
+non-persisted suggestions:
 
 1. **Ingress Class** — the cluster's default `IngressClass` (the one
    annotated `ingressclass.kubernetes.io/is-default-class: "true"`),
-   or the only detected class when there is exactly one. Empty when
-   no `IngressClass` exists or multiple non-default ones do.
+   or the only detected class when there is exactly one.
 2. **cert-manager ClusterIssuer** — a ready `ClusterIssuer` when
    cert-manager is detected on the cluster. Empty when cert-manager
    is absent or no issuer is in `Ready: True` state.
-3. **Hostname** — when the chosen ingress controller exposes a
-   LoadBalancer service with an external IP and the operator has not
-   already set `Hostname`, the form proposes
+3. **Suggested hostname** — when the chosen ingress controller exposes
+   a LoadBalancer service with an external IP, the form proposes
    `<release-name>.<ip>.nip.io`. Useful on `kind` / `k3d` / minikube
-   without a real DNS zone; the suggestion is just a default —
-   operators are free to overwrite it.
+   without a real DNS zone.
 
 Suggestions are pulled live, are never persisted to MariaDB, and the
 fields stay editable when nothing is detected so a fresh-cluster setup
 is not blocked by missing hints.
 
-The structured-vs-raw-YAML authoritative split is now exhaustively
-enforced: `render_ingress_values()` does a single check at the top of
-the user-supplied YAML for *any* `ingress` key, and if present skips
-the structured rendering entirely. There is no merge — pre-existing
-raw YAML wins, structured fields lose. This keeps the escape hatch
-for multi-host SAN certs and other advanced configurations honest.
+The authoritative split between structured fields and raw YAML is
+re-stated as an explicit "advanced override" rule. `render_ingress_values()`
+runs the user's YAML through `_has_advanced_ingress_override()`,
+which classifies an `ingress` block as advanced if it carries any
+key beyond `{enabled, className, hosts, annotations, tls}`, has more
+than one host, has any path other than the structured-default
+`/ ImplementationSpecific`, or has annotations beyond
+`cert-manager.io/cluster-issuer`. Advanced overrides preserve the
+user's YAML untouched (the multi-host SAN-cert escape hatch). Simple
+or empty `ingress:` blocks (chart defaults, leftover snippets) are
+replaced by the structured rendering so the form fields remain the
+source of truth.
 
 ### Rejected alternatives
 
@@ -188,39 +197,48 @@ for multi-host SAN certs and other advanced configurations honest.
 - **Block save when no `IngressClass` is detected.** Over-strict —
   operators on dev clusters with no `IngressClass` still need a
   way to set `Enable Ingress = false` and move on.
+- **"Any `ingress` key wins" rule.** Tempting because it is one
+  line of code, but it makes the structured fields useless for any
+  release whose chart defaults already include a stub `ingress:`
+  block (most do). The advanced-override classifier is more code
+  but matches operator intent.
 - **Three-way merge between raw YAML and structured fields.** YAML
-  merging gets ambiguous fast (which side wins for a TLS block where
-  both specify host but only one specifies issuer?). A clean "raw
-  YAML wins, all of it" rule is easier to reason about and matches
-  the existing StorageClass / image rendering rule.
+  merging gets ambiguous fast and would defeat the "form fields are
+  the source of truth for the simple case" goal.
 - **Skip the LoadBalancer IP → nip.io hint.** It is the difference
   between "click Save and it just works on `kind`" and "go look up
   what nip.io is." Cheap to render and easy to ignore.
 
 ### Implementation details
 
-- `kubeport/api/discovery.py`: new whitelisted endpoints for
-  `default_ingress_class()`, `default_cluster_issuer()`, and
-  `loadbalancer_ip_for_namespace()`. All read-only, all return
-  `{value, error}` so the form can render an empty hint without
-  flashing a tracebacks panel.
-- `kubeport/utils/discovery.py`: shared probes for IngressClass and
-  ClusterIssuer enumeration (cert-manager `apiextensions` listing
-  with a missing-CRD soft-fallback).
-- `kubeport/kubeport/doctype/helm_release/helm_release.js`:
-  on-load and on-cluster-change calls fetch hints, populate empty
-  fields, and surface a small "Detected: …" inline note next to each
-  field.
+- `kubeport/api/discovery.py`: one new whitelisted endpoint
+  `get_ingress_suggestions(cluster_name, release_name)` returning the
+  full payload above. Internal helpers `_pick_default_ingress_class`,
+  `_pick_default_cluster_issuer`, and `_suggest_hostname` shape the
+  defaults. `_discover_cluster_capabilities` swallows per-scope
+  errors into the `errors[]` payload so a missing CRD or RBAC denial
+  on (e.g.) `ClusterIssuer` does not blank out the whole response.
+- `kubeport/utils/discovery.py`: shared probes
+  `discover_ingress_classes(cluster_name)`,
+  `discover_ingress_controller_addresses(cluster_name)`, and
+  `discover_cluster_issuers(cluster_name)` (cert-manager listing
+  with a missing-CRD soft-fallback via apiextensions).
+- `kubeport/kubeport/doctype/helm_release/helm_release.js`: on-load
+  and on-cluster-change call the suggestions endpoint, populate
+  empty fields, and render a small "Detected: …" inline note next
+  to each field; suggestions never overwrite a non-empty field.
 - `kubeport/kubeport/doctype/helm_release/helm_release.py`:
-  `render_ingress_values` does one early `parse(values_yaml).get("ingress")`
-  check and bails out with the raw YAML untouched. Tests pin both
-  branches (escape-hatch preserved, structured rendering applied).
+  `render_ingress_values()` calls `_has_advanced_ingress_override()`
+  on the user's `ingress` block; on advanced overrides it returns
+  the YAML unmodified. Helper `_is_single_root_ingress_host()` pins
+  the structured default shape (single host, single path `/` with
+  `pathType: ImplementationSpecific`).
 - `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.js`
   surfaces ingress detection in the live discovery panel so the
   operator can sanity-check the cluster from the cluster row before
   ever opening a Helm Release form.
 - `docs/operator-guide.md` §3.4 (Ingress) updated to document the
-  read-only discovery hints and the authoritative escape hatch.
+  read-only discovery hints and the advanced-override escape hatch.
 
 ---
 
@@ -243,15 +261,22 @@ non-deterministic on date boundaries.
 
 ### Decision
 
-Inside each reconciliation tick the reconciler keeps a per-tick set
-of `(title, hash(message))` pairs already logged and short-circuits
-duplicate calls to `frappe.log_error`. The dedup is *intra-tick* only
-— the next tick logs the error again, so an error that recurs across
-many ticks still appears in the log, just at most once per tick
-rather than once per release per tick. The trade-off is intentional:
-a broken release should log once per tick (proof the reconciler is
-still touching it), not once per defective resource it discovered
-inside the tick.
+A new `_TickErrorLog` helper holds a per-tick set of dedup `bucket`
+keys and routes every reconciler `frappe.log_error` call through
+`emit(bucket, *, title, message, warn_msg=None)`. The first occurrence
+of a bucket per tick writes the Error Log row as before; subsequent
+occurrences in the same tick log a single `frappe.logger("kubeport").warning`
+line instead so the recurring root cause is still visible in the
+worker log without multiplying database rows. A fresh `_TickErrorLog`
+is constructed at the top of each top-level reconcile function so
+ticks never share dedup state.
+
+Buckets are stable strings of the form `"<scope>::<cluster>::<error class>"`,
+chosen so a single misconfigured release / bench / cluster collapses
+to one bucket regardless of how many rows enumerate it inside the
+tick. Helm `release: not found` errors get their own bucket suffix
+(`release-not-found`) via `_bucket_for_error()` so they never hide
+genuinely new error classes.
 
 The scaling-seed harness now seeds backup timestamps off a fixture
 clock derived from the seed's deterministic RNG instead of the wall
@@ -268,18 +293,27 @@ clock, so identical seeds produce identical row contents across runs.
 - **Per-release suppression with a TTL window.** Tempting, but adds
   state with a TTL that has to be reasoned about across worker
   restarts. Per-tick is stateless and simpler.
+- **Hash the message instead of choosing a bucket key.** Two semantically
+  identical errors with different exception messages would fall into
+  different hash buckets and both log; an explicit
+  `<scope>::<cluster>::<error class>` bucket collapses them as
+  intended.
 
 ### Implementation details
 
-- `kubeport/tasks/reconciliation.py`: new `_ReconcileErrorDedup`
-  collector instantiated at the top of `reconcile_all_releases` and
-  `reconcile_site_backups`. Replaces direct `frappe.log_error` calls
-  inside the per-row loops with `_dedup.log_error(title, message)`.
+- `kubeport/tasks/reconciliation.py`: new `_TickErrorLog` class with
+  `emit(bucket, *, title, message, warn_msg=None) -> bool` plus a
+  `_bucket_for_error(error: Exception) -> str` helper that gives Helm
+  "release not found" its own bucket suffix. Instantiated at the top
+  of each top-level reconcile function (`reconcile_all_releases`,
+  `reconcile_site_backups`); per-row loops thread the instance into
+  every error path that previously called `frappe.log_error` directly.
 - `kubeport/hooks.py`: scheduled-job entrypoints unchanged externally
   but the per-tick collector lifetime matches a single tick.
 - `kubeport/tests/test_reconciliation.py`: regression tests pin the
-  per-tick dedup behaviour (same title twice in one tick → one
-  Error Log row; same title in two consecutive ticks → two rows).
+  per-tick dedup behaviour (same bucket twice in one tick → one
+  Error Log row plus a warning; same bucket in two consecutive ticks
+  → two Error Log rows).
 - `eval/scaling/seed.py` and `eval/scaling/_inproc.py`:
   `now()` is replaced by a seeded clock helper. Existing scaling
   scenarios reseed once per scenario start so cross-scenario state
