@@ -166,10 +166,20 @@ class HelmRelease(Document):
 		)
 
 	@frappe.whitelist()
-	def uninstall_release(self, force: bool = False, confirmation: str = "") -> None:
+	def uninstall_release(
+		self,
+		force: bool | int | None = False,
+		confirmation: str | None = "",
+	) -> None:
 		"""Uninstall the Helm release via background task."""
+		# Frappe's whitelist type-validator passes ``None`` for missing kwargs
+		# instead of falling back to Python defaults; coerce so the regular
+		# Uninstall button (which only sends a doc body) does not 417.
+		if force is None:
+			force = False
 		if isinstance(force, str):
 			force = force.lower() in ("1", "true", "yes")
+		confirmation = confirmation or ""
 
 		if self.status not in ["Deployed", "Degraded", "Failed"]:
 			frappe.throw("Only deployed, degraded, or failed releases can be uninstalled.")

@@ -578,6 +578,37 @@ class UnitTestHelmRelease(UnitTestCase):
 		doc.db_set.assert_any_call("status", "Uninstalling")
 		mock_enqueue.assert_called_once()
 
+	@patch(
+		"kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex",
+		return_value="tok-none",
+	)
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.enqueue")
+	@patch(
+		"kubeport.kubeport.doctype.helm_release.helm_release.frappe.get_all",
+		return_value=[],
+	)
+	def test_uninstall_release_coerces_none_kwargs_from_typing_validator(
+		self,
+		_mock_get_all,
+		mock_enqueue,
+		_mock_msgprint,
+		_mock_token_hex,
+	):
+		# Regression: the regular Uninstall button calls run_doc_method without
+		# args, and Frappe's typing validator passes force=None / confirmation=None
+		# instead of using Python defaults. The method must accept that.
+		doc = object.__new__(HelmRelease)
+		doc.status = "Deployed"
+		doc.name = "cluster-a/default/bench-a"
+		doc.release_name = "bench-a"
+		doc.db_set = MagicMock()
+
+		doc.uninstall_release(force=None, confirmation=None)
+
+		doc.db_set.assert_any_call("status", "Uninstalling")
+		mock_enqueue.assert_called_once()
+
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.get_all")
 	def test_uninstall_release_blocks_active_frappe_sites(
