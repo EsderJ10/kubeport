@@ -219,7 +219,19 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 	release = frappe.db.get_value(
 		"Helm Release",
 		release_name,
-		["release_name", "chart", "chart_version", "namespace", "cluster", "values", "site_image"],
+		[
+			"release_name",
+			"chart",
+			"chart_version",
+			"namespace",
+			"cluster",
+			"values",
+			"site_image",
+			"ingress_enabled",
+			"ingress_hostname",
+			"ingress_class_name",
+			"ingress_cluster_issuer",
+		],
 		as_dict=True,
 	)
 	if not release:
@@ -235,6 +247,11 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 			chart_doc,
 			release.get("cluster"),
 			release.get("site_image"),
+			ingress_enabled=release.get("ingress_enabled"),
+			ingress_hostname=release.get("ingress_hostname"),
+			ingress_class_name=release.get("ingress_class_name"),
+			ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
+			release_name=release["release_name"],
 		)
 
 		result = helm.install_or_upgrade(
@@ -285,6 +302,10 @@ def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
 				values_yaml=release.get("values"),
 				site_image=release.get("site_image"),
 				site_image_digest=_get_site_image_digest_for_hash(release.get("site_image")),
+				ingress_enabled=release.get("ingress_enabled"),
+				ingress_hostname=release.get("ingress_hostname"),
+				ingress_class_name=release.get("ingress_class_name"),
+				ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
 			)
 			fields.update(
 				{
@@ -358,7 +379,18 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 	release = frappe.db.get_value(
 		"Helm Release",
 		release_name,
-		["release_name", "chart", "chart_version", "namespace", "cluster", "values"],
+		[
+			"release_name",
+			"chart",
+			"chart_version",
+			"namespace",
+			"cluster",
+			"values",
+			"ingress_enabled",
+			"ingress_hostname",
+			"ingress_class_name",
+			"ingress_cluster_issuer",
+		],
 		as_dict=True,
 	)
 	if not release:
@@ -420,6 +452,10 @@ def _rollback_release_impl(release_name: str, operation_token: str, target_revis
 				namespace=namespace,
 				release_name=release["release_name"],
 				values_yaml=values_yaml,
+				ingress_enabled=release.get("ingress_enabled"),
+				ingress_hostname=release.get("ingress_hostname"),
+				ingress_class_name=release.get("ingress_class_name"),
+				ingress_cluster_issuer=release.get("ingress_cluster_issuer"),
 			)
 			fields.update(
 				{

@@ -6,6 +6,81 @@ Architecture decision log for contributors and agents. Each entry records what c
 
 ---
 
+## 2026-05-10 — Helm Release ingress fields (Frappe charts)
+
+### Context
+
+A freshly deployed ERPNext release renders all the workloads (gunicorn,
+nginx, socketio, scheduler, workers, valkey) but **no Ingress** — the
+Frappe Helm chart defaults `ingress.enabled=false`. Operators reaching
+the site had to either `kubectl port-forward` or hand-edit the raw
+`values` YAML, copying the chart's `ingress.*` schema (hosts, paths,
+className, annotations, tls) from memory or docs. The Helm Release
+doctype was already opinionated about Frappe charts (StorageClass
+injection, site-image rendering), so structured ingress fields with the
+same scope fit the existing design.
+
+### Decision
+
+Add four fields to the Helm Release doctype — `ingress_enabled`,
+`ingress_hostname`, `ingress_class_name`, `ingress_cluster_issuer` —
+that render the Frappe chart's `ingress.*` values when enabled. TLS is
+opt-in via cert-manager: when an issuer is named, Kubeport emits the
+`cert-manager.io/cluster-issuer` annotation and a `tls` block
+referencing a per-release secret `<release-name>-tls`.
+
+Rendering is gated on `is_frappe_site_chart()` (the same gate used for
+StorageClass injection), and the user-supplied `values` YAML wins —
+if the raw YAML already contains any `ingress` key Kubeport leaves it
+alone. That preserves the escape hatch for multi-host SAN certs and
+other advanced configurations.
+
+The four ingress fields are folded into `calculate_release_spec_hash`
+so toggling ingress without touching `values` still flips
+`pending_changes`. A one-time post-model-sync patch
+(`recompute_helm_release_spec_hash`) recomputes
+`last_applied_spec_hash` for every existing row so the new payload
+shape doesn't make every release falsely report drift after migration.
+
+### Rejected alternatives
+
+- **Raw values YAML only (status quo).** Required operators to
+  memorise the Frappe chart's ingress schema. High copy-paste risk
+  (wrong key names → silent no-op).
+- **Auto-render for any chart.** Chart ingress schemas vary
+  (older Bitnami charts use `ingress.hostname` instead of
+  `ingress.hosts`). Same blast-radius scope as the existing Frappe-only
+  StorageClass injection.
+- **Separate Ingress doctype linked from Helm Release.** Over-modelled
+  — the ingress lifetime is the release's lifetime, and the four
+  fields fit on the existing form without crowding it.
+- **Multi-host SAN as structured fields.** Schema explosion for a
+  rare case. Operators with that need fall through to the raw YAML
+  escape hatch.
+
+### Implementation details
+
+- New `render_ingress_values()` in
+  `kubeport/kubeport/doctype/helm_release/helm_release.py`. Same shape
+  as `render_chart_starter_values`: parse → Frappe-only → preserve
+  user values → emit. Hardcodes `path: /` and
+  `pathType: ImplementationSpecific` (Frappe chart defaults).
+- `prepare_release_values()` gains keyword-only ingress kwargs (defaults
+  preserve all existing call sites). Pipeline order: starter values →
+  ingress → site image. Threaded through
+  `kubeport/tasks/helm_tasks.py` (install/upgrade and rollback paths),
+  `kubeport/tasks/reconciliation.py` (stale-operation recovery), and
+  `kubeport/api/helm_diff.py` (diff preview). `api/discovery.py`
+  (release adoption) defaults to ingress-disabled — the structured
+  fields don't try to reverse-engineer ingress state from existing
+  values YAML.
+- DocType fields use `depends_on: "eval:doc.ingress_enabled"` so they
+  only show when ingress is on, plus
+  `mandatory_depends_on: "eval:doc.ingress_enabled"` on hostname.
+  Server-side `validate()` defends against direct API writes.
+- Migration: `kubeport/patches/post_model_sync/recompute_helm_release_spec_hash.py`
+  recomputes hashes for every existing row to absorb the payload-shape
+  change without flipping `pending_changes` everywhere.
 ## 2026-05-10 — Scheduled backups and retention for Frappe Site
 
 ### Context

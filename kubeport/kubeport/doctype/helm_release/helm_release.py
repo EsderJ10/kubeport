@@ -49,6 +49,10 @@ class HelmRelease(Document):
 		desired_spec_hash: DF.Data | None
 		helm_revision: DF.Int
 		helm_status_detail: DF.SmallText | None
+		ingress_class_name: DF.Data | None
+		ingress_cluster_issuer: DF.Data | None
+		ingress_enabled: DF.Check
+		ingress_hostname: DF.Data | None
 		last_applied_chart_version: DF.Data | None
 		last_applied_spec_hash: DF.Data | None
 		namespace: DF.Data
@@ -88,6 +92,13 @@ class HelmRelease(Document):
 		elif site_image:
 			_get_site_image_for_release(site_image)
 
+		ingress_enabled = getattr(self, "ingress_enabled", 0)
+		ingress_hostname = getattr(self, "ingress_hostname", None)
+		ingress_class_name = getattr(self, "ingress_class_name", None)
+		ingress_cluster_issuer = getattr(self, "ingress_cluster_issuer", None)
+		if ingress_enabled and not (ingress_hostname and str(ingress_hostname).strip()):
+			frappe.throw("Hostname is required when Enable Ingress is checked.")
+
 		self.desired_spec_hash = calculate_release_spec_hash(
 			chart=self.chart,
 			chart_version=self._resolve_chart_version(),
@@ -96,6 +107,10 @@ class HelmRelease(Document):
 			values_yaml=self.values,
 			site_image=site_image,
 			site_image_digest=_get_site_image_digest(site_image),
+			ingress_enabled=ingress_enabled,
+			ingress_hostname=ingress_hostname,
+			ingress_class_name=ingress_class_name,
+			ingress_cluster_issuer=ingress_cluster_issuer,
 		)
 		self.pending_changes = int(
 			bool(self.last_applied_spec_hash and self.desired_spec_hash != self.last_applied_spec_hash)
@@ -325,6 +340,11 @@ class HelmRelease(Document):
 				cluster_name=self.cluster,
 				site_image=getattr(self, "site_image", None),
 				allow_site_image_override=True,
+				ingress_enabled=getattr(self, "ingress_enabled", 0),
+				ingress_hostname=getattr(self, "ingress_hostname", None),
+				ingress_class_name=getattr(self, "ingress_class_name", None),
+				ingress_cluster_issuer=getattr(self, "ingress_cluster_issuer", None),
+				release_name=getattr(self, "release_name", None),
 			)
 			or ""
 		)
@@ -404,6 +424,10 @@ def calculate_release_spec_hash(
 	values_yaml: str | None,
 	site_image: str | None = None,
 	site_image_digest: str | None = None,
+	ingress_enabled: bool | int | None = False,
+	ingress_hostname: str | None = None,
+	ingress_class_name: str | None = None,
+	ingress_cluster_issuer: str | None = None,
 ) -> str:
 	"""Return a stable hash for the Helm desired-state fields Kubeport applies."""
 	payload = {
@@ -414,6 +438,10 @@ def calculate_release_spec_hash(
 		"site_image": str(site_image or "").strip(),
 		"site_image_digest": str(site_image_digest or "").strip(),
 		"values": _normalize_values_for_hash(values_yaml),
+		"ingress_enabled": int(bool(ingress_enabled)),
+		"ingress_hostname": str(ingress_hostname or "").strip(),
+		"ingress_class_name": str(ingress_class_name or "").strip(),
+		"ingress_cluster_issuer": str(ingress_cluster_issuer or "").strip(),
 	}
 	encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 	return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -478,15 +506,31 @@ def prepare_release_values(
 	cluster_name: str | None,
 	site_image: str | None = None,
 	allow_site_image_override: bool = False,
+	*,
+	ingress_enabled: bool | int | None = False,
+	ingress_hostname: str | None = None,
+	ingress_class_name: str | None = None,
+	ingress_cluster_issuer: str | None = None,
+	release_name: str | None = None,
 ) -> str | None:
 	"""Return values YAML ready for Helm for a Kubeport Helm Release.
 
 	Raw chart defaults are not always deployable.  The ERPNext/Frappe chart
 	requires a worker StorageClass, so Kubeport derives that value from the
-	target cluster before Helm template rendering.  Site-image rendering remains
-	optional desired state on top of those chart-specific starter values.
+	target cluster before Helm template rendering.  Optional ingress rendering
+	(Frappe charts only) and site-image rendering layer on top of those
+	chart-specific starter values.
 	"""
 	values_yaml = render_chart_starter_values(values_yaml, chart_doc, cluster_name)
+	values_yaml = render_ingress_values(
+		values_yaml,
+		chart_doc,
+		ingress_enabled=ingress_enabled,
+		hostname=ingress_hostname,
+		class_name=ingress_class_name,
+		cluster_issuer=ingress_cluster_issuer,
+		release_name=release_name,
+	)
 	return render_site_image_values(
 		values_yaml,
 		site_image,
@@ -534,6 +578,66 @@ def render_chart_starter_values(
 
 	persistence["worker"] = worker
 	rendered["persistence"] = persistence
+	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
+
+
+def render_ingress_values(
+	values_yaml: str | None,
+	chart_doc: Any,
+	*,
+	ingress_enabled: bool | int | None,
+	hostname: str | None,
+	class_name: str | None,
+	cluster_issuer: str | None,
+	release_name: str | None,
+) -> str | None:
+	"""Render Frappe-chart ingress values from structured Helm Release fields.
+
+	No-op for non-Frappe charts and when ingress is disabled.  If the user
+	already wrote any ``ingress`` block in the raw values YAML it wins — that
+	provides an escape hatch for advanced configurations (multi-host SAN,
+	custom annotations, alternate path types).
+	"""
+	if not is_frappe_site_chart(chart_doc) or not ingress_enabled:
+		return values_yaml
+
+	values = _normalize_values_for_hash(values_yaml)
+	if not isinstance(values, dict):
+		frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
+
+	if values.get("ingress"):
+		return values_yaml
+
+	hostname = (hostname or "").strip()
+	if not hostname:
+		frappe.throw("Hostname is required when Enable Ingress is checked.")
+
+	rendered = dict(values)
+	ingress: dict[str, Any] = {
+		"enabled": True,
+		"hosts": [
+			{
+				"host": hostname,
+				"paths": [{"path": "/", "pathType": "ImplementationSpecific"}],
+			}
+		],
+	}
+
+	class_name = (class_name or "").strip()
+	if class_name:
+		ingress["className"] = class_name
+
+	cluster_issuer = (cluster_issuer or "").strip()
+	if cluster_issuer:
+		ingress["annotations"] = {"cert-manager.io/cluster-issuer": cluster_issuer}
+		ingress["tls"] = [
+			{
+				"secretName": f"{release_name}-tls",
+				"hosts": [hostname],
+			}
+		]
+
+	rendered["ingress"] = ingress
 	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
 
 

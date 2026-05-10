@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import yaml
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from kubeport.kubeport.doctype.helm_release.helm_release import (
@@ -14,6 +15,7 @@ from kubeport.kubeport.doctype.helm_release.helm_release import (
 	calculate_release_spec_hash,
 	prepare_release_values,
 	render_chart_starter_values,
+	render_ingress_values,
 	render_site_image_values,
 )
 
@@ -310,6 +312,205 @@ class UnitTestHelmRelease(UnitTestCase):
 		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
 		self.assertIn("storageClass: local-path", values_yaml)
 
+	def test_render_ingress_values_no_op_when_disabled(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		raw = "workers:\n  replicaCount: 2\n"
+
+		out = render_ingress_values(
+			raw,
+			chart_doc,
+			ingress_enabled=0,
+			hostname="erp.example.com",
+			class_name="nginx",
+			cluster_issuer=None,
+			release_name="bench-a",
+		)
+
+		self.assertEqual(out, raw)
+
+	def test_render_ingress_values_no_op_for_non_frappe_chart(self):
+		chart_doc = SimpleNamespace(chart_name="redis")
+		raw = "service:\n  type: ClusterIP\n"
+
+		out = render_ingress_values(
+			raw,
+			chart_doc,
+			ingress_enabled=1,
+			hostname="erp.example.com",
+			class_name="nginx",
+			cluster_issuer="letsencrypt-prod",
+			release_name="bench-a",
+		)
+
+		self.assertEqual(out, raw)
+
+	def test_render_ingress_values_emits_http_block_without_issuer(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		out = render_ingress_values(
+			"workers:\n  replicaCount: 2\n",
+			chart_doc,
+			ingress_enabled=1,
+			hostname="erp.example.com",
+			class_name="nginx",
+			cluster_issuer=None,
+			release_name="bench-a",
+		)
+
+		parsed = yaml.safe_load(out)
+		ingress = parsed["ingress"]
+		self.assertTrue(ingress["enabled"])
+		self.assertEqual(ingress["className"], "nginx")
+		self.assertEqual(ingress["hosts"][0]["host"], "erp.example.com")
+		self.assertEqual(ingress["hosts"][0]["paths"][0]["path"], "/")
+		self.assertEqual(ingress["hosts"][0]["paths"][0]["pathType"], "ImplementationSpecific")
+		self.assertNotIn("annotations", ingress)
+		self.assertNotIn("tls", ingress)
+
+	def test_render_ingress_values_emits_tls_block_with_issuer(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		out = render_ingress_values(
+			None,
+			chart_doc,
+			ingress_enabled=1,
+			hostname="erp.example.com",
+			class_name="nginx",
+			cluster_issuer="letsencrypt-prod",
+			release_name="bench-a",
+		)
+
+		parsed = yaml.safe_load(out)
+		ingress = parsed["ingress"]
+		self.assertEqual(ingress["annotations"]["cert-manager.io/cluster-issuer"], "letsencrypt-prod")
+		self.assertEqual(ingress["tls"][0]["secretName"], "bench-a-tls")
+		self.assertEqual(ingress["tls"][0]["hosts"], ["erp.example.com"])
+
+	def test_render_ingress_values_omits_class_name_when_blank(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		out = render_ingress_values(
+			None,
+			chart_doc,
+			ingress_enabled=1,
+			hostname="erp.example.com",
+			class_name="",
+			cluster_issuer=None,
+			release_name="bench-a",
+		)
+
+		parsed = yaml.safe_load(out)
+		self.assertNotIn("className", parsed["ingress"])
+
+	def test_render_ingress_values_preserves_user_supplied_ingress(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		raw = "ingress:\n  enabled: false\n"
+
+		out = render_ingress_values(
+			raw,
+			chart_doc,
+			ingress_enabled=1,
+			hostname="erp.example.com",
+			class_name="nginx",
+			cluster_issuer="letsencrypt-prod",
+			release_name="bench-a",
+		)
+
+		self.assertEqual(out, raw)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	def test_render_ingress_values_throws_when_hostname_blank(self, mock_throw):
+		mock_throw.side_effect = RuntimeError("Hostname is required")
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		with self.assertRaisesRegex(RuntimeError, "Hostname is required"):
+			render_ingress_values(
+				None,
+				chart_doc,
+				ingress_enabled=1,
+				hostname="",
+				class_name="nginx",
+				cluster_issuer=None,
+				release_name="bench-a",
+			)
+
+	def test_calculate_release_spec_hash_changes_when_ingress_enabled_toggled(self):
+		hash_a = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 2\n",
+			ingress_enabled=False,
+		)
+		hash_b = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="workers:\n  replicaCount: 2\n",
+			ingress_enabled=True,
+			ingress_hostname="erp.example.com",
+		)
+
+		self.assertNotEqual(hash_a, hash_b)
+
+	def test_calculate_release_spec_hash_changes_when_ingress_hostname_changes(self):
+		hash_a = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="",
+			ingress_enabled=True,
+			ingress_hostname="erp.example.com",
+		)
+		hash_b = calculate_release_spec_hash(
+			chart="repo/erpnext",
+			chart_version="8.0.41",
+			namespace="erp",
+			release_name="bench-a",
+			values_yaml="",
+			ingress_enabled=True,
+			ingress_hostname="erp.staging.example.com",
+		)
+
+		self.assertNotEqual(hash_a, hash_b)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
+	def test_prepare_release_values_pipeline_renders_ingress_alongside_site_image(
+		self,
+		_mock_discover_default_storage_class,
+		mock_get_value,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"status": "Active",
+		}
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		out = prepare_release_values(
+			"persistence:\n  worker:\n    enabled: true\n",
+			chart_doc,
+			cluster_name="cluster-a",
+			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			ingress_enabled=1,
+			ingress_hostname="erp.example.com",
+			ingress_class_name="nginx",
+			ingress_cluster_issuer="letsencrypt-prod",
+			release_name="bench-a",
+		)
+
+		parsed = yaml.safe_load(out)
+		self.assertEqual(parsed["persistence"]["worker"]["storageClass"], "local-path")
+		self.assertIn("repository: ghcr.io/esderj10/kubeport-site", out)
+		self.assertTrue(parsed["ingress"]["enabled"])
+		self.assertEqual(parsed["ingress"]["hosts"][0]["host"], "erp.example.com")
+		self.assertEqual(parsed["ingress"]["tls"][0]["secretName"], "bench-a-tls")
+
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
 	def test_render_site_image_values_omits_storage_class_when_no_default(
 		self,
@@ -463,6 +664,27 @@ class UnitTestHelmRelease(UnitTestCase):
 		doc.validate()
 
 		self.assertTrue(doc.pending_changes)
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	def test_validate_throws_when_ingress_enabled_without_hostname(self, mock_throw):
+		mock_throw.side_effect = RuntimeError("Hostname is required")
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+		doc.cluster = "cluster-a"
+		doc.namespace = "default"
+		doc.release_name = "bench-a"
+		doc.chart = "repo/erpnext"
+		doc.chart_version = "8.0.41"
+		doc.values = ""
+		doc.last_applied_spec_hash = ""
+		doc.ingress_enabled = 1
+		doc.ingress_hostname = ""
+		doc.ingress_class_name = ""
+		doc.ingress_cluster_issuer = ""
+		doc.is_new = lambda: False
+
+		with self.assertRaisesRegex(RuntimeError, "Hostname is required"):
+			doc.validate()
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
 	def test_on_trash_refuses_resource_owning_statuses(self, mock_throw):

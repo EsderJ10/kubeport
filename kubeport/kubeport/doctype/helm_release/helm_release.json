@@ -18,6 +18,12 @@
   "section_break_values",
   "load_defaults",
   "values",
+  "section_break_ingress",
+  "ingress_enabled",
+  "ingress_hostname",
+  "column_break_ingress",
+  "ingress_class_name",
+  "ingress_cluster_issuer",
   "section_break_actions",
   "deploy_release",
   "uninstall_release",
@@ -117,6 +123,46 @@
    "label": "Values",
    "options": "YAML",
    "description": "YAML values to override chart defaults. Equivalent to helm install --values."
+  },
+  {
+   "fieldname": "section_break_ingress",
+   "fieldtype": "Section Break",
+   "label": "Ingress",
+   "depends_on": "eval:doc.chart",
+   "description": "Frappe/ERPNext charts only. For other charts, configure ingress via raw values YAML above."
+  },
+  {
+   "default": "0",
+   "fieldname": "ingress_enabled",
+   "fieldtype": "Check",
+   "label": "Enable Ingress",
+   "description": "Render ingress.* into Helm values. Has no effect for non-Frappe charts."
+  },
+  {
+   "fieldname": "ingress_hostname",
+   "fieldtype": "Data",
+   "label": "Hostname",
+   "depends_on": "eval:doc.ingress_enabled",
+   "mandatory_depends_on": "eval:doc.ingress_enabled",
+   "description": "External hostname (e.g. erp.example.com). Becomes ingress.hosts[0].host."
+  },
+  {
+   "fieldname": "column_break_ingress",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "ingress_class_name",
+   "fieldtype": "Data",
+   "label": "Ingress Class",
+   "depends_on": "eval:doc.ingress_enabled",
+   "description": "IngressClass name (e.g. nginx). Leave blank to use the cluster's default IngressClass."
+  },
+  {
+   "fieldname": "ingress_cluster_issuer",
+   "fieldtype": "Data",
+   "label": "cert-manager ClusterIssuer",
+   "depends_on": "eval:doc.ingress_enabled",
+   "description": "Optional. When set, renders cert-manager.io/cluster-issuer annotation and a TLS block referencing secret <release-name>-tls. Leave blank for HTTP-only."
   },
   {
    "fieldname": "section_break_actions",
