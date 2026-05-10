@@ -140,3 +140,15 @@ The remaining work is depth work; the core plumbing is in place.
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Development setup, lint and test workflow. |
 | [`SECURITY.md`](../SECURITY.md) | Security disclosure policy. |
 | [`docs/history/`](history/) | Archived planning documents kept for thesis traceability. |
+
+---
+
+## 9. Project Components
+
+This thesis describes the backend artefact (Kubeport). The complete TFG deliverable comprises three repositories:
+
+| Component | Repository | Role |
+|---|---|---|
+| Backend / control plane | [`EsderJ10/kubeport`](https://github.com/EsderJ10/kubeport) (this repo) | Frappe app, the technical artefact this document describes. |
+| Marketing landing page | [`1DAW-victorjim551/lp-KubePort`](https://github.com/1DAW-victorjim551/lp-KubePort) | Public-facing site, deployed at [`1daw-victorjim551.github.io/lp-KubePort`](https://1daw-victorjim551.github.io/lp-KubePort/). Authored by Víctor Jiménez. |
+| Project umbrella | [`EsderJ10/tfg`](https://github.com/EsderJ10/tfg) | Dev-container, design notes, task tracker. |
