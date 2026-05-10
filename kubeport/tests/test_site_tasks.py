@@ -1184,6 +1184,10 @@ class UnitTestControllerValidation(UnitTestCase):
 				"operation_token": "",
 				"db_root_secret_key": "",
 				"status_detail": "",
+				"backup_schedule": "",
+				"backup_retention_count": 0,
+				"backup_retention_days": 0,
+				"backup_schedule_last_run": None,
 			}
 			defaults.update(overrides)
 			for k, v in defaults.items():
@@ -1547,6 +1551,7 @@ class UnitTestBackupRestoreController(UnitTestCase):
 		doc.namespace = overrides.get("namespace", "ns")
 		doc._has_in_flight_backup = FrappeSite._has_in_flight_backup.__get__(doc, FrappeSite)
 		doc.backup_site = FrappeSite.backup_site.__get__(doc, FrappeSite)
+		doc._enqueue_backup = FrappeSite._enqueue_backup.__get__(doc, FrappeSite)
 		doc.restore_site = FrappeSite.restore_site.__get__(doc, FrappeSite)
 		return doc
 

@@ -71,15 +71,22 @@ def reconcile_all_releases():
 
 
 def reconcile_site_backups():
-	"""Periodic task: finalize in-flight Frappe Site Backup and Restore operations.
+	"""Periodic task: finalize in-flight Frappe Site Backup and Restore operations,
+	enqueue scheduled backups, and prune retention.
 
 	Runs every 5 minutes as a separate scheduled job so that blocking K8s probe
 	calls (pod exec, log reads) cannot consume the reconcile_all_releases budget
 	and trigger the RQ 300-second task timeout.
+
+	Tick order: finalize in-flight rows first so a just-finalized Available row
+	is visible to the retention pruner this tick rather than waiting another
+	5 minutes; then enqueue any newly due scheduled backups; then prune.
 	"""
 	metrics.increment_counter(metrics.COUNTER_RECONCILE_TICKS)
 	with metrics.correlation_scope(metrics.new_correlation_id()):
 		_reconcile_frappe_site_backups()
+		_run_scheduled_backups()
+		_prune_backup_retention()
 
 
 def _reconcile_helm_releases():
@@ -1943,3 +1950,163 @@ def _is_helm_release_not_found_error(error: Exception) -> bool:
 
 def _truncate_status_detail(detail: str) -> str:
 	return detail[:_HELM_STATUS_DETAIL_LIMIT]
+
+
+_SCHEDULER_TRIGGERED_BY = "Administrator"
+
+
+def _run_scheduled_backups() -> None:
+	"""Enqueue backups for Active sites whose cron schedule is due.
+
+	One missed slot per tick — long downtime triggers one catch-up backup, not
+	a flood, because croniter's ``get_next(base=last_run)`` returns the first
+	missed slot and we set ``last_run = now`` on each enqueue.
+	"""
+	from croniter import croniter
+
+	candidates = frappe.get_all(
+		"Frappe Site",
+		filters={
+			"status": "Active",
+			"backup_schedule": ("!=", ""),
+		},
+		fields=["name", "backup_schedule", "backup_schedule_last_run", "creation"],
+	)
+	if not candidates:
+		return
+
+	now = frappe.utils.now_datetime()
+	for row in candidates:
+		schedule = (row.backup_schedule or "").strip()
+		if not schedule or not croniter.is_valid(schedule):
+			# Defense in depth: validate guards the form path, but a row could
+			# have been seeded directly via the API.  Skip rather than crash
+			# the tick.
+			continue
+
+		base = row.backup_schedule_last_run or row.creation
+		try:
+			next_run = croniter(schedule, base).get_next(type(now))
+		except Exception as e:
+			frappe.log_error(
+				title=f"Scheduled Backup Cron Error: {row.name}",
+				message=f"schedule='{schedule}' base='{base}' err={e}",
+			)
+			continue
+		if next_run > now:
+			continue
+
+		# Re-check inside a fresh transaction window: between the get_all read
+		# above and now, an operator may have flipped the row to In Progress
+		# via Backup Now / Migrate, or another scheduler tick may have already
+		# claimed this slot.  Read-modify-write the schedule timestamp first
+		# so concurrent ticks observe ``last_run`` advance even if the second
+		# bail-out below skips the actual enqueue.
+		current = frappe.db.get_value(
+			"Frappe Site",
+			row.name,
+			["status", "backup_schedule_last_run"],
+			as_dict=True,
+		)
+		if not current or current.get("status") != "Active":
+			continue
+		current_last_run = current.get("backup_schedule_last_run")
+		if current_last_run and current_last_run != base:
+			# Another tick or the operator moved the marker; skip without
+			# re-evaluating to avoid double-firing the same slot.
+			continue
+
+		frappe.db.set_value("Frappe Site", row.name, "backup_schedule_last_run", now)
+
+		try:
+			site_doc = frappe.get_doc("Frappe Site", row.name)
+		except frappe.DoesNotExistError:
+			continue
+
+		# After the marker is advanced, confirm the manual path didn't sneak
+		# in a backup in the same window.  If it did, the marker advance is
+		# acceptable: it just means the next scheduled slot computes against
+		# now() instead of the previous base, which only delays the next run
+		# by at most one slot — preferable to a duplicate backup.
+		if site_doc.status != "Active" or site_doc._has_in_flight_backup():
+			continue
+
+		try:
+			site_doc._enqueue_backup(triggered_by=_SCHEDULER_TRIGGERED_BY)
+		except Exception as e:
+			frappe.log_error(
+				title=f"Scheduled Backup Enqueue Error: {row.name}",
+				message=str(e),
+			)
+
+
+def _prune_backup_retention() -> None:
+	"""Trash Available backups that exceed per-site retention bounds.
+
+	Only Available rows are considered.  Failed rows are diagnostic and kept
+	until manually trashed; In Progress / Restoring rows are protected by
+	``FrappeSiteBackup.on_trash``.  ``frappe.delete_doc`` triggers the
+	existing on_trash hook, which enqueues the PVC archive cleanup.
+	"""
+	from datetime import timedelta
+
+	sites = frappe.get_all(
+		"Frappe Site",
+		filters={
+			"status": ("not in", ("Deleting",)),
+		},
+		or_filters=[
+			["backup_retention_count", ">", 0],
+			["backup_retention_days", ">", 0],
+		],
+		fields=["name", "backup_retention_count", "backup_retention_days"],
+	)
+	if not sites:
+		return
+
+	now = frappe.utils.now_datetime()
+	for site in sites:
+		max_count = int(site.backup_retention_count or 0)
+		max_days = int(site.backup_retention_days or 0)
+		if max_count <= 0 and max_days <= 0:
+			continue
+
+		rows = frappe.get_all(
+			"Frappe Site Backup",
+			filters={
+				"frappe_site": site.name,
+				"status": "Available",
+			},
+			fields=["name", "creation"],
+			order_by="creation desc",
+		)
+		if not rows:
+			continue
+
+		victims: list[str] = []
+		seen: set[str] = set()
+		if max_count > 0 and len(rows) > max_count:
+			for row in rows[max_count:]:
+				if row.name not in seen:
+					victims.append(row.name)
+					seen.add(row.name)
+		if max_days > 0:
+			cutoff = now - timedelta(days=max_days)
+			for row in rows:
+				if row.creation < cutoff and row.name not in seen:
+					victims.append(row.name)
+					seen.add(row.name)
+
+		for victim in victims:
+			try:
+				frappe.delete_doc(
+					"Frappe Site Backup",
+					victim,
+					force=False,
+					ignore_permissions=True,
+				)
+			except Exception as e:
+				frappe.log_error(
+					title=f"Backup Retention Prune Error: {victim}",
+					message=str(e),
+				)

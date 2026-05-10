@@ -70,6 +70,13 @@
  "sequence_id": 100,
  "shortcuts": [
   {
+   "color": "Green",
+   "doc_view": "",
+   "label": "Kubeport Overview",
+   "link_to": "Kubeport Overview",
+   "type": "Dashboard"
+  },
+  {
    "color": "Blue",
    "doc_view": "List",
    "format": "{} Open",

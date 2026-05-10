@@ -185,6 +185,27 @@ Backups are first-class: their metadata is a standalone DocType (`Frappe Site Ba
 - Trashing a `Frappe Site Backup` row enqueues archive deletion on the PVC (even on `Failed` rows, to clean up partial-write archives).
 - Cancelling a parent `Frappe Site` cascades to in-flight backups: it rotates each backup's `operation_token`, marks them `Failed`, and enqueues cluster cleanup.
 
+### 6.4 Schedule backups and configure retention
+
+`Frappe Site` exposes three optional fields that turn manual backups into a hands-off cycle:
+
+- **Backup Schedule (cron)** — five-field cron expression, e.g. `0 2 * * *` for daily at 02:00. Empty disables scheduling.
+- **Retention: Max Backups** — keep at most N `Available` backups; older ones are auto-trashed. `0` disables count-based retention.
+- **Retention: Max Age (days)** — auto-trash any `Available` backup older than this many days. `0` disables age-based retention.
+
+How it runs:
+
+1. Every reconciliation tick (`*/5 * * * *`), the scheduler checks each `Active` site that has a non-empty schedule.
+2. If the next firing computed from the previous run (or the row's `creation`, the first time) is in the past, the tick advances the marker to `now()` then enqueues one backup via the same path as the **Backup Now** button.
+3. After the schedule pass, retention pruning trashes any `Available` rows that exceed either the count or age cap. Trashing a row triggers the existing PVC archive cleanup, so the archive is removed alongside the metadata.
+
+Edge cases worth knowing:
+
+- **Catch-up after downtime.** Long downtime (e.g., the bench was off for a week) triggers exactly **one** catch-up backup, not a flood — the marker advance bounds croniter's next-run computation.
+- **Manual + scheduled overlap.** If you click **Backup Now** between the scheduler's read and its enqueue, the scheduler sees the in-flight backup and skips without enqueueing a duplicate. The marker still advances by one slot, which only delays the next scheduled run by one slot.
+- **Retention only touches `Available` rows.** `Failed` rows stay for diagnostics; `In Progress` and `Restoring` rows are protected by the doctype's own delete guard.
+- **Granularity.** The minimum useful cron resolution is 5 minutes — finer cron expressions still fire, but at most once per reconciliation tick.
+
 ---
 
 ## 7. Live Discovery
