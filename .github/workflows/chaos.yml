@@ -10,9 +10,6 @@ jobs:
   chaos:
     name: worker_kill_mid_helm_upgrade
     runs-on: ubuntu-latest
-    # First iteration — relax PR gating until the workflow has stabilised on main,
-    # mirroring the pattern called out in TODO-15 / CHANGELOG 2026-05-09.
-    continue-on-error: true
     timeout-minutes: 30
 
     services:
