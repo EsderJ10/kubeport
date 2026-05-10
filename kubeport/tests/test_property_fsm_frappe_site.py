@@ -250,9 +250,17 @@ class _SiteModel:
 			self._set_status(next_status)
 		elif self.status == "Deleting":
 			if succeed:
-				# Snapshot Available backups at deletion time; the rest of the
-				# test verifies they are not mutated by any later rule.
+				# Snapshot Available backups *before* simulating the on-trash
+				# cascade so the invariant catches a future regression that
+				# widens the cascade to also fail Available rows.
 				self.available_at_delete = {b.name: b.status for b in self.backups if b.status == "Available"}
+				# Mirror ``_cancel_inflight_backups_for_site``: when reconcile
+				# calls ``frappe.delete_doc`` on the site row, ``on_trash``
+				# fails in-flight backup rows only. Available rows must pass
+				# through untouched — that is the invariant under test.
+				for b in self.backups:
+					if b.status in IN_FLIGHT_BACKUP_STATUSES:
+						b.status = "Failed"
 				self._set_status("DELETED")
 				self.deleted = True
 			else:
@@ -379,4 +387,16 @@ FrappeSiteFSM.TestCase.settings = settings(
 )
 
 
-TestFrappeSiteFSM = FrappeSiteFSM.TestCase
+# Hedge bench's test discovery: subclass both the hypothesis-generated
+# unittest TestCase and ``frappe.tests.UnitTestCase`` so the runner picks
+# this up the same way it picks up every other ``test_*`` module in this
+# directory. ``UnitTestCase`` is import-guarded for environments where
+# ``frappe`` is unavailable (e.g. the host running ``ruff`` outside the
+# bench container).
+try:
+	from frappe.tests import UnitTestCase
+
+	class TestFrappeSiteFSM(FrappeSiteFSM.TestCase, UnitTestCase):  # type: ignore[misc, valid-type]
+		pass
+except ImportError:
+	TestFrappeSiteFSM = FrappeSiteFSM.TestCase
