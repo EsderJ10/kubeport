@@ -69,7 +69,7 @@
 
 ---
 
-### TODO-02 — `fix/reconcile-service-bundles-test`
+### TODO-02 — `fix/reconcile-service-bundles-test` ✅ DONE 2026-05-10 — a592928
 
 **Goal**: Make the failing reconcile-service-bundles test pass.
 
