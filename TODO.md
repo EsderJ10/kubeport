@@ -422,7 +422,7 @@
 
 ## P4 — PRODUCTION READINESS
 
-### TODO-16 — `docs/deploy-guide`
+### TODO-16 — `docs/deploy-guide` ✅ DONE 2026-05-10 — 5b2ac82
 
 **Goal**: Operator-deployable guide. `docs/control-plane-state.md` §Open Gaps "Operator Documentation" lists this as missing.
 
@@ -444,7 +444,7 @@
 
 ---
 
-### TODO-17 — `feat/rbac-manifests`
+### TODO-17 — `feat/rbac-manifests` ✅ DONE 2026-05-10 — 032106e
 
 **Goal**: Ship least-privilege Kubernetes RBAC manifests for the in-cluster auth mode.
 

@@ -64,6 +64,8 @@ bench --site <site> run-tests --app kubeport --doctype <DocType>
 | `docs/thesis.md` | Project framing: problem, SOTA, objectives, results, future work |
 | `docs/architecture.md` | C4 diagrams, runtime sequences, design invariants |
 | `docs/operator-guide.md` | End-to-end operator workflows + smoke procedure |
+| `docs/deploy.md` | Non-development deploy guide: topology, bench image, RBAC, sizing, monitoring, control-plane backup |
+| `deploy/rbac/README.md` | Kustomized in-cluster RBAC manifests + `make rbac-smoke` validator |
 | `docs/control-plane-state.md` | Capabilities, robustness defences, open gaps |
 | `docs/codebase-summary.md` | Module-level architecture reference |
 | `docs/evaluation.md` | Empirical evaluation chapter (functional, reliability, baseline, scaling) |
