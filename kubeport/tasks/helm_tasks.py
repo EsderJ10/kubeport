@@ -27,7 +27,7 @@ from kubeport.kubeport.doctype.helm_release.helm_release import (
 	calculate_release_spec_hash,
 	prepare_release_values,
 )
-from kubeport.utils import helm
+from kubeport.utils import helm, metrics
 from kubeport.utils.release_health import ResourceHealth, classify_release_state
 
 _HELM_STATUS_DETAIL_LIMIT = 500
@@ -171,7 +171,11 @@ def sync_all_repos():
 # ---------------------------------------------------------------------------
 
 
-def install_or_upgrade_release(release_name: str, operation_token: str):
+def install_or_upgrade_release(
+	release_name: str,
+	operation_token: str,
+	correlation_id: str | None = None,
+):
 	"""Install or upgrade a Helm release on the target cluster.
 
 	Uses ``helm upgrade --install`` for idempotency.  Re-checks
@@ -179,6 +183,12 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 	double-click on Deploy, mid-flight uninstall) never overwrites the newer
 	operation's state.
 	"""
+	with metrics.correlation_scope(correlation_id):
+		_install_or_upgrade_release_impl(release_name, operation_token)
+
+
+def _install_or_upgrade_release_impl(release_name: str, operation_token: str):
+	metrics.logger("kubeport.helm").info("worker enter install_or_upgrade_release release=%s", release_name)
 	if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
 		return
 
@@ -303,8 +313,21 @@ def install_or_upgrade_release(release_name: str, operation_token: str):
 		)
 
 
-def rollback_release(release_name: str, operation_token: str, target_revision: int):
+def rollback_release(
+	release_name: str,
+	operation_token: str,
+	target_revision: int,
+	correlation_id: str | None = None,
+):
 	"""Roll back a Helm release to a previous revision on the target cluster."""
+	with metrics.correlation_scope(correlation_id):
+		_rollback_release_impl(release_name, operation_token, target_revision)
+
+
+def _rollback_release_impl(release_name: str, operation_token: str, target_revision: int):
+	metrics.logger("kubeport.helm").info(
+		"worker enter rollback_release release=%s revision=%s", release_name, target_revision
+	)
 	if not _release_operation_matches(release_name, operation_token, _DEPLOYABLE_WORKER_STATUS):
 		return
 
@@ -427,8 +450,18 @@ def rollback_release(release_name: str, operation_token: str, target_revision: i
 		)
 
 
-def uninstall_release(release_name: str, operation_token: str):
+def uninstall_release(
+	release_name: str,
+	operation_token: str,
+	correlation_id: str | None = None,
+):
 	"""Uninstall a Helm release from the target cluster."""
+	with metrics.correlation_scope(correlation_id):
+		_uninstall_release_impl(release_name, operation_token)
+
+
+def _uninstall_release_impl(release_name: str, operation_token: str):
+	metrics.logger("kubeport.helm").info("worker enter uninstall_release release=%s", release_name)
 	if not _release_operation_matches(release_name, operation_token, _UNINSTALLING_WORKER_STATUS):
 		return
 

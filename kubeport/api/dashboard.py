@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import frappe
 
+from kubeport.utils import metrics
 from kubeport.utils.constants import STALE_OPERATION_THRESHOLD_MINUTES
 
 # DocTypes that own an ``operation_token`` field.  ``modified_field`` is the
@@ -84,3 +85,55 @@ def public_helm_release_count() -> dict[str, int]:
 	"""
 	count: int = frappe.db.count("Helm Release")
 	return {"count": count}
+
+
+# ---------------------------------------------------------------------------
+# Internal observability — TODO-14
+# ---------------------------------------------------------------------------
+
+
+@frappe.whitelist()
+def internal_metrics_summary() -> dict[str, object]:
+	"""Return every Kubeport-internal counter and the helm-latency histogram.
+
+	The values are *Kubeport's* observed state of itself (reconcile ticks
+	processed, stale operations recovered, orphan jobs swept, helm subprocess
+	latency).  They are cluster-agnostic, so this does not violate the
+	desired-vs-observed-state invariant in AGENTS.md — nothing about cluster
+	state is read or persisted here.
+	"""
+	return {
+		"counters": metrics.get_all_counters(),
+		"histograms": {
+			metrics.HISTOGRAM_HELM_LATENCY: metrics.get_histogram_summary(metrics.HISTOGRAM_HELM_LATENCY),
+		},
+	}
+
+
+@frappe.whitelist()
+def reconcile_ticks_card_value() -> dict[str, int]:
+	"""Number-Card-shaped wrapper around the reconcile-ticks counter."""
+	return {"value": metrics.get_counter(metrics.COUNTER_RECONCILE_TICKS)}
+
+
+@frappe.whitelist()
+def stale_ops_recovered_card_value() -> dict[str, int]:
+	"""Number-Card-shaped wrapper around the stale-op-recovery counter."""
+	return {"value": metrics.get_counter(metrics.COUNTER_STALE_OPS_RECOVERED)}
+
+
+@frappe.whitelist()
+def orphan_jobs_swept_card_value() -> dict[str, int]:
+	"""Number-Card-shaped wrapper around the orphan-job-sweep counter."""
+	return {"value": metrics.get_counter(metrics.COUNTER_ORPHAN_JOBS_SWEPT)}
+
+
+@frappe.whitelist()
+def helm_p95_latency_card_value() -> dict[str, float]:
+	"""Number-Card-shaped wrapper around the p95 of helm subprocess latency.
+
+	Reports zero when the histogram window has no samples (cluster idle since
+	the last process restart or last :func:`metrics.reset_all`).
+	"""
+	summary = metrics.get_histogram_summary(metrics.HISTOGRAM_HELM_LATENCY)
+	return {"value": float(summary.get("p95", 0.0))}

@@ -508,13 +508,21 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		doc.db_set.assert_any_call("operation_token", "tok-1")
 		doc.db_set.assert_any_call("status", "In Progress")
-		mock_enqueue.assert_called_once_with(
-			"kubeport.tasks.helm_tasks.install_or_upgrade_release",
-			release_name="cluster-a/default/bench-a",
-			operation_token="tok-1",
-			queue="long",
-			enqueue_after_commit=True,
+		mock_enqueue.assert_called_once()
+		call_kwargs = mock_enqueue.call_args.kwargs
+		self.assertEqual(
+			mock_enqueue.call_args.args,
+			("kubeport.tasks.helm_tasks.install_or_upgrade_release",),
 		)
+		self.assertEqual(call_kwargs["release_name"], "cluster-a/default/bench-a")
+		self.assertEqual(call_kwargs["operation_token"], "tok-1")
+		self.assertEqual(call_kwargs["queue"], "long")
+		self.assertTrue(call_kwargs["enqueue_after_commit"])
+		# TODO-14: a correlation_id (UUID4 string) must be threaded through
+		# every enqueue call so a single operation is grep-able from web →
+		# enqueue → worker.
+		self.assertIsInstance(call_kwargs.get("correlation_id"), str)
+		self.assertEqual(len(call_kwargs["correlation_id"]), 36)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex", return_value="tok-2")
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
@@ -537,13 +545,15 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		doc.db_set.assert_any_call("operation_token", "tok-2")
 		doc.db_set.assert_any_call("status", "Uninstalling")
-		mock_enqueue.assert_called_once_with(
-			"kubeport.tasks.helm_tasks.uninstall_release",
-			release_name="cluster-a/default/bench-a",
-			operation_token="tok-2",
-			queue="long",
-			enqueue_after_commit=True,
+		mock_enqueue.assert_called_once()
+		call_kwargs = mock_enqueue.call_args.kwargs
+		self.assertEqual(
+			mock_enqueue.call_args.args,
+			("kubeport.tasks.helm_tasks.uninstall_release",),
 		)
+		self.assertEqual(call_kwargs["release_name"], "cluster-a/default/bench-a")
+		self.assertEqual(call_kwargs["operation_token"], "tok-2")
+		self.assertIsInstance(call_kwargs.get("correlation_id"), str)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.secrets.token_hex", return_value="tok-3")
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.msgprint")
@@ -612,14 +622,16 @@ class UnitTestHelmRelease(UnitTestCase):
 		doc.db_set.assert_any_call("operation_token", "tok-4")
 		doc.db_set.assert_any_call("operation_type", "Rollback")
 		doc.db_set.assert_any_call("status", "In Progress")
-		mock_enqueue.assert_called_once_with(
-			"kubeport.tasks.helm_tasks.rollback_release",
-			release_name="cluster-a/default/bench-a",
-			operation_token="tok-4",
-			target_revision=2,
-			queue="long",
-			enqueue_after_commit=True,
+		mock_enqueue.assert_called_once()
+		call_kwargs = mock_enqueue.call_args.kwargs
+		self.assertEqual(
+			mock_enqueue.call_args.args,
+			("kubeport.tasks.helm_tasks.rollback_release",),
 		)
+		self.assertEqual(call_kwargs["release_name"], "cluster-a/default/bench-a")
+		self.assertEqual(call_kwargs["operation_token"], "tok-4")
+		self.assertEqual(call_kwargs["target_revision"], 2)
+		self.assertIsInstance(call_kwargs.get("correlation_id"), str)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.logger")
 	@patch("kubeport.utils.release_health.walk")

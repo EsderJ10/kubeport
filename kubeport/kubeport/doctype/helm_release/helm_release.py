@@ -18,6 +18,8 @@ import frappe
 import yaml
 from frappe.model.document import Document
 
+from kubeport.utils import metrics
+
 # ``Draft`` is the only state that is known not to own cluster resources.
 # ``Failed`` releases may still have Helm-owned objects and must go through
 # uninstall before direct row deletion.
@@ -139,16 +141,20 @@ class HelmRelease(Document):
 			frappe.throw("Cannot deploy a release while uninstall is in progress.")
 
 		operation_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("operation_token", operation_token)
 		self.db_set("operation_type", "Deploy" if self.status == "Draft" else "Upgrade")
 		self.db_set("operation_started_at", frappe.utils.now_datetime())
 		self.db_set("helm_status_detail", "")
 		self.db_set("status", "In Progress")
 
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.helm").info("enqueue install_or_upgrade_release release=%s", self.name)
 		frappe.enqueue(
 			"kubeport.tasks.helm_tasks.install_or_upgrade_release",
 			release_name=self.name,
 			operation_token=operation_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -180,16 +186,22 @@ class HelmRelease(Document):
 				frappe.throw(f"Force uninstall requires typed confirmation '{expected_confirmation}'.")
 
 		operation_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("operation_token", operation_token)
 		self.db_set("operation_type", "Uninstall")
 		self.db_set("operation_started_at", frappe.utils.now_datetime())
 		self.db_set("helm_status_detail", "")
 		self.db_set("status", "Uninstalling")
 
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.helm").info(
+				"enqueue uninstall_release release=%s force=%s", self.name, force
+			)
 		frappe.enqueue(
 			"kubeport.tasks.helm_tasks.uninstall_release",
 			release_name=self.name,
 			operation_token=operation_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -216,17 +228,23 @@ class HelmRelease(Document):
 			frappe.throw("Helm revision must be greater than zero.")
 
 		operation_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("operation_token", operation_token)
 		self.db_set("operation_type", "Rollback")
 		self.db_set("operation_started_at", frappe.utils.now_datetime())
 		self.db_set("helm_status_detail", "")
 		self.db_set("status", "In Progress")
 
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.helm").info(
+				"enqueue rollback_release release=%s revision=%s", self.name, revision
+			)
 		frappe.enqueue(
 			"kubeport.tasks.helm_tasks.rollback_release",
 			release_name=self.name,
 			operation_token=operation_token,
 			target_revision=revision,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)

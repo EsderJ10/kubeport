@@ -18,6 +18,7 @@ from typing import Any
 import frappe
 from kubernetes import client
 
+from kubeport.utils import metrics
 from kubeport.utils.constants import STALE_OPERATION_THRESHOLD_MINUTES
 from kubeport.utils.k8s_resources import check_resources_exist
 
@@ -60,11 +61,13 @@ def reconcile_all_releases():
 
 	Runs every 5 minutes via scheduler_events in hooks.py.
 	"""
-	_reconcile_helm_releases()
-	_reconcile_stale_helm_operations()
-	_reconcile_service_bundles()
-	_reconcile_frappe_sites()
-	_sweep_orphan_site_jobs()
+	metrics.increment_counter(metrics.COUNTER_RECONCILE_TICKS)
+	with metrics.correlation_scope(metrics.new_correlation_id()):
+		_reconcile_helm_releases()
+		_reconcile_stale_helm_operations()
+		_reconcile_service_bundles()
+		_reconcile_frappe_sites()
+		_sweep_orphan_site_jobs()
 
 
 def reconcile_site_backups():
@@ -74,7 +77,9 @@ def reconcile_site_backups():
 	calls (pod exec, log reads) cannot consume the reconcile_all_releases budget
 	and trigger the RQ 300-second task timeout.
 	"""
-	_reconcile_frappe_site_backups()
+	metrics.increment_counter(metrics.COUNTER_RECONCILE_TICKS)
+	with metrics.correlation_scope(metrics.new_correlation_id()):
+		_reconcile_frappe_site_backups()
 
 
 def _reconcile_helm_releases():
@@ -1609,6 +1614,7 @@ def _sweep_orphan_site_jobs():
 				namespace,
 			)
 			_best_effort_delete_job(api_client, job_name, namespace)
+			metrics.increment_counter(metrics.COUNTER_ORPHAN_JOBS_SWEPT)
 
 
 def _exec_bench_site_functional(
@@ -1909,6 +1915,7 @@ def _set_stale_helm_operation_state(
 		return False
 
 	frappe.db.set_value("Helm Release", release_docname, fields)
+	metrics.increment_counter(metrics.COUNTER_STALE_OPS_RECOVERED)
 	frappe.publish_realtime(
 		"helm_release_status_update",
 		{
