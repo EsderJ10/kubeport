@@ -13,6 +13,8 @@ import secrets
 import frappe
 from frappe.model.document import Document
 
+from kubeport.utils import metrics
+
 
 class HelmRepository(Document):
 	# begin: auto-generated types
@@ -66,12 +68,18 @@ class HelmRepository(Document):
 
 	def _enqueue_sync_job(self, task_path: str, message: str) -> None:
 		sync_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("status", "Syncing")
 		self.db_set("sync_token", sync_token)
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.helm").info(
+				"enqueue %s repo=%s", task_path.rsplit(".", 1)[-1], self.name
+			)
 		frappe.enqueue(
 			task_path,
 			repo_name=self.name,
 			sync_token=sync_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)

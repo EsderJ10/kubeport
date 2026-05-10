@@ -20,6 +20,7 @@ import frappe
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
+from kubeport.utils import metrics
 from kubeport.utils.k8s_client import get_k8s_api_client
 
 _OUTPUT_LIMIT = 5000
@@ -41,9 +42,13 @@ _RESOURCE_DISPATCH: dict[str, tuple[str, str]] = {
 }
 
 
-def run_kubernetes_command(command_docname: str) -> None:
+def run_kubernetes_command(command_docname: str, correlation_id: str | None = None) -> None:
 	"""Background entry point used by the Delete enqueue path."""
-	_execute_command(command_docname)
+	with metrics.correlation_scope(correlation_id):
+		metrics.logger("kubeport.k8scmd").info(
+			"worker enter run_kubernetes_command command=%s", command_docname
+		)
+		_execute_command(command_docname)
 
 
 def _execute_command(command_docname: str) -> None:

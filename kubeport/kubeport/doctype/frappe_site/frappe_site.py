@@ -20,6 +20,7 @@ import frappe
 from frappe.model.document import Document
 
 from kubeport.kubeport.doctype.frappe_site_backup.frappe_site_backup import make_backup_name
+from kubeport.utils import metrics
 
 # Frappe app names are python module names: lowercase, start with a letter,
 # only letters/digits/underscore. We also allow ``-`` because a few published
@@ -138,6 +139,7 @@ class FrappeSite(Document):
 			frappe.throw("This site already exists. Enable Force Create to recreate it.")
 
 		operation_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("status", "In Progress")
 		self.db_set("status_detail", "")
 		self.db_set("operation_token", operation_token)
@@ -146,10 +148,13 @@ class FrappeSite(Document):
 		# from matching on a fresh operation_token.
 		self.db_set("operation_job_token", "")
 		self.db_set("operation_job_name", "")
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.site").info("enqueue create_site_task site=%s", self.name)
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.create_site_task",
 			site_docname=self.name,
 			operation_token=operation_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -186,6 +191,7 @@ class FrappeSite(Document):
 			)
 
 		operation_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("status", "Deleting")
 		self.db_set("status_detail", "")
 		self.db_set("operation_token", operation_token)
@@ -193,10 +199,13 @@ class FrappeSite(Document):
 		# again once the drop-site Job is actually submitted.
 		self.db_set("operation_job_token", "")
 		self.db_set("operation_job_name", "")
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.site").info("enqueue delete_site_task site=%s", self.name)
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.delete_site_task",
 			site_docname=self.name,
 			operation_token=operation_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -222,15 +231,19 @@ class FrappeSite(Document):
 			)
 
 		operation_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("status", "Migrating")
 		self.db_set("status_detail", "")
 		self.db_set("operation_token", operation_token)
 		self.db_set("operation_job_token", "")
 		self.db_set("operation_job_name", "")
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.site").info("enqueue migrate_site_task site=%s", self.name)
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.migrate_site_task",
 			site_docname=self.name,
 			operation_token=operation_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -269,16 +282,22 @@ class FrappeSite(Document):
 		)
 		backup_doc.insert(ignore_permissions=True)
 
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("status", "In Progress")
 		self.db_set("status_detail", "")
 		self.db_set("operation_token", operation_token)
 		self.db_set("operation_job_token", "")
 		self.db_set("operation_job_name", "")
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.site").info(
+				"enqueue backup_site_task site=%s backup=%s", self.name, backup_doc.name
+			)
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.backup_site_task",
 			site_docname=self.name,
 			backup_docname=backup_doc.name,
 			operation_token=operation_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -317,6 +336,7 @@ class FrappeSite(Document):
 			frappe.throw("Backup site name does not match this site.")
 
 		operation_token = secrets.token_hex(16)
+		correlation_id = metrics.new_correlation_id()
 		self.db_set("status", "Migrating")
 		self.db_set("status_detail", "")
 		self.db_set("operation_token", operation_token)
@@ -328,11 +348,16 @@ class FrappeSite(Document):
 		backup.db_set("operation_job_token", "")
 		backup.db_set("operation_job_name", "")
 		backup.db_set("operation_started_at", frappe.utils.now_datetime())
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.site").info(
+				"enqueue restore_site_task site=%s backup=%s", self.name, backup.name
+			)
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.restore_site_task",
 			site_docname=self.name,
 			backup_docname=backup.name,
 			operation_token=operation_token,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -414,11 +439,17 @@ class FrappeSite(Document):
 		self.db_set("operation_job_token", "")
 
 		if job_name:
+			correlation_id = metrics.new_correlation_id()
+			with metrics.correlation_scope(correlation_id):
+				metrics.logger("kubeport.site").info(
+					"enqueue cancel_site_task site=%s job=%s", self.name, job_name
+				)
 			frappe.enqueue(
 				"kubeport.tasks.site_tasks.cancel_site_task",
 				cluster=self.cluster,
 				namespace=self.namespace or "default",
 				job_name=job_name,
+				correlation_id=correlation_id,
 				queue="long",
 				enqueue_after_commit=True,
 			)
@@ -481,11 +512,19 @@ class FrappeSite(Document):
 			return
 
 		self.db_set("operation_token", secrets.token_hex(16))
+		correlation_id = metrics.new_correlation_id()
+		with metrics.correlation_scope(correlation_id):
+			metrics.logger("kubeport.site").info(
+				"enqueue cancel_site_task on_trash site=%s job=%s",
+				self.name,
+				self.operation_job_name,
+			)
 		frappe.enqueue(
 			"kubeport.tasks.site_tasks.cancel_site_task",
 			cluster=self.cluster,
 			namespace=self.namespace or "default",
 			job_name=self.operation_job_name,
+			correlation_id=correlation_id,
 			queue="long",
 			enqueue_after_commit=True,
 		)
@@ -540,11 +579,20 @@ def _cancel_inflight_backups_for_site(site_docname: str, *, reason: str) -> None
 			docname=row.name,
 		)
 		if row.operation_job_name and row.cluster:
+			correlation_id = metrics.new_correlation_id()
+			with metrics.correlation_scope(correlation_id):
+				metrics.logger("kubeport.site").info(
+					"enqueue cancel_site_task cascade site=%s backup=%s job=%s",
+					site_docname,
+					row.name,
+					row.operation_job_name,
+				)
 			frappe.enqueue(
 				"kubeport.tasks.site_tasks.cancel_site_task",
 				cluster=row.cluster,
 				namespace=row.namespace or "default",
 				job_name=row.operation_job_name,
+				correlation_id=correlation_id,
 				queue="long",
 				enqueue_after_commit=True,
 			)

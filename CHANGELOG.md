@@ -60,10 +60,15 @@ sides of the enqueue.
 - Correlation ID generated in `Helm Release` `deploy_release`,
   `uninstall_release`, `rollback_release`; propagated as a `correlation_id`
   kwarg into `install_or_upgrade_release`, `rollback_release`,
-  `uninstall_release` worker tasks.  Other doctype enqueue sites
-  (Frappe Site, Service Bundle, Frappe Site Backup, Helm Repository,
-  Kubernetes Command) follow the same pattern but are out of scope for the
-  TODO acceptance ("one operation"); they remain as a follow-up.
+  `uninstall_release` worker tasks.  Follow-up commit extended the same
+  pattern to every remaining enqueue site: `Frappe Site` (create / delete /
+  migrate / backup / restore / cancel / on_trash / cascade), `Frappe Site
+  Backup.on_trash` → `delete_backup_archive_task`, `Service Bundle` (apply /
+  delete), `Helm Repository` (`add_and_sync_repo` / `sync_repo_charts` and
+  the daily `sync_all_repos` scheduler tick), `Kubernetes Command.execute`,
+  and `site_image_tasks.enqueue_sync_site_image_catalog`.  Each task accepts
+  `correlation_id: str | None = None` and wraps its body in
+  `metrics.correlation_scope`.
 - `stale_ops_recovered_total` counts every successful `_set_stale_helm_operation_state`
   write (including the `Failed` terminal); `orphan_jobs_swept_total` counts
   every sweep action taken (404s on the cluster side are still counted as

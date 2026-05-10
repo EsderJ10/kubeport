@@ -675,20 +675,17 @@ class UnitTestHelmTasks(UnitTestCase):
 		sync_all_repos()
 
 		self.assertEqual(mock_set_value.call_count, 4)
-		mock_enqueue.assert_any_call(
-			"kubeport.tasks.helm_tasks.sync_repo_charts",
-			repo_name="repo-a",
-			sync_token="token-a",
-			queue="long",
-			enqueue_after_commit=True,
-		)
-		mock_enqueue.assert_any_call(
-			"kubeport.tasks.helm_tasks.sync_repo_charts",
-			repo_name="repo-b",
-			sync_token="token-b",
-			queue="long",
-			enqueue_after_commit=True,
-		)
+		self.assertEqual(mock_enqueue.call_count, 2)
+		# Each call enqueues sync_repo_charts on the long queue with the rotated
+		# sync_token and a fresh correlation_id (UUID4) per repo.
+		seen_repos: list[str] = []
+		for call in mock_enqueue.call_args_list:
+			self.assertEqual(call.args, ("kubeport.tasks.helm_tasks.sync_repo_charts",))
+			self.assertEqual(call.kwargs["queue"], "long")
+			self.assertTrue(call.kwargs["enqueue_after_commit"])
+			self.assertIsInstance(call.kwargs.get("correlation_id"), str)
+			seen_repos.append((call.kwargs["repo_name"], call.kwargs["sync_token"]))
+		self.assertEqual(set(seen_repos), {("repo-a", "token-a"), ("repo-b", "token-b")})
 
 	def test_group_chart_inventory_sorts_versions_and_filters_duplicates(self):
 		grouped = _group_chart_inventory(

@@ -44,13 +44,18 @@ class UnitTestServiceBundle(UnitTestCase):
 		doc.db_set.assert_any_call("status", "In Progress")
 		doc.db_set.assert_any_call("status_detail", "")
 		doc.db_set.assert_any_call("operation_token", "op-token")
-		mock_enqueue.assert_called_once_with(
-			"kubeport.tasks.service_bundle_tasks.apply_bundle_task",
-			bundle_name="bundle-a",
-			operation_token="op-token",
-			queue="long",
-			enqueue_after_commit=True,
+		mock_enqueue.assert_called_once()
+		call_kwargs = mock_enqueue.call_args.kwargs
+		self.assertEqual(
+			mock_enqueue.call_args.args,
+			("kubeport.tasks.service_bundle_tasks.apply_bundle_task",),
 		)
+		self.assertEqual(call_kwargs["bundle_name"], "bundle-a")
+		self.assertEqual(call_kwargs["operation_token"], "op-token")
+		self.assertEqual(call_kwargs["queue"], "long")
+		self.assertTrue(call_kwargs["enqueue_after_commit"])
+		self.assertIsInstance(call_kwargs.get("correlation_id"), str)
+		self.assertEqual(len(call_kwargs["correlation_id"]), 36)
 
 	@patch("kubeport.kubeport.doctype.service_bundle.service_bundle.frappe.throw")
 	def test_apply_bundle_rejects_duplicate_in_progress_operation(self, mock_throw):

@@ -39,12 +39,22 @@ _UNINSTALLING_WORKER_STATUS = "Uninstalling"
 # ---------------------------------------------------------------------------
 
 
-def add_and_sync_repo(repo_name: str, sync_token: str):
+def add_and_sync_repo(
+	repo_name: str,
+	sync_token: str,
+	correlation_id: str | None = None,
+):
 	"""Register a Helm repo and trigger a chart index sync.
 
 	Called automatically when a new Helm Repository document is created
 	(via ``after_insert``).
 	"""
+	with metrics.correlation_scope(correlation_id):
+		_add_and_sync_repo_impl(repo_name, sync_token)
+
+
+def _add_and_sync_repo_impl(repo_name: str, sync_token: str):
+	metrics.logger("kubeport.helm").info("worker enter add_and_sync_repo repo=%s", repo_name)
 	if not _repo_sync_token_matches(repo_name, sync_token):
 		return
 
@@ -86,11 +96,21 @@ def add_and_sync_repo(repo_name: str, sync_token: str):
 		)
 
 
-def sync_repo_charts(repo_name: str, sync_token: str):
+def sync_repo_charts(
+	repo_name: str,
+	sync_token: str,
+	correlation_id: str | None = None,
+):
 	"""Update a repo's chart index and sync new charts to the database.
 
 	Called by the "Sync Charts" button and the daily scheduler.
 	"""
+	with metrics.correlation_scope(correlation_id):
+		_sync_repo_charts_impl(repo_name, sync_token)
+
+
+def _sync_repo_charts_impl(repo_name: str, sync_token: str):
+	metrics.logger("kubeport.helm").info("worker enter sync_repo_charts repo=%s", repo_name)
 	if not _repo_sync_token_matches(repo_name, sync_token):
 		return
 
@@ -150,12 +170,16 @@ def sync_all_repos():
 	for repo_name in repos:
 		try:
 			sync_token = secrets.token_hex(16)
+			correlation_id = metrics.new_correlation_id()
 			frappe.db.set_value("Helm Repository", repo_name, "status", "Syncing")
 			frappe.db.set_value("Helm Repository", repo_name, "sync_token", sync_token)
+			with metrics.correlation_scope(correlation_id):
+				metrics.logger("kubeport.helm").info("enqueue sync_repo_charts (daily) repo=%s", repo_name)
 			frappe.enqueue(
 				"kubeport.tasks.helm_tasks.sync_repo_charts",
 				repo_name=repo_name,
 				sync_token=sync_token,
+				correlation_id=correlation_id,
 				queue="long",
 				enqueue_after_commit=True,
 			)
