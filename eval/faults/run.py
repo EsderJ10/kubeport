@@ -35,6 +35,7 @@ DEFAULT_BENCH_SITE = "frappe-k8s.localhost"
 
 SCENARIO_INPROC: dict[str, str] = {
 	"worker_kill_mid_helm_upgrade": "_inproc_worker_kill.py",
+	"job_ttl_expired_before_reconcile": "_inproc_job_ttl.py",
 }
 
 
@@ -155,7 +156,7 @@ def _run_scenario(
 		check=True,
 	)
 
-	cmd = [
+	common = [
 		"docker",
 		"exec",
 		args.container,
@@ -165,21 +166,41 @@ def _run_scenario(
 		args.bench_site,
 		"--bench-path",
 		args.bench_path,
-		"--release-doc-name",
-		args.release_doc_name,
-		"--cluster-doc-name",
-		args.cluster_doc_name,
-		"--kubeconfig-file",
-		kubeconfig_remote,
-		"--kubeconfig-context",
-		kubeconfig_context,
 		"--mttr-bound-seconds",
 		str(args.mttr_bound_seconds),
-		"--in-progress-poll-seconds",
-		str(args.in_progress_poll_seconds),
 		"--recovery-poll-seconds",
 		str(args.recovery_poll_seconds),
 	]
+
+	if scenario == "worker_kill_mid_helm_upgrade":
+		cmd = [
+			*common,
+			"--release-doc-name",
+			args.release_doc_name,
+			"--cluster-doc-name",
+			args.cluster_doc_name,
+			"--kubeconfig-file",
+			kubeconfig_remote,
+			"--kubeconfig-context",
+			kubeconfig_context,
+			"--in-progress-poll-seconds",
+			str(args.in_progress_poll_seconds),
+		]
+	elif scenario == "job_ttl_expired_before_reconcile":
+		cmd = [
+			*common,
+			"--site-doc-name",
+			args.site_doc_name,
+			"--migrate-job-poll-seconds",
+			str(args.migrate_job_poll_seconds),
+		]
+	else:
+		return {
+			"scenario": scenario,
+			"passed": False,
+			"detail": f"No dispatch wiring for scenario '{scenario}'",
+		}
+
 	if args.fast_forward:
 		cmd.append("--fast-forward")
 
@@ -212,6 +233,11 @@ def main() -> int:
 		default="demo-k3d/demo/demo-bench",
 		help="Helm Release docname to drive (must already be Deployed)",
 	)
+	parser.add_argument(
+		"--site-doc-name",
+		default="demo-k3d/demo/demo-bench/pacopepe.localhost",
+		help="Frappe Site docname to drive (must already be Active)",
+	)
 	parser.add_argument("--cluster-doc-name", default="demo-k3d")
 	parser.add_argument(
 		"--k3d-cluster",
@@ -231,6 +257,12 @@ def main() -> int:
 		type=int,
 		default=120,
 		help="Maximum time to wait for the row to flip to In Progress after deploy_release (default 120s)",
+	)
+	parser.add_argument(
+		"--migrate-job-poll-seconds",
+		type=int,
+		default=120,
+		help="Maximum time to wait for operation_job_name to be recorded after migrate_site (default 120s)",
 	)
 	parser.add_argument(
 		"--recovery-poll-seconds",
@@ -303,23 +335,24 @@ def main() -> int:
 	overall_started_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 	overall_t0 = time.monotonic()
 	results: list[dict] = []
-	worker_killed = False
 	for scenario in scenarios:
 		result = _run_scenario(args, scenario, kubeconfig_remote, kubeconfig_context)
 		results.append(result)
-		if scenario == "worker_kill_mid_helm_upgrade":
-			worker_killed = True
-
-	if worker_killed and not args.no_restart_worker:
-		_start_long_worker(args.container, args.bench_path)
-		# Best-effort wait so the report can record whether restart succeeded.
-		ok = _wait_until(lambda: _long_worker_running(args.container), timeout_s=15.0, interval_s=1.0)
-		if not ok:
-			print(
-				"Warning: long-queue worker did not come back up automatically. "
-				"Restart it manually before re-running.",
-				file=sys.stderr,
-			)
+		# After every scenario, ensure the long-queue worker is back up.
+		# scenario 1 kills it directly; later scenarios depend on it. Skip
+		# the restart entirely if the operator opted out via flag.
+		if not args.no_restart_worker and not _long_worker_running(args.container):
+			_start_long_worker(args.container, args.bench_path)
+			if not _wait_until(
+				lambda: _long_worker_running(args.container),
+				timeout_s=15.0,
+				interval_s=1.0,
+			):
+				print(
+					"Warning: long-queue worker did not come back up automatically. "
+					"Restart it manually before re-running.",
+					file=sys.stderr,
+				)
 
 	overall_finished_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 	report = {

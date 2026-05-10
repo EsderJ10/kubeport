@@ -12,7 +12,8 @@ RUFF        := $(COMPOSE) run --rm --user $(HOST_UID):$(HOST_GID) ruff
 
 EVAL_K3D_CLUSTER ?= frappe-cluster
 EVAL_FAULT_RELEASE ?= demo-k3d/demo/demo-bench
-EVAL_FAULT_SCENARIOS ?= worker_kill_mid_helm_upgrade
+EVAL_FAULT_SITE ?= demo-k3d/demo/demo-bench/erp.cluster.local
+EVAL_FAULT_SCENARIOS ?= worker_kill_mid_helm_upgrade,job_ttl_expired_before_reconcile
 
 .DEFAULT_GOAL := help
 .PHONY: help fmt lint fix lint-check eval eval-clean eval-faults eval-faults-real
@@ -53,10 +54,12 @@ eval-clean:
 eval-faults:
 	python3 eval/faults/run.py \
 	    --release-doc-name $(EVAL_FAULT_RELEASE) \
+	    --site-doc-name $(EVAL_FAULT_SITE) \
 	    --scenarios $(EVAL_FAULT_SCENARIOS) \
 	    --fast-forward
 
 eval-faults-real:
 	python3 eval/faults/run.py \
 	    --release-doc-name $(EVAL_FAULT_RELEASE) \
+	    --site-doc-name $(EVAL_FAULT_SITE) \
 	    --scenarios $(EVAL_FAULT_SCENARIOS)

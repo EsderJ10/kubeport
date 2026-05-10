@@ -182,32 +182,44 @@ default invocation shapes.
 | Scenario | Defended invariant | Witness | Status |
 |---|---|---|---|
 | `worker_kill_mid_helm_upgrade` | Stale-operation reconciler recovers worker-stranded Helm Release rows within `STALE_OPERATION_THRESHOLD_MINUTES` (30 min) | [`kubeport/tasks/reconciliation.py:_reconcile_stale_helm_operations`](../kubeport/tasks/reconciliation.py) | Implemented |
-| `job_ttl_expired_before_reconcile` | Reconciliation falls back to ground-truth bench probe when the operation Job is gone before the tick reads it | `kubeport/tasks/reconciliation.py:_probe_site_state` | Planned (next commit) |
+| `job_ttl_expired_before_reconcile` | Reconciliation falls back to ground-truth bench probe when the operation Job is gone before the tick reads it | [`kubeport/tasks/reconciliation.py:_probe_site_state`](../kubeport/tasks/reconciliation.py) | Implemented |
 | `pod_exec_timeout_during_site_probe` | Three-state probe returns `unknown` on transient pod-exec failure; row stays In Progress for the tick and recovers next tick | `kubeport/utils/observability.py` | Planned (next commit) |
 | `corrupt_archive_size_sidecar` | PVC-side completion probe marks backup `Failed` and the archive trash cleanup runs when the `<archive>.size` sidecar disappears | `kubeport/tasks/reconciliation.py:reconcile_site_backups` | Planned (next commit) |
 
-### Running the implemented scenario
+### Running the implemented scenarios
 
 `worker_kill_mid_helm_upgrade` requires:
 
 - An existing `Helm Release` row in `Deployed` (or `Degraded`) state — the harness drives a no-op upgrade against it. Default: `demo-k3d/demo/demo-bench` (the same release used by `make eval`).
 - The dev container, long-queue worker, and bench scheduler running per the Prerequisites section above.
 
+`job_ttl_expired_before_reconcile` requires:
+
+- An existing `Frappe Site` row in `Active` state whose underlying site
+  is **actually functional** on the bench (`bench list-apps` exits 0
+  inside the bench pod).  Default: `demo-k3d/demo/demo-bench/erp.cluster.local`.
+  If your bench has a different known-good site, override with
+  `--site-doc-name <docname>`.
+- The probe contract relies on the existing release/cluster the row
+  points at — no extra cluster setup is needed beyond a healthy bench.
+
 ```bash
-# Fast path: backdate operation_started_at past the staleness threshold
-# and invoke _reconcile_stale_helm_operations directly. Recovery is
-# observed in seconds; the report records fast_forward_used=true.
+# Fast path: for both scenarios, backdate the staleness clock or
+# directly invoke the per-doctype reconciler so recovery is observed
+# in seconds; the report records fast_forward_used=true per scenario.
 make eval-faults
 
-# Realistic path: wait for the natural 5-min cron tick + 30-min
-# staleness window. Total wall-clock typically 30-35 min.
+# Realistic path: wait for the natural 5-min cron tick (and, for
+# scenario 1, the 30-min staleness window). Wall-clock typically
+# 30-35 min for scenario 1; ~5 min for scenario 2.
 make eval-faults-real
 ```
 
-After the scenario completes the harness restarts the long-queue worker
-that was killed, so the dev container is left in the same state it was
-found.  Pass `--no-restart-worker` to `eval/faults/run.py` to skip the
-restart (useful when investigating).
+After every scenario the harness checks whether the long-queue worker
+is still up and restarts it if needed (scenario 1 kills it
+deliberately).  Pass `--no-restart-worker` to `eval/faults/run.py` to
+skip the restart (useful when investigating).  The dev container is
+left in the same state it was found.
 
 ### Report schema
 
