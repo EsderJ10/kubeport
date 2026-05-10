@@ -183,7 +183,7 @@
 
 ---
 
-### TODO-06 — `feat/eval-baseline-comparison`
+### TODO-06 — `feat/eval-baseline-comparison` ✅ DONE 2026-05-10 — 4ad9a4b
 
 **Goal**: Side-by-side comparison of the same workflow run with raw `kubectl + helm` vs. through Kubeport. Validates the SOTA claim in `docs/thesis.md` §2.
 
