@@ -56,6 +56,55 @@ _BACKUP_PROBE_TTL_SECONDS = 60
 _ORPHAN_SWEEP_GRACE_SECONDS = 300
 
 
+class _TickErrorLog:
+	"""Per-tick deduplicated ``frappe.log_error``.
+
+	The reconciliation tick iterates every Healthy release / Deployed bundle.
+	A single misconfigured cluster (helm CLI broken, kubeconfig invalid, large
+	synthetic seed left over from a benchmark run) makes every iteration raise
+	the same exception, which previously wrote one ``Error Log`` row per row
+	per tick — the dominant source of ``tabError Log`` growth.
+
+	Pattern: callers route each would-be ``frappe.log_error`` through
+	:meth:`emit` with a stable ``bucket`` key (typically
+	``f"<scope>::<cluster>::<error class>"``).  The first occurrence per bucket
+	per tick writes the Error Log row; later occurrences in the same tick log
+	a single ``logger.warning`` instead so a recurring root cause does not
+	multiply rows.  A fresh instance is constructed per top-level reconcile
+	function, so ticks never share dedup state.
+	"""
+
+	def __init__(self) -> None:
+		self._seen: set[str] = set()
+
+	def emit(
+		self,
+		bucket: str,
+		*,
+		title: str,
+		message: str,
+		warn_msg: str | None = None,
+	) -> bool:
+		"""Write one Error Log row per ``bucket`` per tick; warn thereafter.
+
+		Returns ``True`` iff an Error Log row was written.  ``warn_msg``
+		defaults to ``message`` and is only used for the demoted log lines.
+		"""
+		if bucket in self._seen:
+			frappe.logger("kubeport").warning("%s", warn_msg or message)
+			return False
+		self._seen.add(bucket)
+		frappe.log_error(title=title, message=message)
+		return True
+
+
+def _bucket_for_error(error: Exception) -> str:
+	"""Return a stable dedup bucket suffix for an exception."""
+	if _is_helm_release_not_found_error(error):
+		return "release-not-found"
+	return type(error).__name__
+
+
 def reconcile_all_releases():
 	"""Periodic task: compare desired state (DB) with actual state (K8s cluster).
 
@@ -111,6 +160,8 @@ def _reconcile_helm_releases():
 		fields=["name", "cluster", "namespace", "release_name", "status", "operation_token"],
 	)
 
+	tick_log = _TickErrorLog()
+
 	for release in releases:
 		try:
 			helm_result = helm.status(
@@ -139,9 +190,11 @@ def _reconcile_helm_releases():
 			)
 
 			if updated and next_status != "Deployed":
-				frappe.log_error(
+				tick_log.emit(
+					f"helm-drift::{release.cluster}::{next_status}",
 					title=f"Helm Drift Detected: {release.name}",
 					message=f"Status: {next_status}. Detail: {detail}",
+					warn_msg=f"Helm drift on {release.name}: {next_status} ({detail})",
 				)
 
 		except Exception as e:
@@ -152,16 +205,31 @@ def _reconcile_helm_releases():
 
 			# If helm status fails entirely, mark as degraded with the error
 			# (or skip if a concurrent operation has rotated the token).
-			_set_helm_reconciliation_state(
+			updated = _set_helm_reconciliation_state(
 				release_docname=release.name,
 				expected_token=release.operation_token,
 				next_status="Degraded",
 				detail=detail,
 			)
-			frappe.log_error(
-				title=f"Helm Reconciliation Error: {release.name}",
-				message=str(e),
-			)
+			# Only write an Error Log row when this tick actually changed state
+			# (or when this is the first row in this tick failing on this root
+			# cause).  Recurring failures on already-Degraded rows demote to a
+			# warning so a flood of identically-broken releases — the seeded
+			# scaling benchmark, a misconfigured cluster — does not write one
+			# Error Log row per release per tick.
+			if updated:
+				tick_log.emit(
+					f"helm-error::{release.cluster}::{_bucket_for_error(e)}",
+					title=f"Helm Reconciliation Error: {release.name}",
+					message=str(e),
+					warn_msg=f"Helm reconciliation error on {release.name}: {e}",
+				)
+			else:
+				frappe.logger("kubeport").warning(
+					"Helm reconciliation recurring error on %s: %s",
+					release.name,
+					e,
+				)
 
 
 def _reconcile_stale_helm_operations():
@@ -352,10 +420,15 @@ def _reconcile_service_bundles():
 	for bundle in deployed_bundles:
 		by_cluster[bundle.cluster].append(bundle)
 
+	tick_log = _TickErrorLog()
+
 	for cluster_name, bundles in by_cluster.items():
 		try:
 			api_client = get_k8s_api_client(cluster_name)
 		except Exception as e:
+			# A whole cluster's worth of bundles failed for one root cause —
+			# emit one Error Log per (cluster, error class) instead of one per
+			# bundle.  Status writes still go to every affected row.
 			for bundle in bundles:
 				frappe.db.set_value("Service Bundle", bundle.name, "status", "Degraded")
 				frappe.db.set_value(
@@ -364,10 +437,12 @@ def _reconcile_service_bundles():
 					"status_detail",
 					_truncate_status_detail(f"Reconciliation error: {e}"),
 				)
-				frappe.log_error(
-					title=f"Reconciliation Error: Service Bundle {bundle.name}",
-					message=str(e),
-				)
+			tick_log.emit(
+				f"bundle-cluster-error::{cluster_name}::{_bucket_for_error(e)}",
+				title=f"Service Bundle Reconciliation Error: cluster {cluster_name}",
+				message=f"Could not build K8s client for '{cluster_name}': {e}",
+				warn_msg=f"Service Bundle cluster '{cluster_name}' unreachable: {e}",
+			)
 			continue
 
 		for bundle in bundles:
@@ -381,7 +456,8 @@ def _reconcile_service_bundles():
 					api_client=api_client,
 				)
 				next_status = "Deployed" if is_healthy else "Degraded"
-				if bundle.status != next_status:
+				transitioned = bundle.status != next_status
+				if transitioned:
 					frappe.db.set_value("Service Bundle", bundle.name, "status", next_status)
 				frappe.db.set_value(
 					"Service Bundle",
@@ -390,12 +466,21 @@ def _reconcile_service_bundles():
 					"" if is_healthy else _truncate_status_detail(detail),
 				)
 
-				if not is_healthy:
-					frappe.log_error(
+				if not is_healthy and transitioned:
+					tick_log.emit(
+						f"bundle-drift::{cluster_name}::{next_status}",
 						title=f"State Drift Detected: Service Bundle {bundle.name}",
 						message=detail,
+						warn_msg=f"Service Bundle drift on {bundle.name}: {detail}",
+					)
+				elif not is_healthy:
+					frappe.logger("kubeport").warning(
+						"Service Bundle %s remains unhealthy: %s",
+						bundle.name,
+						detail,
 					)
 			except Exception as e:
+				was_deployed = bundle.status == "Deployed"
 				frappe.db.set_value("Service Bundle", bundle.name, "status", "Degraded")
 				frappe.db.set_value(
 					"Service Bundle",
@@ -403,10 +488,19 @@ def _reconcile_service_bundles():
 					"status_detail",
 					_truncate_status_detail(f"Reconciliation error: {e}"),
 				)
-				frappe.log_error(
-					title=f"Reconciliation Error: Service Bundle {bundle.name}",
-					message=str(e),
-				)
+				if was_deployed:
+					tick_log.emit(
+						f"bundle-error::{cluster_name}::{_bucket_for_error(e)}",
+						title=f"Reconciliation Error: Service Bundle {bundle.name}",
+						message=str(e),
+						warn_msg=f"Service Bundle reconciliation error on {bundle.name}: {e}",
+					)
+				else:
+					frappe.logger("kubeport").warning(
+						"Service Bundle reconciliation recurring error on %s: %s",
+						bundle.name,
+						e,
+					)
 
 
 _SITE_IN_FLIGHT_STATUSES = ("In Progress", "Deleting", "Migrating")

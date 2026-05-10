@@ -159,7 +159,13 @@ def run_benchmark(ns: list[int], repeats: int, results_dir: Path) -> dict:
 		seed.seed_service_bundles(n)
 		seed.seed_frappe_sites(n)
 		samples = []
-		with _mock_cluster_reads():
+		# ``synthetic_rows_active`` flips the Draft seeds to Deployed for the
+		# duration of the timed block and back to Draft on exit (including
+		# abnormal exits).  Pairing it with the seed default makes it
+		# impossible for a benchmark crash to leave unreachable Deployed rows
+		# behind, where the live scheduler would otherwise see them and emit
+		# one Error Log row per release per 5-minute tick.
+		with _mock_cluster_reads(), seed.synthetic_rows_active():
 			# One throw-away tick to warm caches (query plan, autocommit
 			# state) so the first measured tick isn't a JIT outlier.
 			_time_one_tick()

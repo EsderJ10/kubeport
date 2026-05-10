@@ -13,6 +13,7 @@ from kubeport.tasks.reconciliation import (
 	SITE_PROBE_EXISTS,
 	SITE_PROBE_MISSING,
 	SITE_PROBE_UNKNOWN,
+	_bucket_for_error,
 	_finalize_site_status,
 	_job_belongs_to_backup,
 	_job_belongs_to_site,
@@ -26,6 +27,7 @@ from kubeport.tasks.reconciliation import (
 	_run_scheduled_backups,
 	_summarize_unrunnable_pod,
 	_sweep_orphan_site_jobs,
+	_TickErrorLog,
 	reconcile_all_releases,
 	reconcile_site_backups,
 )
@@ -459,6 +461,148 @@ class UnitTestReconciliation(UnitTestCase):
 		mock_publish.assert_not_called()
 		mock_logger.return_value.info.assert_called_once()
 
+	@patch("kubeport.tasks.reconciliation.frappe.logger")
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.helm.status", side_effect=RuntimeError("release: not found"))
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_helm_releases_dedups_log_error_per_cluster_per_tick(
+		self,
+		mock_get_all,
+		_mock_set_value,
+		_mock_helm_status,
+		mock_get_value,
+		_mock_publish,
+		mock_log_error,
+		mock_logger,
+	):
+		"""Many releases failing on the same root cause must not multiply Error Log rows.
+
+		Mirrors the scaling-benchmark seeded-rows scenario (all rows pointing at
+		one unreachable cluster).  Each row still gets its own status writeback,
+		but the Error Log rotation only takes one row per (cluster, error class)
+		per tick — recurring rows demote to ``logger.warning``.
+		"""
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name=f"cluster-a/default/rel-{i:03d}",
+				cluster="cluster-a",
+				namespace="default",
+				release_name=f"rel-{i:03d}",
+				status="Deployed",
+				operation_token=f"tok-{i:03d}",
+			)
+			for i in range(5)
+		]
+
+		def _matching_state(_doctype, docname, *_args, **_kwargs):
+			# docname looks like "cluster-a/default/rel-003"; mirror the row's
+			# operation_token so the token guard inside
+			# _set_helm_reconciliation_state passes for every release.
+			idx = docname.rsplit("-", 1)[-1]
+			return {
+				"operation_token": f"tok-{idx}",
+				"status": "Deployed",
+			}
+
+		mock_get_value.side_effect = _matching_state
+
+		_reconcile_helm_releases()
+
+		# Exactly one Error Log row for the whole batch — not five.
+		mock_log_error.assert_called_once()
+		title = mock_log_error.call_args.kwargs.get("title", "")
+		self.assertIn("Helm Reconciliation Error", title)
+
+		# The remaining four rows demoted to logger.warning so the operator
+		# still has visibility without polluting tabError Log.
+		warning_calls = mock_logger.return_value.warning.call_args_list
+		self.assertGreaterEqual(len(warning_calls), 4)
+
+	@patch("kubeport.tasks.reconciliation.frappe.logger")
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
+	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
+	@patch("kubeport.utils.helm.status", side_effect=RuntimeError("release: not found"))
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_helm_releases_demotes_recurring_failure_to_warning(
+		self,
+		mock_get_all,
+		_mock_set_value,
+		_mock_helm_status,
+		mock_get_value,
+		_mock_publish,
+		mock_log_error,
+		mock_logger,
+	):
+		"""A row already Degraded with the same error must not log_error again.
+
+		``_set_helm_reconciliation_state`` returns ``False`` when status equals
+		next_status and the truncated detail matches; the dedup path then
+		emits a warning instead of writing another Error Log row.
+		"""
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name="bench-a",
+				cluster="cluster-a",
+				namespace="default",
+				release_name="bench-a",
+				status="Degraded",
+				operation_token="tok-1",
+			),
+		]
+		# The row is already Degraded with an identical detail — no transition.
+		mock_get_value.return_value = {
+			"operation_token": "tok-1",
+			"status": "Degraded",
+			"helm_status_detail": ("Helm release is missing from the cluster: release: not found"),
+		}
+
+		_reconcile_helm_releases()
+
+		mock_log_error.assert_not_called()
+		mock_logger.return_value.warning.assert_called()
+
+	@patch("kubeport.tasks.reconciliation.frappe.logger")
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	@patch("kubeport.tasks.reconciliation.frappe.db.set_value")
+	@patch("kubeport.utils.k8s_client.get_k8s_api_client")
+	@patch("kubeport.tasks.reconciliation.frappe.get_all")
+	def test_reconcile_service_bundles_dedups_cluster_unreachable_log_error(
+		self,
+		mock_get_all,
+		mock_get_client,
+		_mock_set_value,
+		mock_log_error,
+		_mock_logger,
+	):
+		"""Many bundles on one unreachable cluster must produce one Error Log.
+
+		Without dedup, a fleet of bundles bound to one broken cluster wrote
+		one Error Log row per bundle per tick.  After dedup the cluster-build
+		failure logs once per (cluster, error class) per tick; per-bundle
+		status writebacks still happen so the UI surface is unchanged.
+		"""
+		mock_get_all.return_value = [
+			SimpleNamespace(
+				name=f"bundle-{i:03d}",
+				cluster="cluster-a",
+				namespace="default",
+				content="{}",
+				status="Deployed",
+			)
+			for i in range(5)
+		]
+		mock_get_client.side_effect = RuntimeError("kubeconfig invalid")
+
+		_reconcile_service_bundles()
+
+		mock_log_error.assert_called_once()
+
+	@patch("kubeport.tasks.reconciliation.frappe.logger")
 	@patch("kubeport.tasks.reconciliation.frappe.publish_realtime")
 	@patch("kubeport.tasks.reconciliation.frappe.db.get_value")
 	@patch("kubeport.tasks.reconciliation._helm_operation_is_stale", return_value=True)
@@ -761,6 +905,58 @@ class UnitTestReconciliation(UnitTestCase):
 			],
 		)
 		mock_log_error.assert_called_once()
+
+
+class UnitTestTickErrorLog(UnitTestCase):
+	"""Focused unit tests for the per-tick log_error dedup helper."""
+
+	@patch("kubeport.tasks.reconciliation.frappe.logger")
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	def test_first_emit_writes_log_error_subsequent_demote_to_warning(
+		self,
+		mock_log_error,
+		mock_logger,
+	):
+		log = _TickErrorLog()
+
+		first = log.emit("bucket-a", title="t", message="m")
+		second = log.emit("bucket-a", title="t", message="m", warn_msg="recurring")
+		third = log.emit("bucket-a", title="t", message="m")
+
+		self.assertTrue(first)
+		self.assertFalse(second)
+		self.assertFalse(third)
+		mock_log_error.assert_called_once_with(title="t", message="m")
+		warn_calls = mock_logger.return_value.warning.call_args_list
+		self.assertEqual(len(warn_calls), 2)
+		# The override warn_msg flows through.
+		self.assertEqual(warn_calls[0].args[1], "recurring")
+
+	@patch("kubeport.tasks.reconciliation.frappe.logger")
+	@patch("kubeport.tasks.reconciliation.frappe.log_error")
+	def test_distinct_buckets_each_get_one_log_error(
+		self,
+		mock_log_error,
+		_mock_logger,
+	):
+		log = _TickErrorLog()
+
+		log.emit("bucket-a", title="t-a", message="m-a")
+		log.emit("bucket-b", title="t-b", message="m-b")
+
+		self.assertEqual(mock_log_error.call_count, 2)
+
+	def test_bucket_for_error_collapses_helm_not_found(self):
+		# Both spellings of the helm "release: not found" message map to the
+		# same dedup bucket so the variants do not multiply Error Log rows.
+		bucket_a = _bucket_for_error(RuntimeError("Error: release: not found"))
+		bucket_b = _bucket_for_error(RuntimeError("HELM RELEASE NOT FOUND"))
+		self.assertEqual(bucket_a, bucket_b)
+		self.assertEqual(bucket_a, "release-not-found")
+
+	def test_bucket_for_error_uses_class_name_for_other_errors(self):
+		self.assertEqual(_bucket_for_error(ValueError("x")), "ValueError")
+		self.assertEqual(_bucket_for_error(KeyError("x")), "KeyError")
 
 
 class UnitTestReconcileFrappeSites(UnitTestCase):

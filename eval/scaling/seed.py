@@ -16,8 +16,10 @@ container.  Not safe to run on a production bench.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
+from collections.abc import Iterator
 from typing import Any
 
 PREFIX = "scalebench-"
@@ -90,6 +92,50 @@ def ensure_parents() -> None:
 	frappe.db.commit()
 
 
+def set_synthetic_status(status: str) -> dict[str, int]:
+	"""Set ``status`` on every synthetic Helm Release / Service Bundle row.
+
+	Used by the benchmark harness to flip seeded rows between ``"Draft"`` (the
+	insert default — invisible to reconciliation) and ``"Deployed"`` (so the
+	timed reconciliation tick has work to do).  A SQL-level update keeps the
+	flip cheap on large N and skips DocType ``validate`` hooks that would
+	probe the placeholder cluster.
+
+	Returns a per-DocType count of touched rows so callers can log the flip.
+	"""
+	import frappe
+
+	counts: dict[str, int] = {}
+	for doctype in ("Helm Release", "Service Bundle"):
+		rows = frappe.get_all(doctype, filters={"name": ("like", f"%{PREFIX}%")}, pluck="name")
+		if rows:
+			frappe.db.set_value(doctype, {"name": ("in", rows)}, "status", status)
+		counts[doctype] = len(rows)
+	frappe.db.commit()
+	return counts
+
+
+@contextlib.contextmanager
+def synthetic_rows_active(status: str = "Deployed") -> Iterator[None]:
+	"""Flip seeded rows to ``status`` for the duration of the block.
+
+	On entry, sets every synthetic Helm Release / Service Bundle to ``status``
+	(default ``"Deployed"``).  On exit — including the abnormal exit paths a
+	scaling benchmark cares about (KeyboardInterrupt, OOM, exception inside
+	the timed loop) — flips them back to ``"Draft"`` so the live Frappe
+	scheduler never observes seeded rows as ``Deployed``.
+
+	Pair with :func:`seed_helm_releases` and :func:`seed_service_bundles`,
+	whose default status is ``"Draft"``: the rows are inert outside this
+	context and reconciliation-visible only inside it.
+	"""
+	set_synthetic_status(status)
+	try:
+		yield
+	finally:
+		set_synthetic_status("Draft")
+
+
 def cleanup_synthetic_rows() -> dict[str, int]:
 	"""Delete every synthetic row produced by previous seed calls.
 
@@ -119,7 +165,7 @@ def cleanup_synthetic_rows() -> dict[str, int]:
 	return counts
 
 
-def _helm_release_row(idx: int, now: str) -> tuple[Any, ...]:
+def _helm_release_row(idx: int, now: str, status: str) -> tuple[Any, ...]:
 	release_name = f"{PREFIX}rel-{idx:06d}"
 	docname = f"{CLUSTER_NAME}/{NAMESPACE}/{release_name}"
 	return (
@@ -133,7 +179,7 @@ def _helm_release_row(idx: int, now: str) -> tuple[Any, ...]:
 		NAMESPACE,
 		HELM_CHART_DOCNAME,
 		HELM_CHART_VERSION,
-		"Deployed",
+		status,
 		_SYNTHETIC_SPEC_HASH,
 		_SYNTHETIC_SPEC_HASH,
 		HELM_CHART_VERSION,
@@ -141,7 +187,7 @@ def _helm_release_row(idx: int, now: str) -> tuple[Any, ...]:
 	)
 
 
-def _service_bundle_row(idx: int, now: str) -> tuple[Any, ...]:
+def _service_bundle_row(idx: int, now: str, status: str) -> tuple[Any, ...]:
 	bundle_name = f"{PREFIX}bundle-{idx:06d}"
 	return (
 		bundle_name,
@@ -152,7 +198,7 @@ def _service_bundle_row(idx: int, now: str) -> tuple[Any, ...]:
 		bundle_name,
 		CLUSTER_NAME,
 		NAMESPACE,
-		"Deployed",
+		status,
 		_DEFAULT_SERVICE_BUNDLE_CONTENT,
 		f"scalebench-token-{idx:06d}",
 	)
@@ -176,14 +222,22 @@ def _frappe_site_row(idx: int, release_docname: str, now: str) -> tuple[Any, ...
 	)
 
 
-def seed_helm_releases(n: int) -> int:
-	"""Bulk-insert ``n`` synthetic Helm Release rows in ``Deployed`` state."""
+def seed_helm_releases(n: int, status: str = "Draft") -> int:
+	"""Bulk-insert ``n`` synthetic Helm Release rows.
+
+	``status`` defaults to ``"Draft"`` so that a benchmark crash between seed
+	and the timed block leaves rows in a state reconciliation skips
+	(``_HEALTHY_RELEASE_STATUSES`` only iterates ``Deployed``/``Degraded``).
+	The benchmark harness flips them to ``"Deployed"`` inside the
+	``_mock_cluster_reads`` context to measure the reconciliation hot path
+	without leaking unreachable ``Deployed`` rows into the live scheduler.
+	"""
 	import frappe
 
 	if n <= 0:
 		return 0
 	now = _utc_now_str()
-	rows = [_helm_release_row(i, now) for i in range(n)]
+	rows = [_helm_release_row(i, now, status) for i in range(n)]
 	frappe.db.bulk_insert(
 		"Helm Release",
 		fields=[
@@ -210,14 +264,19 @@ def seed_helm_releases(n: int) -> int:
 	return n
 
 
-def seed_service_bundles(n: int) -> int:
-	"""Bulk-insert ``n`` synthetic Service Bundle rows in ``Deployed`` state."""
+def seed_service_bundles(n: int, status: str = "Draft") -> int:
+	"""Bulk-insert ``n`` synthetic Service Bundle rows.
+
+	``status`` defaults to ``"Draft"``; see :func:`seed_helm_releases` for the
+	rationale.  Reconciliation only iterates ``Deployed``/``Degraded`` bundles
+	(see ``_reconcile_service_bundles``), so Draft seeded rows are inert.
+	"""
 	import frappe
 
 	if n <= 0:
 		return 0
 	now = _utc_now_str()
-	rows = [_service_bundle_row(i, now) for i in range(n)]
+	rows = [_service_bundle_row(i, now, status) for i in range(n)]
 	frappe.db.bulk_insert(
 		"Service Bundle",
 		fields=[
