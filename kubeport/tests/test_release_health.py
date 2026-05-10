@@ -312,6 +312,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 	def test_check_ingress_ready_when_load_balancer_has_address(self):
 		obj = SimpleNamespace(
 			metadata=SimpleNamespace(name="frappe"),
+			spec=SimpleNamespace(rules=[SimpleNamespace(host="erp.example.com")]),
 			status=SimpleNamespace(
 				load_balancer=SimpleNamespace(ingress=[SimpleNamespace(hostname="frappe.example.com")])
 			),
@@ -319,6 +320,7 @@ class UnitTestReleaseHealth(UnitTestCase):
 		health = _check_ingress(obj, "tfg")
 		self.assertTrue(health.ready)
 		self.assertEqual(health.addresses, ["frappe.example.com"])
+		self.assertEqual(health.hosts, ["erp.example.com"])
 
 	def test_attach_warning_events_appends_recent_warning_summary(self):
 		core_v1 = SimpleNamespace(

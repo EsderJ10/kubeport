@@ -283,7 +283,7 @@ function kubeport_render_ingress_suggestions(frm, payload) {
     const suggestion_bits = [];
 
     if (payload.suggested_hostname) {
-        suggestion_bits.push(__('Hostname: {0}', [payload.suggested_hostname]));
+        suggestion_bits.push(__('Suggested hostname: {0}', [payload.suggested_hostname]));
     }
     if (payload.default_ingress_class) {
         suggestion_bits.push(__('Class: {0}', [payload.default_ingress_class]));
@@ -742,7 +742,8 @@ function kubeport_render_reachability(frm, rows) {
     });
     if (ready_row) {
         const scheme = frm.doc.ingress_cluster_issuer ? 'https' : 'http';
-        const url = `${scheme}://${frm.doc.ingress_hostname}`;
+        const host = kubeport_effective_ingress_host(frm, ready_row);
+        const url = `${scheme}://${host}`;
         return `
             <div style="margin-bottom: 8px; padding: 8px;
                         border: 1px solid var(--border-color); border-radius: 4px;">
@@ -767,6 +768,11 @@ function kubeport_render_reachability(frm, rows) {
 
 function kubeport_escape_attr(value) {
     return frappe.utils.escape_html(value == null ? '' : String(value)).replace(/"/g, '&quot;');
+}
+
+function kubeport_effective_ingress_host(frm, ingress_row) {
+    const hosts = Array.isArray(ingress_row.hosts) ? ingress_row.hosts : [];
+    return hosts[0] || frm.doc.ingress_hostname;
 }
 
 function kubeport_render_health_actions(row) {

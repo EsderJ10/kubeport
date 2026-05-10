@@ -66,6 +66,7 @@ class ResourceHealth:
 	message: str
 	pod_count: int = 0
 	addresses: list[str] = field(default_factory=list)
+	hosts: list[str] = field(default_factory=list)
 
 	def to_dict(self) -> dict[str, Any]:
 		return {
@@ -77,6 +78,7 @@ class ResourceHealth:
 			"message": self.message,
 			"pod_count": self.pod_count,
 			"addresses": self.addresses,
+			"hosts": self.hosts,
 		}
 
 
@@ -537,6 +539,7 @@ def _check_service(
 def _check_ingress(obj: Any, namespace: str) -> ResourceHealth:
 	name = _meta_name(obj)
 	ingress = _load_balancer_ingress(getattr(obj, "status", None))
+	hosts = _ingress_rule_hosts(obj)
 	if ingress:
 		return ResourceHealth(
 			"Ingress",
@@ -546,6 +549,7 @@ def _check_ingress(obj: Any, namespace: str) -> ResourceHealth:
 			"",
 			f"load balancer ready: {', '.join(ingress)}",
 			addresses=ingress,
+			hosts=hosts,
 		)
 
 	return ResourceHealth(
@@ -555,6 +559,7 @@ def _check_ingress(obj: Any, namespace: str) -> ResourceHealth:
 		False,
 		"load balancer pending",
 		"Ingress has no load-balancer ingress address.",
+		hosts=hosts,
 	)
 
 
@@ -640,6 +645,17 @@ def _load_balancer_ingress(status_obj: Any) -> list[str]:
 	return addresses
 
 
+def _ingress_rule_hosts(obj: Any) -> list[str]:
+	spec = getattr(obj, "spec", None)
+	rules = getattr(spec, "rules", None) or []
+	hosts: list[str] = []
+	for rule in rules:
+		host = getattr(rule, "host", None)
+		if host:
+			hosts.append(str(host))
+	return hosts
+
+
 def _attach_warning_events(
 	health: ResourceHealth,
 	core_v1: "client.CoreV1Api",
@@ -662,6 +678,7 @@ def _attach_warning_events(
 		message,
 		health.pod_count,
 		health.addresses,
+		health.hosts,
 	)
 
 

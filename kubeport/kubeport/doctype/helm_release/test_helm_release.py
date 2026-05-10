@@ -402,9 +402,28 @@ class UnitTestHelmRelease(UnitTestCase):
 		parsed = yaml.safe_load(out)
 		self.assertNotIn("className", parsed["ingress"])
 
-	def test_render_ingress_values_preserves_user_supplied_ingress(self):
+	def test_render_ingress_values_replaces_disabled_chart_default_ingress(self):
 		chart_doc = SimpleNamespace(chart_name="erpnext")
 		raw = "ingress:\n  enabled: false\n"
+
+		out = render_ingress_values(
+			raw,
+			chart_doc,
+			ingress_enabled=1,
+			hostname="erp.example.com",
+			class_name="nginx",
+			cluster_issuer="letsencrypt-prod",
+			release_name="bench-a",
+		)
+
+		parsed = yaml.safe_load(out)
+		self.assertTrue(parsed["ingress"]["enabled"])
+		self.assertEqual(parsed["ingress"]["hosts"][0]["host"], "erp.example.com")
+		self.assertEqual(parsed["ingress"]["className"], "nginx")
+
+	def test_render_ingress_values_preserves_enabled_user_supplied_ingress(self):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		raw = "ingress:\n  enabled: true\n  hosts:\n    - host: custom.example.com\n"
 
 		out = render_ingress_values(
 			raw,

@@ -595,10 +595,10 @@ def render_ingress_values(
 ) -> str | None:
 	"""Render Frappe-chart ingress values from structured Helm Release fields.
 
-	No-op for non-Frappe charts and when ingress is disabled.  If the user
-	already wrote any ``ingress`` block in the raw values YAML it wins — that
-	provides an escape hatch for advanced configurations (multi-host SAN,
-	custom annotations, alternate path types).
+	No-op for non-Frappe charts and when ingress is disabled.  User-supplied
+	enabled ``ingress`` blocks still win as the advanced escape hatch, but the
+	common chart-default block ``ingress.enabled=false`` is replaced so the
+	structured form fields can actually enable ingress after loading defaults.
 	"""
 	if not is_frappe_site_chart(chart_doc) or not ingress_enabled:
 		return values_yaml
@@ -607,7 +607,7 @@ def render_ingress_values(
 	if not isinstance(values, dict):
 		frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
 
-	if values.get("ingress"):
+	if _has_enabled_ingress_override(values.get("ingress")):
 		return values_yaml
 
 	hostname = (hostname or "").strip()
@@ -646,6 +646,12 @@ def render_ingress_values(
 def is_frappe_site_chart(chart_doc: Any) -> bool:
 	chart_name = _chart_value(chart_doc, "chart_name") or _chart_value(chart_doc, "name")
 	return "erpnext" in chart_name.lower() or "frappe" in chart_name.lower()
+
+
+def _has_enabled_ingress_override(ingress_value: Any) -> bool:
+	if not isinstance(ingress_value, dict):
+		return bool(ingress_value)
+	return bool(ingress_value.get("enabled"))
 
 
 def _release_uses_frappe_site_chart(release_doc: Any) -> bool:
