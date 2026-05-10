@@ -261,7 +261,7 @@ class HelmRelease(Document):
 			)
 			return {
 				"rows": [],
-				"error": str(e),
+				"error": _format_observed_state_error(e),
 			}
 
 	@frappe.whitelist()
@@ -280,15 +280,23 @@ class HelmRelease(Document):
 		chart_doc = frappe.get_doc("Helm Chart", self.chart)
 
 		# Use cached default values if available
-		if chart_doc.default_values:
-			return chart_doc.default_values
-
-		# Fall back to a live fetch
-		from kubeport.utils.helm import show_values
-
-		chart_ref = chart_doc.get_chart_reference()
 		version = self.chart_version or chart_doc.latest_version
-		return show_values(chart_ref, version=version)
+		if chart_doc.default_values and str(version or "") == str(chart_doc.latest_version or ""):
+			values = chart_doc.default_values
+		else:
+			# Fall back to a live fetch
+			from kubeport.utils.helm import show_values
+
+			chart_ref = chart_doc.get_chart_reference()
+			values = show_values(chart_ref, version=version)
+
+		return prepare_release_values(
+			values,
+			chart_doc,
+			cluster_name=self.cluster,
+			site_image=getattr(self, "site_image", None),
+			allow_site_image_override=True,
+		) or ""
 
 	@frappe.whitelist()
 	def get_release_history(self) -> dict[str, Any]:
@@ -313,7 +321,7 @@ class HelmRelease(Document):
 			)
 			return {
 				"rows": [],
-				"error": str(e),
+				"error": _format_observed_state_error(e),
 			}
 
 	def _resolve_chart_version(self) -> str:
@@ -384,6 +392,7 @@ def render_site_image_values(
 	values_yaml: str | None,
 	site_image: str | None,
 	default_storage_class: str | None = None,
+	allow_image_override: bool = False,
 ) -> str | None:
 	"""Return Helm values YAML with the selected catalog image applied.
 
@@ -400,7 +409,8 @@ def render_site_image_values(
 	if not isinstance(values, dict):
 		frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
 
-	_validate_site_image_value_conflicts(values, site_image_doc)
+	if not allow_image_override:
+		_validate_site_image_value_conflicts(values, site_image_doc)
 	rendered = dict(values)
 	image_values = dict(rendered.get("image") or {})
 	image_values.update(
@@ -429,6 +439,77 @@ def render_site_image_values(
 			rendered["persistence"] = persistence
 
 	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
+
+
+def prepare_release_values(
+	values_yaml: str | None,
+	chart_doc: Any,
+	cluster_name: str | None,
+	site_image: str | None = None,
+	allow_site_image_override: bool = False,
+) -> str | None:
+	"""Return values YAML ready for Helm for a Kubeport Helm Release.
+
+	Raw chart defaults are not always deployable.  The ERPNext/Frappe chart
+	requires a worker StorageClass, so Kubeport derives that value from the
+	target cluster before Helm template rendering.  Site-image rendering remains
+	optional desired state on top of those chart-specific starter values.
+	"""
+	values_yaml = render_chart_starter_values(values_yaml, chart_doc, cluster_name)
+	return render_site_image_values(
+		values_yaml,
+		site_image,
+		allow_image_override=allow_site_image_override,
+	)
+
+
+def render_chart_starter_values(
+	values_yaml: str | None,
+	chart_doc: Any,
+	cluster_name: str | None,
+) -> str | None:
+	if not is_frappe_site_chart(chart_doc):
+		return values_yaml
+
+	values = _normalize_values_for_hash(values_yaml)
+	if not isinstance(values, dict):
+		frappe.throw("Values must be a YAML mapping (key-value pairs), not a list or scalar.")
+
+	rendered = dict(values)
+	persistence = dict(rendered.get("persistence") or {})
+	worker = dict(persistence.get("worker") or {})
+	if not _worker_storage_class_is_required(worker) or worker.get("storageClass"):
+		return values_yaml
+
+	if not cluster_name:
+		frappe.throw("Select a target cluster before loading deployable values for this chart.")
+
+	from kubeport.utils.discovery import discover_default_storage_class
+
+	default_storage_class = discover_default_storage_class(str(cluster_name))
+	if not default_storage_class:
+		frappe.throw(
+			f"Cluster '{cluster_name}' has no default StorageClass annotated. "
+			"Either annotate one with "
+			"'storageclass.kubernetes.io/is-default-class: \"true\"', or set "
+			"'persistence.worker.storageClass' in the Helm Release values."
+		)
+
+	worker["storageClass"] = default_storage_class
+	if (
+		default_storage_class in _RWO_ONLY_STORAGE_CLASSES
+		and _should_force_rwo_access_modes(worker.get("accessModes"))
+	):
+		worker["accessModes"] = ["ReadWriteOnce"]
+
+	persistence["worker"] = worker
+	rendered["persistence"] = persistence
+	return yaml.safe_dump(rendered, default_flow_style=False, sort_keys=False)
+
+
+def is_frappe_site_chart(chart_doc: Any) -> bool:
+	chart_name = _chart_value(chart_doc, "chart_name") or _chart_value(chart_doc, "name")
+	return "erpnext" in chart_name.lower() or "frappe" in chart_name.lower()
 
 
 def _normalize_values_for_hash(values_yaml: str | None) -> Any:
@@ -462,6 +543,26 @@ def _image_tag_with_digest(image_tag: str | None, image_digest: str | None) -> s
 	if "@" in tag:
 		return tag
 	return f"{tag}@{digest}"
+
+
+def _chart_value(chart_doc: Any, fieldname: str) -> str:
+	if isinstance(chart_doc, dict):
+		return str(chart_doc.get(fieldname) or "")
+	return str(getattr(chart_doc, fieldname, "") or "")
+
+
+def _worker_storage_class_is_required(worker: dict) -> bool:
+	if worker.get("existingClaim"):
+		return False
+	return worker.get("enabled") is not False
+
+
+def _should_force_rwo_access_modes(access_modes: Any) -> bool:
+	if access_modes in (None, "", []):
+		return True
+	if isinstance(access_modes, list):
+		return [mode for mode in access_modes if isinstance(mode, str)] == ["ReadWriteMany"]
+	return False
 
 
 def _get_site_image_for_release(site_image: str | None) -> dict[str, str] | None:
@@ -555,6 +656,14 @@ def _site_value(site: Any, fieldname: str) -> Any:
 
 def _format_blocking_sites(sites: list[dict[str, str]]) -> str:
 	return ", ".join(f"{site.get('site_name') or site.get('name')} ({site.get('status')})" for site in sites)
+
+
+def _format_observed_state_error(error: Exception) -> str:
+	from kubeport.utils import helm
+
+	if helm.is_release_not_found_error(error):
+		return "No Helm release exists yet for this row. Deploy the release successfully before reading live state."
+	return str(error)
 
 
 def _iter_storage_configs(

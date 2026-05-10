@@ -9,7 +9,6 @@ from frappe.tests import UnitTestCase
 from kubeport.kubeport.doctype.helm_release.helm_release import calculate_release_spec_hash
 from kubeport.tasks.helm_tasks import (
 	_group_chart_inventory,
-	_resolve_default_storage_class,
 	_sync_charts,
 	install_or_upgrade_release,
 	rollback_release,
@@ -287,36 +286,52 @@ class UnitTestHelmTasks(UnitTestCase):
 		self.assertEqual(fields["desired_spec_hash"], expected_hash)
 		self.assertEqual(fields["last_applied_spec_hash"], expected_hash)
 
-	@patch("kubeport.utils.discovery.discover_default_storage_class")
-	def test_resolve_default_storage_class_skips_discovery_when_user_supplied_storage_class(
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
+	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")
+	@patch("kubeport.tasks.helm_tasks._set_helm_release_fields")
+	@patch("kubeport.tasks.helm_tasks._safe_walk", return_value=([], None))
+	@patch("kubeport.tasks.helm_tasks.helm.install_or_upgrade")
+	@patch("kubeport.tasks.helm_tasks.frappe.get_doc")
+	@patch("kubeport.tasks.helm_tasks.frappe.db.get_value")
+	def test_install_or_upgrade_release_injects_site_chart_storage_without_site_image(
 		self,
+		mock_get_value,
+		mock_get_doc,
+		mock_install_or_upgrade,
+		_mock_safe_walk,
+		_mock_set_helm_release_fields,
+		_mock_publish_realtime,
 		mock_discover_default_storage_class,
 	):
-		default_storage_class = _resolve_default_storage_class(
+		mock_get_value.side_effect = [
+			{"operation_token": "tok-1", "status": "In Progress"},
 			{
+				"release_name": "bench-a",
+				"chart": "ERPNext",
+				"chart_version": "8.0.41",
+				"namespace": "tfg",
 				"cluster": "cluster-a",
-				"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-				"values": "persistence:\n  worker:\n    storageClass: fast-ssd\n",
-			}
+				"values": "persistence:\n  worker:\n    accessModes:\n    - ReadWriteMany\n",
+				"site_image": "",
+			},
+			{"operation_token": "tok-1", "status": "In Progress"},
+		]
+		mock_get_doc.return_value = SimpleNamespace(
+			chart_name="erpnext",
+			latest_version="8.0.41",
+			get_chart_reference=lambda: "repo/erpnext",
 		)
+		mock_install_or_upgrade.return_value = {
+			"version": 3,
+			"info": {"status": "deployed"},
+		}
 
-		self.assertIsNone(default_storage_class)
-		mock_discover_default_storage_class.assert_not_called()
+		install_or_upgrade_release("cluster-a/tfg/bench-a", "tok-1")
 
-	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value=None)
-	def test_resolve_default_storage_class_raises_when_no_default_and_user_omitted_storage_class(
-		self,
-		mock_discover_default_storage_class,
-	):
-		with self.assertRaisesRegex(RuntimeError, "no default StorageClass"):
-			_resolve_default_storage_class(
-				{
-					"cluster": "cluster-a",
-					"site_image": "ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
-					"values": "",
-				}
-			)
-
+		values_yaml = mock_install_or_upgrade.call_args.kwargs["values_yaml"]
+		self.assertIn("storageClass: local-path", values_yaml)
+		self.assertIn("- ReadWriteOnce", values_yaml)
+		self.assertNotIn("ReadWriteMany", values_yaml)
 		mock_discover_default_storage_class.assert_called_once_with("cluster-a")
 
 	@patch("kubeport.tasks.helm_tasks.frappe.publish_realtime")

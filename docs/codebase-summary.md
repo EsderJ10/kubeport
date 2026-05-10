@@ -103,6 +103,7 @@ Stores desired state for a Helm-managed workload deployment.
 - Identity is scoped to `cluster/namespace/release_name`, matching real Helm release scope.
 - Validates YAML values content.
 - Rejects unsafe `local-path` StorageClass plus `ReadWriteMany` access mode combinations.
+- Prepares deployable starter values for ERPNext/Frappe charts by injecting the cluster default worker StorageClass, with `local-path` access modes adjusted to `ReadWriteOnce`.
 - Can link to a `Kubeport Site Image` for official ERPNext/Frappe bench charts. The selected catalog image is desired state and is rendered into Helm values during deploy as `image.repository`, digest-aware `image.tag`, and `image.pullPolicy=IfNotPresent`.
 - Blocks conflicting manual `values.image.*` overrides while a Site Image is selected so image intent stays unambiguous. The desired spec hash includes the selected image row and digest for pending-change detection.
 - Queues deploy (`helm upgrade --install`), rollback, and uninstall through background jobs.

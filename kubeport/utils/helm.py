@@ -387,6 +387,11 @@ def list_releases(
 	return _parse_json_or_empty(output)
 
 
+def is_release_not_found_error(error: object) -> bool:
+	message = str(error).lower()
+	return "release: not found" in message or "release not found" in message
+
+
 # ---------------------------------------------------------------------------
 # Kubeconfig Context Manager
 # ---------------------------------------------------------------------------

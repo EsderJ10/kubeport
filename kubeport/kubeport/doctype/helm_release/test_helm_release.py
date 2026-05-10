@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Los Favs and Contributors
 # See license.txt
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from frappe.tests import IntegrationTestCase, UnitTestCase
@@ -11,6 +12,8 @@ from kubeport.kubeport.doctype.helm_release.helm_release import (
 	_validate_storage_access_modes,
 	build_release_docname,
 	calculate_release_spec_hash,
+	prepare_release_values,
+	render_chart_starter_values,
 	render_site_image_values,
 )
 
@@ -212,6 +215,98 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		self.assertIn("storageClass: fast-ssd", values_yaml)
 		self.assertNotIn("local-path", values_yaml)
+
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
+	def test_render_chart_starter_values_injects_storage_for_erpnext_without_site_image(
+		self,
+		mock_discover_default_storage_class,
+	):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		values_yaml = render_chart_starter_values(
+			"persistence:\n  worker:\n    enabled: true\n    accessModes:\n    - ReadWriteMany\n",
+			chart_doc,
+			cluster_name="cluster-a",
+		)
+
+		self.assertIn("storageClass: local-path", values_yaml)
+		self.assertIn("- ReadWriteOnce", values_yaml)
+		self.assertNotIn("ReadWriteMany", values_yaml)
+		mock_discover_default_storage_class.assert_called_once_with("cluster-a")
+
+	@patch("kubeport.utils.discovery.discover_default_storage_class")
+	def test_render_chart_starter_values_leaves_non_site_charts_raw(self, mock_discover_default_storage_class):
+		chart_doc = SimpleNamespace(chart_name="nginx")
+
+		values_yaml = render_chart_starter_values(
+			"service:\n  type: ClusterIP\n",
+			chart_doc,
+			cluster_name="cluster-a",
+		)
+
+		self.assertEqual(values_yaml, "service:\n  type: ClusterIP\n")
+		mock_discover_default_storage_class.assert_not_called()
+
+	@patch("kubeport.utils.discovery.discover_default_storage_class")
+	def test_render_chart_starter_values_keeps_user_supplied_storage_class(
+		self,
+		mock_discover_default_storage_class,
+	):
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+		raw_values = "persistence:\n  worker:\n    storageClass: fast-ssd\n"
+
+		values_yaml = render_chart_starter_values(raw_values, chart_doc, cluster_name="cluster-a")
+
+		self.assertEqual(values_yaml, raw_values)
+		mock_discover_default_storage_class.assert_not_called()
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	def test_render_chart_starter_values_requires_cluster_for_site_chart(self, mock_throw):
+		mock_throw.side_effect = RuntimeError("Select a target cluster")
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		with self.assertRaisesRegex(RuntimeError, "target cluster"):
+			render_chart_starter_values("", chart_doc, cluster_name="")
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.throw")
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value=None)
+	def test_render_chart_starter_values_requires_default_storage_class(
+		self,
+		_mock_discover_default_storage_class,
+		mock_throw,
+	):
+		mock_throw.side_effect = RuntimeError("no default StorageClass")
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		with self.assertRaisesRegex(RuntimeError, "default StorageClass"):
+			render_chart_starter_values("", chart_doc, cluster_name="cluster-a")
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
+	@patch("kubeport.utils.discovery.discover_default_storage_class", return_value="local-path")
+	def test_prepare_release_values_can_override_chart_default_image_for_starter_values(
+		self,
+		_mock_discover_default_storage_class,
+		mock_get_value,
+	):
+		mock_get_value.return_value = {
+			"image_repository": "ghcr.io/esderj10/kubeport-site",
+			"image_tag": "v1.0.0-frappe16",
+			"image_digest": "",
+			"status": "Active",
+		}
+		chart_doc = SimpleNamespace(chart_name="erpnext")
+
+		values_yaml = prepare_release_values(
+			"image:\n  repository: frappe/erpnext\n  tag: v16.17.0\n",
+			chart_doc,
+			cluster_name="cluster-a",
+			site_image="ghcr.io/esderj10/kubeport-site:v1.0.0-frappe16",
+			allow_site_image_override=True,
+		)
+
+		self.assertIn("repository: ghcr.io/esderj10/kubeport-site", values_yaml)
+		self.assertIn("tag: v1.0.0-frappe16", values_yaml)
+		self.assertIn("storageClass: local-path", values_yaml)
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.db.get_value")
 	def test_render_site_image_values_omits_storage_class_when_no_default(
@@ -557,6 +652,62 @@ class UnitTestHelmRelease(UnitTestCase):
 
 		self.assertEqual(result["rows"], [])
 		self.assertIn("helm get manifest failed", result["error"])
+
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.logger")
+	@patch(
+		"kubeport.utils.release_health.walk",
+		side_effect=RuntimeError("Helm command failed: Error: release: not found"),
+	)
+	def test_get_release_health_formats_missing_release_as_empty_state(self, _mock_walk, _mock_logger):
+		doc = object.__new__(HelmRelease)
+		doc.name = "cluster-a/default/bench-a"
+
+		result = doc.get_release_health()
+
+		self.assertEqual(result["rows"], [])
+		self.assertIn("No Helm release exists yet", result["error"])
+
+	@patch("kubeport.utils.helm.show_values")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.get_doc")
+	def test_load_defaults_uses_cached_values_for_latest_chart_version(self, mock_get_doc, mock_show_values):
+		chart_doc = SimpleNamespace(
+			chart_name="nginx",
+			default_values="service:\n  type: ClusterIP\n",
+			latest_version="1.2.3",
+			get_chart_reference=lambda: "repo/nginx",
+		)
+		mock_get_doc.return_value = chart_doc
+		doc = object.__new__(HelmRelease)
+		doc.chart = "repo/nginx"
+		doc.chart_version = "1.2.3"
+		doc.cluster = "cluster-a"
+		doc.site_image = ""
+
+		values_yaml = doc.load_defaults()
+
+		self.assertEqual(values_yaml, "service:\n  type: ClusterIP\n")
+		mock_show_values.assert_not_called()
+
+	@patch("kubeport.utils.helm.show_values", return_value="replicaCount: 1\n")
+	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.get_doc")
+	def test_load_defaults_fetches_values_for_non_latest_chart_version(self, mock_get_doc, mock_show_values):
+		chart_doc = SimpleNamespace(
+			chart_name="nginx",
+			default_values="replicaCount: 2\n",
+			latest_version="2.0.0",
+			get_chart_reference=lambda: "repo/nginx",
+		)
+		mock_get_doc.return_value = chart_doc
+		doc = object.__new__(HelmRelease)
+		doc.chart = "repo/nginx"
+		doc.chart_version = "1.0.0"
+		doc.cluster = "cluster-a"
+		doc.site_image = ""
+
+		values_yaml = doc.load_defaults()
+
+		self.assertEqual(values_yaml, "replicaCount: 1\n")
+		mock_show_values.assert_called_once_with("repo/nginx", version="1.0.0")
 
 	@patch("kubeport.kubeport.doctype.helm_release.helm_release.frappe.logger")
 	@patch("kubeport.utils.helm.history")
