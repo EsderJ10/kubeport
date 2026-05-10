@@ -170,9 +170,112 @@ timeouts are set generously above expected medians to absorb image
 pulls and pod scheduling delays; tighten them for CI use. A fresh
 end-to-end run adds another ~5-10 min for the ERPNext Helm deploy.
 
+## Scaling characterisation (`eval/scaling/`)
+
+A separate, hermetic harness that characterises how the periodic
+reconciliation tick scales with N persisted rows.  It does **not**
+contact a real cluster: cluster-touching helpers are monkey-patched to
+deterministic stubs so the measured wall-clock reflects framework + DB
+cost only.
+
+### Layout
+
+| Path | Purpose |
+|---|---|
+| `eval/scaling/host_driver.py` | Host-side driver. Validates the dev container, copies the in-container scripts, captures JSON, optionally invokes the plot. |
+| `eval/scaling/_inproc.py` | In-container driver. Seeds rows, mocks cluster reads, runs `reconcile_all_releases()` repeatedly, fits regression. |
+| `eval/scaling/seed.py` | Bulk-insert helpers (`frappe.db.bulk_insert`) and `cleanup_synthetic_rows`. All synthetic rows share the prefix `scalebench-`. |
+| `eval/scaling/extract_latencies.py` | Walks `eval/results/*.json` reports and extracts helm-touching phase durations as latency samples. |
+| `eval/scaling/plot.py` | Renders `scaling-tick-latency.png` on a log-log scale with the regression overlay. |
+
+### Running
+
+```bash
+make eval-scaling                              # default N=1,10,100,1000, 5 repeats
+EVAL_SCALING_NS=1,10,100 make eval-scaling     # smaller sweep
+make eval-scaling-plot                         # re-render PNG from the latest scaling-*.json
+```
+
+Each run writes a new `eval/results/scaling-<utc-timestamp>.json` and
+either writes or refreshes `eval/results/scaling-tick-latency.png`.
+
+### What the JSON contains
+
+```json
+{
+  "schema_version": 1,
+  "context":  { "ns": [1, 10, 100, 1000], "repeats": 5, "results_dir": "..." },
+  "sweep":    { "pre_run":  {"Helm Release": 0, ...},
+                "post_run": {"Helm Release": 0, ...} },
+  "tick_latency": [
+    { "n": 1,    "tick_seconds": [...], "median_seconds": 0.018, "max_seconds": 0.022, ... },
+    { "n": 10,   ... },
+    { "n": 100,  ... },
+    { "n": 1000, ... }
+  ],
+  "regression": { "slope": 0.97, "intercept": -3.91, "shape": "linear" },
+  "helm_subprocess_latency": {
+    "samples":  [ { "source": "<utc>.json", "phase": "deploy_release",
+                    "duration_seconds": 12.3, "helm_call": true }, ... ],
+    "summary": { "sample_count": N, "median_seconds": ..., "p95_seconds": ... }
+  }
+}
+```
+
+`regression.shape` is one of `constant`, `sublinear`, `linear`,
+`superlinear`, derived from a stdlib least-squares fit of
+`log(median_tick_latency) ~ slope * log(N) + intercept` and bucketed by
+slope (see `_inproc._regression`).
+
+### Seeding model and what the numbers mean
+
+Per N, `seed.py` bulk-inserts:
+
+- N **`Helm Release`** rows in `Deployed` — iterated by
+  `_reconcile_helm_releases`. The mock returns a healthy `helm.status`
+  and an empty `walk` result, so each row becomes one DB read + one
+  no-op classification per tick.
+- N **`Service Bundle`** rows in `Deployed` — iterated by
+  `_reconcile_service_bundles`. The mock returns `(True, "")` from
+  `check_resources_exist`, so each row becomes one DB read per tick.
+- N **`Frappe Site`** rows in `Active` — *not* iterated by
+  `_reconcile_frappe_sites` (which filters on `In Progress`,
+  `Deleting`, `Migrating`). These rows characterise the cost floor of
+  carrying a large healthy backlog: filter time only, no per-row work.
+
+The TODO-07 spec specifies the `Active` shape; if a future run wants to
+characterise per-row in-flight cost, extend `seed_frappe_sites` with an
+`in_flight=True` flag.
+
+### Helm-subprocess latency
+
+The Kubeport helm wrapper at `kubeport/utils/helm.py` does not emit
+per-call structured timing today (that is TODO-14). Until then,
+`extract_latencies.py` treats per-phase wall-clocks recorded by the
+TODO-04 harness (`setup_helm_repo`, `deploy_release`) as proxy samples
+for helm-subprocess latency. Samples accumulate as more harness reports
+land in `eval/results/`. The helm-call rows in `samples` are the ones
+counted in `summary` (verify_chart is reference-only and excluded from
+percentiles).
+
+### PNG rendering
+
+matplotlib is not installed in the dev container or on the host. The
+plot script prints a copyable install hint and exits 0 when
+matplotlib is unavailable so `make eval-scaling` does not regress to
+red — the JSON is the acceptance artefact. To install it:
+
+```bash
+docker exec tfg_devcontainer-frappe-1 \
+    /workspace/development/bench-16/env/bin/pip install matplotlib
+make eval-scaling-plot
+```
+
 ## Cross-references
 
 - Invariants the harness exercises: AGENTS.md §Design Invariants.
 - Per-DocType state machines: `docs/control-plane-state.md`.
 - Extended fault scenarios on top of this harness:
   upcoming TODO-05 in `TODO.md`.
+- Per-call helm timing logger that would replace the proxy in
+  `extract_latencies.py`: TODO-14 in `TODO.md`.
