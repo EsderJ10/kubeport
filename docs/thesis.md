@@ -1,175 +1,175 @@
 # Kubeport Context
 
-This document frames the repository as the technical artefact of a project. It states the problem, surveys the prior art, defines the objectives, summarises the methodology, and reports the achieved results against those objectives.
+Este documento enmarca el repositorio como el artefacto técnico de un proyecto. Plantea el problema, examina el estado del arte, define los objetivos, resume la metodología y presenta los resultados obtenidos frente a dichos objetivos.
 
-The remaining documents in the repository (`README.md`, `docs/architecture.md`, `docs/operator-guide.md`, `docs/control-plane-state.md`, `docs/codebase-summary.md`, `docs/evaluation.md`, `CHANGELOG.md`) are the technical evidence supporting the claims made here.
-
----
-
-## 1. Problem Statement
-
-Frappe and ERPNext are widely deployed open-source business platforms. Operators that already run a Frappe instance for ERP, CRM, accounting, or HR have two unrelated control surfaces when they extend their deployment to Kubernetes:
-
-1. The **Frappe Desk UI**, which is where day-to-day operators (administrators, integrators, fractional sysadmins) already work.
-2. A separate **Kubernetes toolchain** (`kubectl`, `helm`, dashboards, IaC repositories), which requires a different mental model, a separate identity story, and a separate audit trail.
-
-This split creates real cost:
-
-- Operators must context-switch between two UIs to perform a single business operation (e.g., "create a new customer-facing site on the bench cluster").
-- Cluster operations are typically performed by hand with `kubectl` / `helm`, which leaves no first-class audit record inside the same system that records the business state.
-- "What is actually deployed?" is answered by reading live cluster state; "what should be deployed?" is answered by reading IaC files in another repository. The two diverge silently.
-
-**The thesis problem**: design and implement a Kubernetes control plane *inside* Frappe that lets an operator manage clusters, Helm releases, raw manifests, and Frappe sites from the same Desk UI they already use, without losing the operational invariants a real Kubernetes operator expects (correctness under concurrency, no silent drift, no false-positive health, ground-truth verification of side effects).
+El resto de documentos del repositorio (`README.md`, `docs/architecture.md`, `docs/operator-guide.md`, `docs/control-plane-state.md`, `docs/codebase-summary.md`, `docs/evaluation.md`, `CHANGELOG.md`) son la evidencia técnica que respalda las afirmaciones realizadas aquí.
 
 ---
 
-## 2. State of the Art
+## 1. Planteamiento del problema
 
-The thesis is positioned along two axes: an operator-facing axis (the existing Kubernetes management UIs operators choose between today) and a research axis (the design patterns from distributed-systems and platform-engineering literature that inform Kubeport's invariants). The product survey establishes the operational gap; the prose subsections that follow establish the conceptual lineage.
+Frappe y ERPNext son plataformas de negocio de código abierto ampliamente desplegadas. Los operadores que ya gestionan una instancia de Frappe para ERP, CRM, contabilidad o RRHH disponen de dos superficies de control independientes cuando extienden su despliegue a Kubernetes:
 
-### 2.1 Existing Kubernetes management surfaces
+1. La **interfaz Frappe Desk**, donde trabajan a diario los operadores (administradores, integradores, administradores de sistemas a tiempo parcial).
+2. Una **cadena de herramientas de Kubernetes** independiente (`kubectl`, `helm`, paneles de control, repositorios de IaC), que exige un modelo mental diferente, una gestión de identidad separada y un registro de auditoría propio.
 
-None of the systems below close the specific gap identified in §1.
+Esta división genera un coste real:
 
-| System | What it does | Why it does not solve this problem |
+- Los operadores deben cambiar de contexto entre dos interfaces para realizar una única operación de negocio (por ejemplo, "crear un nuevo sitio orientado al cliente en el clúster bench").
+- Las operaciones sobre el clúster se realizan habitualmente de forma manual con `kubectl` / `helm`, lo que no deja ningún registro de auditoría de primer nivel dentro del mismo sistema que registra el estado del negocio.
+- "¿Qué hay realmente desplegado?" se responde leyendo el estado en vivo del clúster; "¿qué debería estar desplegado?" se responde leyendo archivos de IaC en otro repositorio. Ambos divergen en silencio.
+
+**El problema de la tesis**: diseñar e implementar un plano de control de Kubernetes *dentro de* Frappe que permita a un operador gestionar clústeres, releases de Helm, manifiestos sin procesar y sitios Frappe desde la misma interfaz Desk que ya utiliza, sin perder los invariantes operacionales que un operador real de Kubernetes espera (corrección bajo concurrencia, sin deriva silenciosa, sin salud con falsos positivos, verificación de la fuente de verdad de los efectos secundarios).
+
+---
+
+## 2. Estado del arte
+
+La tesis se posiciona en dos ejes: un eje orientado al operador (las interfaces de gestión de Kubernetes existentes entre las que los operadores eligen hoy) y un eje de investigación (los patrones de diseño de la literatura sobre sistemas distribuidos e ingeniería de plataformas que informan los invariantes de Kubeport). El análisis de productos establece la brecha operacional; los subapartados en prosa que siguen establecen el linaje conceptual.
+
+### 2.1 Superficies de gestión de Kubernetes existentes
+
+Ninguno de los sistemas siguientes cierra la brecha específica identificada en §1.
+
+| Sistema | Qué hace | Por qué no resuelve este problema |
 |---|---|---|
-| **Lens** (Mirantis) | Desktop IDE for Kubernetes | Per-operator desktop tool; not a multi-user control plane; not embedded in any business platform. |
-| **Headlamp** (CNCF) | Web Kubernetes UI | Generic Kubernetes dashboard; no concept of a Frappe site, ERPNext bench, or business-state link. |
-| **Rancher** (SUSE) | Multi-cluster Kubernetes manager | Strong multi-cluster story but is itself a separate product with its own identity, audit, and UI. |
-| **OpenShift Console** (Red Hat) | Bundled UI for OpenShift | Tied to OpenShift; does not federate into an external business platform. |
-| **Komodor / Spacelift / Argo CD UI** | DevOps-team-facing dashboards | Focus on platform engineers, not operators of business apps; no first-class notion of a Frappe site lifecycle. |
-| **`kubectl` + `helm` + IaC repo** | The status quo | No unified audit, drift detection, or business-state link; high operator skill floor. |
+| **Lens** (Mirantis) | IDE de escritorio para Kubernetes | Herramienta de escritorio por operador; no es un plano de control multiusuario; no está integrado en ninguna plataforma de negocio. |
+| **Headlamp** (CNCF) | Interfaz web de Kubernetes | Panel de control genérico de Kubernetes; sin concepto de sitio Frappe, bench ERPNext o enlace con el estado del negocio. |
+| **Rancher** (SUSE) | Gestor de Kubernetes multiclúster | Sólida gestión multiclúster, pero es en sí mismo un producto independiente con su propia identidad, auditoría e interfaz. |
+| **OpenShift Console** (Red Hat) | Interfaz integrada para OpenShift | Vinculado a OpenShift; no se integra en una plataforma de negocio externa. |
+| **Komodor / Spacelift / Argo CD UI** | Paneles orientados a equipos DevOps | Enfocados en ingenieros de plataformas, no en operadores de aplicaciones de negocio; sin noción de primer nivel del ciclo de vida de un sitio Frappe. |
+| **`kubectl` + `helm` + repositorio IaC** | El estado actual | Sin auditoría unificada, detección de deriva ni enlace con el estado del negocio; elevado nivel de habilidad requerido para el operador. |
 
-The conceptual gap is not "another Kubernetes UI". It is: **a control plane whose unit of management is a Frappe site or ERPNext bench, backed by Kubernetes, integrated into the same Desk where the rest of the business runs**, with the operational invariants normally associated with platform-engineering tooling (background-job execution, drift reconciliation, ground-truth verification) rather than the looser invariants of a UI shell over `kubectl`.
+La brecha conceptual no es "otra interfaz de Kubernetes". Es: **un plano de control cuya unidad de gestión es un sitio Frappe o un bench ERPNext, respaldado por Kubernetes, integrado en el mismo Desk donde funciona el resto del negocio**, con los invariantes operacionales normalmente asociados a las herramientas de ingeniería de plataformas (ejecución en segundo plano, reconciliación de deriva, verificación de la fuente de verdad) en lugar de los invariantes más laxos de una interfaz gráfica sobre `kubectl`.
 
-### 2.2 Operator pattern and reconciliation loops
+### 2.2 Patrón operator y bucles de reconciliación
 
-The operator pattern, formalised by CoreOS in 2016 [1] and now canonical in the Kubernetes documentation [2], encodes domain-specific operational knowledge as a software controller that reconciles a *desired state* (a custom resource) against the live cluster on each tick. The pattern descends directly from the controller architecture introduced in Borg and inherited by Kubernetes [3], where every API object is a record of intent that an asynchronous control loop drives toward observation. Hightower, Burns, and Beda [4] frame the loop as level-triggered rather than edge-triggered: the controller does not react to events, it periodically observes the world and corrects drift, which makes the loop idempotent under crashes, retries, and missed events.
+El patrón operator, formalizado por CoreOS en 2016 [1] y actualmente canónico en la documentación de Kubernetes [2], codifica el conocimiento operacional específico del dominio como un controlador software que reconcilia un *estado deseado* (un recurso personalizado) frente al clúster en vivo en cada ciclo. El patrón desciende directamente de la arquitectura de controlador introducida en Borg y heredada por Kubernetes [3], donde cada objeto de la API es un registro de intención que un bucle de control asíncrono impulsa hacia la observación. Hightower, Burns y Beda [4] formulan el bucle como disparado por nivel en lugar de por flanco: el controlador no reacciona a eventos, sino que observa el mundo periódicamente y corrige la deriva, lo que hace que el bucle sea idempotente ante fallos, reintentos y eventos perdidos.
 
-Kubeport adopts this pattern at the Frappe layer rather than as a Kubernetes operator. The reconciliation tick (`*/5 * * * *` in `kubeport/hooks.py`) plays the role of the controller loop, the DocType row plays the role of the custom resource, and the per-run `operation_token` plays the role of the resource-version guard that rejects stale workers. The contribution is not the pattern itself — it is its application inside a business platform whose runtime model (synchronous request handlers, RQ background queues) is foreign to the control-loop literature.
+Kubeport adopta este patrón en la capa de Frappe en lugar de hacerlo como un operator de Kubernetes. El ciclo de reconciliación (`*/5 * * * *` en `kubeport/hooks.py`) desempeña el papel del bucle de controlador, la fila del DocType desempeña el papel del recurso personalizado, y el `operation_token` por ejecución desempeña el papel del guardián de versión de recurso que rechaza a los workers obsoletos. La contribución no es el patrón en sí, sino su aplicación dentro de una plataforma de negocio cuyo modelo de ejecución (manejadores de solicitudes síncronos, colas de fondo RQ) es ajeno a la literatura sobre bucles de control.
 
-### 2.3 Desired-state vs. observed-state in declarative systems
+### 2.3 Estado deseado frente a estado observado en sistemas declarativos
 
-The strict separation of desired state from observed state is the foundational discipline of large-scale cluster management. Verma et al. [5] document it as the central design choice in Borg: the operator declares intent, and the system asynchronously reports what it observed. The OpenGitOps principles [6] generalise the same idea — a declarative source of truth, continuously reconciled toward the live system — into a vendor-neutral standard.
+La separación estricta del estado deseado del estado observado es la disciplina fundamental de la gestión de clústeres a gran escala. Verma et al. [5] la documentan como la decisión de diseño central en Borg: el operador declara la intención y el sistema informa de forma asíncrona lo que observó. Los principios de OpenGitOps [6] generalizan la misma idea — una fuente de verdad declarativa, continuamente reconciliada con el sistema en vivo — en un estándar neutral respecto al proveedor.
 
-The discipline is not merely organisational; it is a precondition for sound behaviour under partial failure. Vogels' analysis of eventual consistency [7] and Brewer's CAP retrospective [8] establish that, once writes outlive a single round-trip, a system that conflates "what was requested" with "what is true now" loses the ability to recover from transient inconsistency. Kubeport applies this lesson literally: the MariaDB-backed DocType is the desired-state store; live cluster queries are the observed-state probes; and the two are never combined into a single persisted projection. Discovery code paths are read-only, and reconciliation drives the row toward the observed truth, not the other way around.
+La disciplina no es meramente organizativa; es una condición previa para un comportamiento correcto ante fallos parciales. El análisis de Vogels sobre la consistencia eventual [7] y la retrospectiva CAP de Brewer [8] establecen que, una vez que las escrituras superan un único viaje de ida y vuelta, un sistema que confunde "lo que se solicitó" con "lo que es verdad ahora" pierde la capacidad de recuperarse de la inconsistencia transitoria. Kubeport aplica esta lección literalmente: el DocType respaldado por MariaDB es el almacén de estado deseado; las consultas al clúster en vivo son las sondas de estado observado; y ambos nunca se combinan en una proyección persistida única. Las rutas de código de descubrimiento son de solo lectura, y la reconciliación impulsa la fila hacia la verdad observada, no al revés.
 
-### 2.4 Background-execution patterns in business platforms
+### 2.4 Patrones de ejecución en segundo plano en plataformas de negocio
 
-Frappe's runtime is fundamentally request-response: web handlers run inside a synchronous request thread with a hard timeout, and the canonical mechanism for long work is to enqueue a job onto an RQ-backed queue [9]. This shape mirrors the broader pattern Dean and Ghemawat [10] identified for any system whose unit of work outruns a single request: decompose the operation into a small synchronous front and a large asynchronous tail, and let the tail be retried, monitored, and recovered independently.
+El entorno de ejecución de Frappe es fundamentalmente solicitud-respuesta: los manejadores web se ejecutan dentro de un hilo de solicitud síncrono con un tiempo de espera estricto, y el mecanismo canónico para trabajo de larga duración es encolar un job en una cola respaldada por RQ [9]. Esta forma refleja el patrón más amplio que Dean y Ghemawat [10] identificaron para cualquier sistema cuya unidad de trabajo supera una única solicitud: descomponer la operación en una parte delantera síncrona pequeña y una cola asíncrona grande, y dejar que la cola pueda reintentarse, monitorizarse y recuperarse de forma independiente.
 
-For Kubeport this is non-negotiable. Helm subprocess invocations [11] routinely run for tens of seconds; `bench new-site` runs for minutes; `helm upgrade --install` against a slow registry can run for longer. None of those are acceptable inside a Frappe web handler. The control plane therefore enqueues every cluster-mutating call onto the `long` RQ queue with `enqueue_after_commit=True`, and the worker re-checks the row's status and `operation_token` before acting. The token check turns the queue from a fire-and-forget mailbox into something closer to a logical-clock guard in the sense of Lamport [12]: a stale message can still arrive, but the recipient detects staleness from the token alone, without a global view of message ordering.
+Para Kubeport esto es innegociable. Las invocaciones de subprocesos de Helm [11] suelen ejecutarse durante decenas de segundos; `bench new-site` se ejecuta durante minutos; `helm upgrade --install` contra un registro lento puede ejecutarse durante más tiempo. Nada de eso es aceptable dentro de un manejador web de Frappe. El plano de control encola por tanto cada llamada que muta el clúster en la cola `long` de RQ con `enqueue_after_commit=True`, y el worker vuelve a comprobar el estado de la fila y el `operation_token` antes de actuar. La comprobación del token convierte la cola de un buzón de disparar y olvidar en algo más parecido a un guardián de reloj lógico en el sentido de Lamport [12]: un mensaje obsoleto puede aún llegar, pero el receptor detecta la obsolescencia solo a partir del token, sin una vista global del orden de los mensajes.
 
-Bibliographic entries are listed in §9 and keyed to BibTeX records in [`docs/references.bib`](references.bib).
+Las entradas bibliográficas se enumeran en §9 y están vinculadas a registros BibTeX en [`docs/references.bib`](references.bib).
 
 ---
 
-## 3. Objectives
+## 3. Objetivos
 
-The project pursues five objectives. They are stated as testable claims so the results section (§5) can be evaluated against them.
+El proyecto persigue cinco objetivos. Se enuncian como afirmaciones verificables para que la sección de resultados (§5) pueda evaluarse frente a ellos.
 
-| # | Objective | Success criterion |
+| # | Objetivo | Criterio de éxito |
 |---|---|---|
-| O1 | Operators can connect to Kubernetes clusters from the Frappe Desk using any of the three real-world auth modes (kubeconfig, bearer token, in-cluster service account). | A `Kubernetes Cluster` DocType exists, validates each auth mode, supports browser-side kubeconfig import, and successfully exercises a connection test against a real cluster. |
-| O2 | Operators can register Helm repositories and deploy / upgrade / rollback / uninstall Helm releases from the Desk. | `Helm Repository`, `Helm Chart`, and `Helm Release` DocTypes exist; chart catalogue is synchronised in the background; deploys execute through background jobs and are idempotent. |
-| O3 | Operators can apply and remove arbitrary (allowlisted) raw Kubernetes manifests from the Desk. | A `Service Bundle` DocType validates manifests against a fixed allowlist of built-in resource kinds and applies / deletes them through background jobs using server-side apply. |
-| O4 | Operators can create, migrate, back up, restore, and drop Frappe sites on a running ERPNext bench from the Desk. | A `Frappe Site` DocType (linked to a `Helm Release`) and a `Frappe Site Backup` DocType orchestrate the lifecycle through Kubernetes Jobs and verify outcomes via ground-truth bench probes rather than trusting Job exit codes. |
-| O5 | The control plane respects the platform-engineering invariants normally associated with reconcile-loop tooling: desired state and observed state are never confused, all cluster-mutating work runs out of the request thread, and concurrent or stale workers cannot corrupt state. | Discovery code path persists nothing to MariaDB; all cluster writes are routed through `frappe.enqueue(... queue="long")`; all background workers carry per-run operation tokens that are re-checked before any state write; a scheduled reconciliation loop runs every 5 minutes. |
+| O1 | Los operadores pueden conectarse a clústeres de Kubernetes desde Frappe Desk usando cualquiera de los tres modos de autenticación del mundo real (kubeconfig, token bearer, cuenta de servicio en clúster). | Existe un DocType `Kubernetes Cluster` que valida cada modo de autenticación, admite la importación de kubeconfig desde el navegador y ejercita con éxito una prueba de conexión contra un clúster real. |
+| O2 | Los operadores pueden registrar repositorios de Helm y desplegar / actualizar / revertir / desinstalar releases de Helm desde el Desk. | Existen los DocTypes `Helm Repository`, `Helm Chart` y `Helm Release`; el catálogo de charts se sincroniza en segundo plano; los despliegues se ejecutan mediante jobs en segundo plano y son idempotentes. |
+| O3 | Los operadores pueden aplicar y eliminar manifiestos de Kubernetes arbitrarios (con lista de tipos permitidos) desde el Desk. | Un DocType `Service Bundle` valida los manifiestos contra una lista fija de tipos de recursos integrados y los aplica / elimina mediante jobs en segundo plano usando server-side apply. |
+| O4 | Los operadores pueden crear, migrar, hacer copias de seguridad, restaurar y eliminar sitios Frappe en un bench ERPNext en ejecución desde el Desk. | Un DocType `Frappe Site` (vinculado a un `Helm Release`) y un DocType `Frappe Site Backup` orquestan el ciclo de vida mediante Jobs de Kubernetes y verifican los resultados mediante sondas de fuente de verdad del bench en lugar de confiar en los códigos de salida del Job. |
+| O5 | El plano de control respeta los invariantes de ingeniería de plataformas normalmente asociados a las herramientas de bucle de reconciliación: el estado deseado y el estado observado nunca se confunden, todo el trabajo que muta el clúster se ejecuta fuera del hilo de solicitud, y los workers concurrentes u obsoletos no pueden corromper el estado. | La ruta de código de descubrimiento no persiste nada en MariaDB; todas las escrituras en el clúster se enrutan a través de `frappe.enqueue(... queue="long")`; todos los workers en segundo plano llevan tokens de operación por ejecución que se recomprueban antes de cualquier escritura de estado; un bucle de reconciliación programado se ejecuta cada 5 minutos. |
 
 ---
 
-## 4. Methodology
+## 4. Metodología
 
-### 4.1 Architectural decision
+### 4.1 Decisión arquitectónica
 
-The defining architectural decision is the strict separation of **desired state** (Frappe DocTypes backed by MariaDB) from **observed state** (live queries against the cluster). Every later design choice — read-only discovery, background-job-only mutations, ground-truth verification — falls out of this decision. See [`docs/architecture.md`](architecture.md) for the full rationale and the C4 diagrams.
+La decisión arquitectónica definitoria es la separación estricta del **estado deseado** (DocTypes de Frappe respaldados por MariaDB) del **estado observado** (consultas en vivo contra el clúster). Cada decisión de diseño posterior — descubrimiento de solo lectura, mutaciones exclusivamente mediante jobs en segundo plano, verificación de la fuente de verdad — se deriva de esta decisión. Véase [`docs/architecture.md`](architecture.md) para la justificación completa y los diagramas C4.
 
-### 4.2 Process
+### 4.2 Proceso
 
-The implementation followed an iterative, capability-driven cycle:
+La implementación siguió un ciclo iterativo orientado a capacidades:
 
-1. Implement the minimum viable version of a capability (e.g., "deploy a Helm release") end to end, including the DocType, the background task, and the form behaviour.
-2. Stress-test that capability against imperfect cluster conditions (worker crashes, stale workers, transient probe failures, TTL-expired Jobs, hung pods, missing PVCs) and harden it.
-3. Capture the architectural decision and the rejected alternatives in [`CHANGELOG.md`](../CHANGELOG.md).
-4. Move to the next capability.
+1. Implementar la versión mínima viable de una capacidad (por ejemplo, "desplegar una release de Helm") de extremo a extremo, incluyendo el DocType, la tarea en segundo plano y el comportamiento del formulario.
+2. Someter a prueba de estrés dicha capacidad bajo condiciones imperfectas del clúster (fallos de workers, workers obsoletos, fallos transitorios de sondas, Jobs con TTL expirado, pods colgados, PVCs faltantes) y reforzarla.
+3. Registrar la decisión arquitectónica y las alternativas rechazadas en [`CHANGELOG.md`](../CHANGELOG.md).
+4. Pasar a la siguiente capacidad.
 
-This produced a product whose capability surface (cluster connectivity → Helm releases → raw manifests → Frappe sites → backups → operator tools) is broader than the initial scope, while keeping each capability robust enough to be defended on its own. The current capability and robustness inventory is in [`docs/control-plane-state.md`](control-plane-state.md).
+Esto produjo un producto cuya superficie de capacidades (conectividad de clúster → releases de Helm → manifiestos sin procesar → sitios Frappe → copias de seguridad → herramientas de operador) es más amplia que el alcance inicial, manteniendo al mismo tiempo cada capacidad lo suficientemente robusta como para poder defenderse por sí sola. El inventario actual de capacidades y robustez se encuentra en [`docs/control-plane-state.md`](control-plane-state.md).
 
-### 4.3 Verification strategy
+### 4.3 Estrategia de verificación
 
-- **Unit / integration tests** run in CI on every PR (`bench --site test_site run-tests --app kubeport`). The repository has 18 test modules covering discovery, reconciliation state transitions, Helm worker concurrency guards, manifest validation, backup/restore guards, full-lifecycle simulation scenarios, and per-kind workload readiness.
-- **Smoke procedures** for behaviour that cannot be credibly asserted from mocked tests (e.g., `bench new-site` against a real bench, ownerReference cascade GC, RBAC sufficiency). The current procedure is documented in [`docs/operator-guide.md`](operator-guide.md); the historical version is archived under [`docs/history/frappe-site-smoke.md`](history/frappe-site-smoke.md).
-- **Architecture decision log** in [`CHANGELOG.md`](../CHANGELOG.md) records what was decided, why, and what was rejected, so each design choice is auditable.
+- **Tests unitarios / de integración** se ejecutan en CI en cada PR (`bench --site test_site run-tests --app kubeport`). El repositorio cuenta con 18 módulos de test que cubren descubrimiento, transiciones de estado de reconciliación, guardias de concurrencia del worker de Helm, validación de manifiestos, guardias de copia de seguridad/restauración, escenarios de simulación del ciclo de vida completo y disponibilidad de carga de trabajo por tipo.
+- **Procedimientos de verificación funcional** para comportamientos que no pueden afirmarse de forma creíble mediante tests con mocks (por ejemplo, `bench new-site` contra un bench real, recolección de basura en cascada por `ownerReference`, suficiencia de RBAC). El procedimiento actual está documentado en [`docs/operator-guide.md`](operator-guide.md); la versión histórica está archivada en [`docs/history/frappe-site-smoke.md`](history/frappe-site-smoke.md).
+- **Registro de decisiones arquitectónicas** en [`CHANGELOG.md`](../CHANGELOG.md) documenta qué se decidió, por qué y qué se rechazó, de modo que cada decisión de diseño sea auditable.
 
 ---
 
-## 5. Results vs. Objectives
+## 5. Resultados frente a objetivos
 
-| # | Objective | Status | Evidence |
+| # | Objetivo | Estado | Evidencia |
 |---|---|---|---|
-| O1 | Cluster connectivity (3 auth modes) | **Met** | `Kubernetes Cluster` DocType implements kubeconfig, bearer token, and in-cluster auth; browser-side kubeconfig import normalises local-only API server endpoints; connection-test endpoint exercises the real cluster API. |
-| O2 | Helm release lifecycle | **Met** | `Helm Repository`, `Helm Chart`, `Helm Release` DocTypes; chart catalogue synchronised daily; deploy / upgrade / rollback / uninstall all execute through background jobs; idempotent `helm upgrade --install`; live release health combines Helm status with workload-readiness from `helm get manifest`. |
-| O3 | Raw manifest deployment | **Met (within scope)** | `Service Bundle` validates manifests against an allowlist of 17 built-in resource kinds and applies / deletes via server-side apply. CRDs and arbitrary custom resources are out of scope by design. |
-| O4 | Frappe site lifecycle | **Met** | `Frappe Site` orchestrates `bench new-site`, `bench drop-site`, `bench migrate`, `bench backup`, `bench restore` through Kubernetes Jobs cloned from a live bench workload pod; `Frappe Site Backup` is a standalone DocType so backup metadata can outlive the source site row; ground-truth bench probes verify outcomes rather than trusting Job exit codes. |
-| O5 | Platform-engineering invariants | **Met** | Discovery code path is read-only and never persists to MariaDB; every cluster mutation goes through `frappe.enqueue(... queue="long")`; background workers carry per-run operation / sync tokens that are re-checked before any state write; a 5-minute reconciliation loop detects drift and recovers stale operations; an orphan-Job sweep removes Jobs no row references. |
+| O1 | Conectividad de clúster (3 modos de autenticación) | **Cumplido** | El DocType `Kubernetes Cluster` implementa autenticación por kubeconfig, token bearer y en clúster; la importación de kubeconfig desde el navegador normaliza los endpoints del servidor API solo locales; el endpoint de prueba de conexión ejercita la API real del clúster. |
+| O2 | Ciclo de vida de releases de Helm | **Cumplido** | DocTypes `Helm Repository`, `Helm Chart`, `Helm Release`; catálogo de charts sincronizado diariamente; despliegue / actualización / reversión / desinstalación se ejecutan mediante jobs en segundo plano; `helm upgrade --install` idempotente; la salud de la release en vivo combina el estado de Helm con la disponibilidad de la carga de trabajo a partir de `helm get manifest`. |
+| O3 | Despliegue de manifiestos sin procesar | **Cumplido (dentro del alcance)** | `Service Bundle` valida los manifiestos contra una lista de 17 tipos de recursos integrados y los aplica / elimina mediante server-side apply. Los CRDs y los recursos personalizados arbitrarios quedan fuera del alcance por diseño. |
+| O4 | Ciclo de vida del sitio Frappe | **Cumplido** | `Frappe Site` orquesta `bench new-site`, `bench drop-site`, `bench migrate`, `bench backup`, `bench restore` mediante Jobs de Kubernetes clonados desde un pod de carga de trabajo bench en vivo; `Frappe Site Backup` es un DocType independiente para que los metadatos de copia de seguridad puedan sobrevivir a la fila del sitio fuente; las sondas de fuente de verdad del bench verifican los resultados en lugar de confiar en los códigos de salida del Job. |
+| O5 | Invariantes de ingeniería de plataformas | **Cumplido** | La ruta de código de descubrimiento es de solo lectura y nunca persiste en MariaDB; cada mutación del clúster pasa por `frappe.enqueue(... queue="long")`; los workers en segundo plano llevan tokens de operación / sincronización por ejecución que se recomprueban antes de cualquier escritura de estado; un bucle de reconciliación de 5 minutos detecta la deriva y recupera operaciones obsoletas; un barrido de Jobs huérfanos elimina los Jobs a los que ninguna fila hace referencia. |
 
-The empirical numbers behind each "Met" claim are summarised in §6 below and developed in full in [`docs/evaluation.md`](evaluation.md).
+Los números empíricos que respaldan cada afirmación de "Cumplido" se resumen en §6 y se desarrollan completamente en [`docs/evaluation.md`](evaluation.md).
 
-The robustness properties table in [`docs/control-plane-state.md`](control-plane-state.md) lists the specific defences implemented for each invariant, including:
+La tabla de propiedades de robustez en [`docs/control-plane-state.md`](control-plane-state.md) enumera las defensas específicas implementadas para cada invariante, incluyendo:
 
-- per-run operation tokens with re-check before writes,
-- per-call kubeconfig isolation in the Helm subprocess wrapper,
-- Job identity validation by `kubeport.io/frappe-site` label before any status write,
-- ground-truth probe via pod-exec for site existence,
-- PVC-side `<archive>.size` sidecar for backup completion verification,
-- typed force-uninstall and destructive-cancel confirmation gates,
-- shared workload-readiness classifier between deploy workers and reconciliation.
+- tokens de operación por ejecución con recomprobación antes de las escrituras,
+- aislamiento del kubeconfig por llamada en el wrapper del subproceso de Helm,
+- validación de identidad del Job mediante la etiqueta `kubeport.io/frappe-site` antes de cualquier escritura de estado,
+- sonda de fuente de verdad mediante pod-exec para la existencia del sitio,
+- auxiliar `<archivo>.size` del lado del PVC para la verificación de la finalización de la copia de seguridad,
+- puertas de confirmación tipadas para forzar la desinstalación y la cancelación destructiva,
+- clasificador de disponibilidad de carga de trabajo compartido entre los workers de despliegue y la reconciliación.
 
 ---
 
 ## 6. Evaluación
 
-This section is the per-objective summary of the empirical evaluation. Each row pairs an objective from §3 with the measured number that grounds the corresponding "Met" claim in §5; the source column points at the JSON report under [`eval/results/`](../eval/results/) that produced the number. The full chapter — methodology, per-axis tables, fault-by-fault MTTRs, scaling regression — is in [`docs/evaluation.md`](evaluation.md).
+Esta sección es el resumen empírico por objetivo de la evaluación. Cada fila empareja un objetivo de §3 con el número medido que sustenta la afirmación de "Cumplido" correspondiente en §5; la columna de fuente apunta al informe JSON bajo [`eval/results/`](../eval/results/) que generó el número. El capítulo completo — metodología, tablas por eje, MTTR por fallo, regresión de escala — se encuentra en [`docs/evaluation.md`](evaluation.md).
 
-| # | Objective | Measured result | Source |
+| # | Objetivo | Resultado medido | Fuente |
 |---|---|---|---|
-| O1 | Cluster connectivity (3 auth modes) | Golden-path `setup_cluster_doc` phase passes end-to-end against a real k3d cluster, exercising the kubeconfig auth path through the `Kubernetes Cluster` DocType. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
-| O2 | Helm release lifecycle | Golden-path phases `setup_helm_repo`, `verify_chart`, `create_release`, `deploy_release` all pass; release reaches `Deployed` and stays there across the rest of the run. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
-| O3 | Raw manifest deployment (Service Bundle) | Service Bundle apply / delete state-transition cases pass in the unit test suite. Not part of the operator-facing golden-path harness. | `kubeport/tests/test_reconciliation.py` |
-| O4 | Frappe site lifecycle | Golden-path phases `create_site`, `migrate_site`, `backup_site`, `restore_site`, `drop_site` all pass; ground-truth bench probes verify each transition. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
-| O5 | Platform-engineering invariants | All four documented robustness defences recover within the 30-min stale-op bound (1800 s): `worker_kill_mid_helm_upgrade` MTTR 2.30 s, `job_ttl_expired_before_reconcile` 6.68 s, `pod_exec_timeout_during_site_probe` 9.63 s (1 deferred tick), `corrupt_archive_size_sidecar` 22.34 s with archive removed from PVC. Reconciliation tick scales sublinearly to 1000 rows-per-kind (mean 10.46 s, power-law slope ≈ 0.745) — ≈ 28× under the scheduled 5-min cadence. The comparative baseline (raw `kubectl` + `helm`, same workflow) requires 24 distinct shell commands and 13 operator interventions; Kubeport elides both. | [`eval/results/sample-faults.json`](../eval/results/sample-faults.json) (`make eval-faults`); [`eval/results/sample-scaling.json`](../eval/results/sample-scaling.json) (`make eval-scaling`); [`eval/results/sample-baseline.json`](../eval/results/sample-baseline.json) and [`eval/results/comparison.md`](../eval/results/comparison.md) (`make eval-baseline`). |
+| O1 | Conectividad de clúster (3 modos de autenticación) | La fase de ruta dorada `setup_cluster_doc` supera la prueba de extremo a extremo contra un clúster k3d real, ejercitando la ruta de autenticación por kubeconfig a través del DocType `Kubernetes Cluster`. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
+| O2 | Ciclo de vida de releases de Helm | Las fases de ruta dorada `setup_helm_repo`, `verify_chart`, `create_release`, `deploy_release` superan todas la prueba; la release alcanza `Deployed` y permanece en ese estado durante el resto de la ejecución. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
+| O3 | Despliegue de manifiestos sin procesar (Service Bundle) | Los casos de transición de estado de aplicar / eliminar Service Bundle superan la prueba en la suite de tests unitarios. No forma parte del conjunto de pruebas de ruta dorada orientado al operador. | `kubeport/tests/test_reconciliation.py` |
+| O4 | Ciclo de vida del sitio Frappe | Las fases de ruta dorada `create_site`, `migrate_site`, `backup_site`, `restore_site`, `drop_site` superan todas la prueba; las sondas de fuente de verdad del bench verifican cada transición. | [`eval/results/sample.json`](../eval/results/sample.json) (`make eval`) |
+| O5 | Invariantes de ingeniería de plataformas | Las cuatro defensas de robustez documentadas se recuperan dentro del límite de operación obsoleta de 30 minutos (1800 s): `worker_kill_mid_helm_upgrade` MTTR 2,30 s, `job_ttl_expired_before_reconcile` 6,68 s, `pod_exec_timeout_during_site_probe` 9,63 s (1 ciclo diferido), `corrupt_archive_size_sidecar` 22,34 s con el archivo eliminado del PVC. El ciclo de reconciliación escala de forma sublineal hasta 1000 filas por tipo (media 10,46 s, pendiente de ley potencial ≈ 0,745) — aproximadamente 28 veces por debajo de la cadencia programada de 5 minutos. La línea de base comparativa (`kubectl` + `helm` sin procesar, mismo flujo de trabajo) requiere 24 comandos de shell distintos y 13 intervenciones del operador; Kubeport elimina ambos. | [`eval/results/sample-faults.json`](../eval/results/sample-faults.json) (`make eval-faults`); [`eval/results/sample-scaling.json`](../eval/results/sample-scaling.json) (`make eval-scaling`); [`eval/results/sample-baseline.json`](../eval/results/sample-baseline.json) y [`eval/results/comparison.md`](../eval/results/comparison.md) (`make eval-baseline`). |
 
-Every "Met" status in §5 is now anchored to a measurement in this table or the chapter it links to; the previous formulation asserted readiness without evidence.
-
----
-
-## 7. Limitations
-
-These are deliberate scope decisions, not bugs:
-
-- **Frappe site discovery is narrowed to the official `erpnext` chart.** Widening to other bench chart variants is design work, not implementation work.
-- **`Service Bundle` only supports built-in Kubernetes resource kinds.** CRDs, arbitrary custom resources, and admission-webhook concerns are out of scope.
-- **Postgres-backed benches are not supported.** The `db_type` field is locked to `mariadb`; the postgres code paths were intentionally removed (no forward-compatibility shim).
-- **Site image registry scope is public GHCR.** No `imagePullSecret` UI is exposed in v1.
-- **Backup storage is namespace-local PVCs.** Cron-based scheduled backups and per-site count/age retention shipped in v1; object-store backends, encryption at rest, cross-cluster restore, and restore-to-different-site-name remain out of scope.
-- **A narrative deployment guide ships in v1** ([`docs/deploy.md`](deploy.md)) covering topology, the Helm-CLI packaging snippet, the verb-resource RBAC matrix, resource-limit baselines, the internal-metrics endpoints, and the control-plane backup procedure; the kustomized least-privilege RBAC tree at [`deploy/rbac/`](../deploy/rbac/) is validated by `make rbac-smoke`.
+Cada estado de "Cumplido" en §5 está ahora anclado a una medición en esta tabla o en el capítulo al que enlaza; la formulación anterior afirmaba el cumplimiento sin evidencia.
 
 ---
 
-## 8. Future Work
+## 7. Limitaciones
 
-The remaining work is depth work; the core plumbing is in place.
+Estas son decisiones deliberadas de alcance, no errores:
 
-1. **Broader health modelling**: add application-level HTTP probes and CRD-aware health where signals have clear semantics.
-2. **Backup depth**: cron-based scheduled backups and per-site count/age retention landed in v1; remaining work is object-store backends, encryption at rest, cross-cluster restore, and restore-to-different-site-name (the latter blocked on a richer storage-path model).
-3. **Wider chart support**: controlled expansion of bench discovery beyond `erpnext`.
-4. **Cross-DocType integration tests**: broader workflow coverage to complement the strong per-module coverage already in place.
+- **El descubrimiento de sitios Frappe se limita al chart oficial `erpnext`.** Ampliar la cobertura a otras variantes de chart bench es trabajo de diseño, no de implementación.
+- **`Service Bundle` solo admite tipos de recursos integrados de Kubernetes.** Los CRDs, los recursos personalizados arbitrarios y las consideraciones sobre webhooks de admisión quedan fuera del alcance.
+- **Los benches respaldados por Postgres no están soportados.** El campo `db_type` está bloqueado en `mariadb`; las rutas de código de postgres fueron eliminadas intencionalmente (sin compatibilidad hacia adelante).
+- **El alcance del registro de imágenes de sitio es GHCR público.** No se expone ninguna interfaz de `imagePullSecret` en v1.
+- **El almacenamiento de copias de seguridad son PVCs locales al namespace.** Las copias de seguridad programadas mediante cron y la retención por recuento/antigüedad por sitio se incluyeron en v1; los backends de almacenamiento de objetos, el cifrado en reposo, la restauración entre clústeres y la restauración con un nombre de sitio diferente quedan fuera del alcance.
+- **Una guía de despliegue narrativa se incluye en v1** ([`docs/deploy.md`](deploy.md)) que cubre la topología, el fragmento de empaquetado con Helm-CLI, la matriz RBAC de verbos-recursos, las líneas de base de límites de recursos, los endpoints de métricas internas y el procedimiento de copia de seguridad del plano de control; el árbol RBAC de mínimos privilegios con kustomize en [`deploy/rbac/`](../deploy/rbac/) se valida mediante `make rbac-smoke`.
+
+---
+
+## 8. Trabajo futuro
+
+El trabajo restante es de profundización; la base principal está en su lugar.
+
+1. **Modelado de salud más amplio**: añadir sondas HTTP a nivel de aplicación y salud con conciencia de CRD donde las señales tienen semántica clara.
+2. **Mayor profundidad en copias de seguridad**: las copias de seguridad programadas mediante cron y la retención por recuento/antigüedad por sitio se incluyeron en v1; el trabajo restante son los backends de almacenamiento de objetos, el cifrado en reposo, la restauración entre clústeres y la restauración con un nombre de sitio diferente (esto último bloqueado por la necesidad de un modelo de ruta de almacenamiento más rico).
+3. **Mayor compatibilidad de charts**: expansión controlada del descubrimiento de bench más allá de `erpnext`.
+4. **Tests de integración entre DocTypes**: mayor cobertura de flujos de trabajo para complementar la sólida cobertura por módulo ya existente.
 
 ---
 
 ## 9. Bibliografía
 
-References are listed in the order of first citation in §2 and are keyed to BibTeX entries in [`docs/references.bib`](references.bib). The listing follows IEEE numeric style.
+Las referencias se enumeran en orden de primera cita en §2 y están vinculadas a entradas BibTeX en [`docs/references.bib`](references.bib). El listado sigue el estilo numérico IEEE.
 
 [1] B. Philips, "Introducing Operators: Putting Operational Knowledge into Software," CoreOS Engineering Blog, 2016.
 
@@ -197,31 +197,31 @@ References are listed in the order of first citation in §2 and are keyed to Bib
 
 ---
 
-## 10. Repository Documents
+## 10. Documentos del repositorio
 
-| Document | Role |
+| Documento | Función |
 |---|---|
-| [`README.md`](../README.md) | User-facing entry point and quick start. |
-| [`docs/architecture.md`](architecture.md) | C4 context / container / component diagrams, sequence diagrams, design invariants. |
-| [`docs/operator-guide.md`](operator-guide.md) | How to use Kubeport end-to-end. |
-| [`docs/control-plane-state.md`](control-plane-state.md) | Capability and robustness inventory; open gaps. |
-| [`docs/codebase-summary.md`](codebase-summary.md) | Module-level architecture reference. |
-| [`docs/evaluation.md`](evaluation.md) | Empirical evaluation chapter — functional, reliability, baseline, scaling. |
-| [`docs/references.bib`](references.bib) | BibTeX bibliography backing the §9 listing. |
-| [`AGENTS.md`](../AGENTS.md) | Authoritative invariants and implementation patterns. |
-| [`CHANGELOG.md`](../CHANGELOG.md) | Architecture decision log (what / why / rejected alternatives). |
-| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Development setup, lint and test workflow. |
-| [`SECURITY.md`](../SECURITY.md) | Security disclosure policy. |
-| [`docs/history/`](history/) | Archived planning documents kept for thesis traceability. |
+| [`README.md`](../README.md) | Punto de entrada orientado al usuario e inicio rápido. |
+| [`docs/architecture.md`](architecture.md) | Diagramas C4 de contexto / contenedor / componente, diagramas de secuencia, invariantes de diseño. |
+| [`docs/operator-guide.md`](operator-guide.md) | Cómo usar Kubeport de extremo a extremo. |
+| [`docs/control-plane-state.md`](control-plane-state.md) | Inventario de capacidades y robustez; brechas abiertas. |
+| [`docs/codebase-summary.md`](codebase-summary.md) | Referencia de arquitectura a nivel de módulo. |
+| [`docs/evaluation.md`](evaluation.md) | Capítulo de evaluación empírica — funcional, fiabilidad, línea de base, escala. |
+| [`docs/references.bib`](references.bib) | Bibliografía BibTeX que respalda el listado de §9. |
+| [`AGENTS.md`](../AGENTS.md) | Invariantes y patrones de implementación autorizados. |
+| [`CHANGELOG.md`](../CHANGELOG.md) | Registro de decisiones arquitectónicas (qué / por qué / alternativas rechazadas). |
+| [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Configuración del entorno de desarrollo, flujo de trabajo de lint y tests. |
+| [`SECURITY.md`](../SECURITY.md) | Política de divulgación de seguridad. |
+| [`docs/history/`](history/) | Documentos de planificación archivados conservados para la trazabilidad de la tesis. |
 
 ---
 
-## 11. Project Components
+## 11. Componentes del proyecto
 
-This thesis describes the backend artefact (Kubeport). The complete TFG deliverable comprises three repositories:
+Esta tesis describe el artefacto backend (Kubeport). El entregable completo del TFG comprende tres repositorios:
 
-| Component | Repository | Role |
+| Componente | Repositorio | Función |
 |---|---|---|
-| Backend / control plane | [`EsderJ10/kubeport`](https://github.com/EsderJ10/kubeport) (this repo) | Frappe app, the technical artefact this document describes. |
-| Marketing landing page | [`1DAW-victorjim551/lp-KubePort`](https://github.com/1DAW-victorjim551/lp-KubePort) | Public-facing site, deployed at [`1daw-victorjim551.github.io/lp-KubePort`](https://1daw-victorjim551.github.io/lp-KubePort/). Authored by Víctor Jiménez. |
-| Project umbrella | [`EsderJ10/tfg`](https://github.com/EsderJ10/tfg) | Dev-container, design notes, task tracker. |
+| Backend / plano de control | [`EsderJ10/kubeport`](https://github.com/EsderJ10/kubeport) (este repositorio) | Aplicación Frappe, el artefacto técnico que describe este documento. |
+| Landing page de marketing | [`1DAW-victorjim551/lp-KubePort`](https://github.com/1DAW-victorjim551/lp-KubePort) | Sitio público, desplegado en [`1daw-victorjim551.github.io/lp-KubePort`](https://1daw-victorjim551.github.io/lp-KubePort/). Desarrollado por Víctor Jiménez. |
+| Paraguas del proyecto | [`EsderJ10/tfg`](https://github.com/EsderJ10/tfg) | Contenedor de desarrollo, notas de diseño, gestor de tareas. |
