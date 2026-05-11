@@ -1,12 +1,12 @@
-# Kubeport — Threat Model
+# Kubeport — Modelo de amenazas
 
-This document is the trust-boundary analysis for the Kubeport control plane. It complements [`SECURITY.md`](../SECURITY.md) (which states the disclosure policy and the high-level trust assumptions) with a per-boundary STRIDE catalogue, a justification of the destructive-operation allowlist, and a mapping of every whitelisted endpoint and every privileged worker call to the boundary it crosses.
+Este documento es el análisis de fronteras de confianza para el plano de control de Kubeport. Complementa [`SECURITY.md`](../SECURITY.md) (que establece la política de divulgación y los supuestos de confianza de alto nivel) con un catálogo STRIDE por frontera, una justificación de la lista de operaciones destructivas permitidas, y un mapeo de cada endpoint incluido en la lista blanca y cada llamada de worker privilegiada a la frontera que cruza.
 
-For the architectural context — containers, components, runtime sequences — see [`docs/architecture.md`](architecture.md). For the catalogue of tolerated faults and recovery upper bounds, see [`docs/fault-model.md`](fault-model.md). The eight numbered safety / liveness / eventual-consistency properties enforced by the codebase are listed in [`docs/architecture.md`](architecture.md) §3.
+Para el contexto arquitectónico — contenedores, componentes, secuencias de ejecución — véase [`docs/architecture.md`](architecture.md). Para el catálogo de fallos tolerados y los límites superiores de recuperación, véase [`docs/fault-model.md`](fault-model.md). Las ocho propiedades numeradas de seguridad / disponibilidad / consistencia eventual aplicadas por el código se enumeran en [`docs/architecture.md`](architecture.md) §3.
 
 ---
 
-## 1. Trust-boundary diagram
+## 1. Diagrama de fronteras de confianza
 
 ```mermaid
 graph LR
@@ -45,184 +45,184 @@ graph LR
     Cluster -. B8 PVC archives .-> BackupsPVC
 ```
 
-**Boundary index**
+**Índice de fronteras**
 
-| ID | Boundary | Crossing direction | Carrier |
+| ID | Frontera | Dirección del cruce | Portador |
 |---|---|---|---|
-| B1 | Operator browser → Frappe web worker | Inbound | Authenticated HTTPS / Frappe session cookie + CSRF |
-| B1g | Unauthenticated visitor → Frappe web worker | Inbound | Public HTTPS, single guest endpoint |
-| B2 | Frappe processes → MariaDB | Bidirectional, in-process | Frappe ORM + encrypted-field API |
-| B3 | Web worker / scheduler → RQ long worker | One-way, deferred | Redis-backed RQ via `frappe.enqueue(..., queue="long", enqueue_after_commit=True)` |
-| B4 | Long worker → Helm CLI | One-way, in-process spawn | `subprocess.run(list, ...)` with isolated kubeconfig file |
-| B5 | Long worker / Helm → Kubernetes API | Outbound, per-cluster scoped | `kubernetes` Python client via `get_k8s_api_client(cluster_name)` |
-| B6 | Cluster API → bench pod (exec) | Outbound, two-way stream | `stream(core_v1.connect_get_namespaced_pod_exec, ...)` |
-| B7 | Long worker → public GHCR | Outbound, daily | HTTPS pull of curated catalog; digest-pinned at the row |
-| B8 | Cluster Job pod → `kubeport-backups` PVC | Cluster-internal | RWX PVC mounted by the bench backup Job and a busybox probe Job |
+| B1 | Navegador del operador → Worker web de Frappe | Entrante | HTTPS autenticado / cookie de sesión de Frappe + CSRF |
+| B1g | Visitante no autenticado → Worker web de Frappe | Entrante | HTTPS público, único endpoint para invitados |
+| B2 | Procesos de Frappe → MariaDB | Bidireccional, en proceso | ORM de Frappe + API de campos cifrados |
+| B3 | Worker web / planificador → Worker largo de RQ | Unidireccional, diferido | RQ respaldado por Redis mediante `frappe.enqueue(..., queue="long", enqueue_after_commit=True)` |
+| B4 | Worker largo → CLI de Helm | Unidireccional, invocación en proceso | `subprocess.run(list, ...)` con archivo kubeconfig aislado por llamada |
+| B5 | Worker largo / Helm → API de Kubernetes | Saliente, con alcance por clúster | Cliente Python `kubernetes` mediante `get_k8s_api_client(cluster_name)` |
+| B6 | API del clúster → pod bench (exec) | Saliente, flujo bidireccional | `stream(core_v1.connect_get_namespaced_pod_exec, ...)` |
+| B7 | Worker largo → GHCR público | Saliente, diario | Descarga HTTPS del catálogo curado; digest fijado en la fila |
+| B8 | Pod Job del clúster → PVC `kubeport-backups` | Interno al clúster | PVC RWX montado por el Job de backup de bench y un Job de sonda busybox |
 
 ---
 
-## 2. Per-boundary analysis
+## 2. Análisis por frontera
 
-### B1 — Operator browser → Frappe web worker
+### B1 — Navegador del operador → Worker web de Frappe
 
-**Trust direction.** Inward: the operator is trusted only after Frappe has authenticated the session and validated the CSRF token. The endpoint then runs with that operator's role bindings.
+**Dirección de confianza.** Entrante: el operador solo es de confianza después de que Frappe haya autenticado la sesión y validado el token CSRF. El endpoint se ejecuta con los vínculos de rol de ese operador.
 
-**Data crossing.** Form values for desired-state writes (`Kubernetes Cluster` rows including kubeconfig, bearer tokens; `Helm Release` values YAML; `Service Bundle` manifest YAML); read requests for live cluster discovery; ad-hoc operator actions (`Kubernetes Command.execute`).
+**Datos que cruzan.** Valores de formulario para escrituras de estado deseado (filas de `Kubernetes Cluster` incluyendo kubeconfig, tokens bearer; YAML de valores de `Helm Release`; YAML de manifiesto de `Service Bundle`); solicitudes de lectura para descubrimiento en vivo del clúster; acciones ad-hoc del operador (`Kubernetes Command.execute`).
 
-**Mitigations in code.**
+**Mitigaciones en el código.**
 
-- Frappe session + CSRF token on every `@frappe.whitelist()` endpoint (framework default; `allow_guest=True` is the explicit opt-out).
-- Role-gating: every privileged DocType requires `System Manager`. The `Kubernetes Command` permission block is `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.json:161-170`.
-- Type-annotated arguments: `require_type_annotated_api_methods = True` in `kubeport/hooks.py` rejects loosely-typed calls before execution.
-- Server-side validation of every desired-state write, e.g. kubeconfig endpoint normalization in `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.py`, manifest allowlist in `kubeport/utils/k8s_resources.py`, GHCR coordinate validation in `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py`.
-- Destructive-operation typed confirmations: `Kubernetes Command.confirm_destructive` checked at `validate` and at `execute` (`kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:78-91, 113-114`); `Frappe Site.cancel_site` and `Frappe Site.restore_site` likewise.
+- Sesión de Frappe + token CSRF en cada endpoint `@frappe.whitelist()` (valor predeterminado del framework; `allow_guest=True` es la opción explícita de exclusión).
+- Control de roles: cada DocType privilegiado requiere `System Manager`. El bloque de permisos de `Kubernetes Command` está en `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.json:161-170`.
+- Argumentos con anotaciones de tipo: `require_type_annotated_api_methods = True` en `kubeport/hooks.py` rechaza las llamadas con tipos poco estrictos antes de la ejecución.
+- Validación del lado del servidor en cada escritura de estado deseado, por ejemplo, normalización del endpoint de kubeconfig en `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.py`, lista de tipos permitidos de manifiestos en `kubeport/utils/k8s_resources.py`, validación de coordenadas de GHCR en `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py`.
+- Confirmaciones tipadas para operaciones destructivas: `Kubernetes Command.confirm_destructive` comprobado en `validate` y en `execute` (`kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:78-91, 113-114`); `Frappe Site.cancel_site` y `Frappe Site.restore_site` también.
 
-### B1g — Unauthenticated visitor → Frappe web worker
+### B1g — Visitante no autenticado → Worker web de Frappe
 
-**Trust direction.** Inward, but the visitor is untrusted. Exactly one endpoint is `allow_guest=True`: `kubeport.api.dashboard.public_helm_release_count` (`kubeport/api/dashboard.py:76-86`).
+**Dirección de confianza.** Entrante, pero el visitante no es de confianza. Exactamente un endpoint tiene `allow_guest=True`: `kubeport.api.dashboard.public_helm_release_count` (`kubeport/api/dashboard.py:76-86`).
 
-**Data crossing.** Outbound: a single integer (`frappe.db.count("Helm Release")`). No request body is honored beyond standard Frappe routing.
+**Datos que cruzan.** Saliente: un único entero (`frappe.db.count("Helm Release")`). No se acepta ningún cuerpo de solicitud más allá del enrutamiento estándar de Frappe.
 
-**Mitigations in code.** The endpoint takes no parameters, returns no row data, and reads only the cardinality of one DocType. No write path is exposed.
+**Mitigaciones en el código.** El endpoint no acepta parámetros, no devuelve datos de filas y solo lee la cardinalidad de un DocType. No hay ruta de escritura expuesta.
 
-### B2 — Frappe processes → MariaDB
+### B2 — Procesos de Frappe → MariaDB
 
-**Trust direction.** Internal, in-process. Anyone with database-level read access to the Frappe schema can read whatever a System Manager can read.
+**Dirección de confianza.** Interna, en proceso. Cualquiera con acceso de lectura a nivel de base de datos al esquema de Frappe puede leer lo que un System Manager puede leer.
 
-**Data crossing.** Desired-state rows; encrypted secret fields (Frappe `Password` fieldtype is encrypted at rest with the bench-level encryption key).
+**Datos que cruzan.** Filas de estado deseado; campos de secretos cifrados (el fieldtype `Password` de Frappe está cifrado en reposo con la clave de cifrado a nivel de bench).
 
-**Mitigations in code.**
+**Mitigaciones en el código.**
 
-- Bearer token uses `Password` fieldtype: `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.json:133` (encrypted at rest).
-- Per-Job database-credential Secrets are created in-cluster, owner-referenced to the Job for GC, and never persisted on the bench pod's static env spec: `kubeport/tasks/site_tasks.py:149` (create), `:242` (delete).
-- All queries use parameterised Frappe ORM calls (`frappe.db.get_value`, `frappe.db.set_value`); raw SQL is not used in the cluster-mutation path.
+- El token bearer utiliza el fieldtype `Password`: `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.json:133` (cifrado en reposo).
+- Los Secrets de credenciales de base de datos por Job se crean en el clúster, se referencian como propietarios del Job para su recolección de basura, y nunca se persisten en la especificación env estática del pod bench: `kubeport/tasks/site_tasks.py:149` (creación), `:242` (eliminación).
+- Todas las consultas utilizan llamadas parametrizadas del ORM de Frappe (`frappe.db.get_value`, `frappe.db.set_value`); no se usa SQL directo en la ruta de mutación del clúster.
 
-**Documented residual risk.** Kubeconfig YAML is stored in a `Code` field, not `Password`, so it is at rest in plaintext in the row. This is called out in `SECURITY.md` ("Anyone who can read those rows from the database can act as the cluster"). Operators are expected to gate database-level access accordingly.
+**Riesgo residual documentado.** El YAML del kubeconfig se almacena en un campo `Code`, no en `Password`, por lo que está en reposo en texto plano en la fila. Esto se menciona en `SECURITY.md` ("Anyone who can read those rows from the database can act as the cluster"). Se espera que los operadores controlen el acceso a nivel de base de datos en consecuencia.
 
-### B3 — Web worker / scheduler → RQ long worker
+### B3 — Worker web / planificador → Worker largo de RQ
 
-**Trust direction.** One-way. Control flow leaves the request thread and resumes inside the long worker. Everything that crosses must be re-validated.
+**Dirección de confianza.** Unidireccional. El flujo de control abandona el hilo de la solicitud y se reanuda dentro del worker largo. Todo lo que cruza debe ser revalidado.
 
-**Data crossing.** Job arguments only (typically a docname plus a 128-bit `operation_token`).
+**Datos que cruzan.** Solo argumentos del Job (normalmente un docname más un `operation_token` de 128 bits).
 
-**Mitigations in code.**
+**Mitigaciones en el código.**
 
-- `enqueue_after_commit=True` ensures the worker only sees rows that have been committed: e.g. `kubeport/kubeport/doctype/helm_release/helm_release.py:148-155`.
-- The worker re-fetches the document and re-checks `operation_token` before any state write — see fault `F5` in `docs/fault-model.md`.
-- The queue itself (`long`) isolates cluster-mutation latency from short user-facing jobs.
+- `enqueue_after_commit=True` garantiza que el worker solo vea filas que hayan sido confirmadas: por ejemplo, `kubeport/kubeport/doctype/helm_release/helm_release.py:148-155`.
+- El worker vuelve a obtener el documento y vuelve a comprobar el `operation_token` antes de cualquier escritura de estado — véase el fallo `F5` en `docs/fault-model.md`.
+- La cola (`long`) aísla la latencia de mutación del clúster de los Jobs de usuario de corta duración.
 
-### B4 — Long worker → Helm CLI
+### B4 — Worker largo → CLI de Helm
 
-**Trust direction.** In-process spawn into an out-of-process binary on the bench host.
+**Dirección de confianza.** Invocación en proceso hacia un binario externo al proceso en el host bench.
 
-**Data crossing.** Command arguments, an isolated per-call kubeconfig file written to a temp dir, environment variables (`HELM_CACHE_HOME`, `HELM_CONFIG_HOME`, `HELM_DATA_HOME`, `KUBECONFIG`), values YAML on stdin where applicable.
+**Datos que cruzan.** Argumentos de comando, un archivo kubeconfig aislado por llamada escrito en un directorio temporal, variables de entorno (`HELM_CACHE_HOME`, `HELM_CONFIG_HOME`, `HELM_DATA_HOME`, `KUBECONFIG`), YAML de valores en stdin cuando aplica.
 
-**Mitigations in code.**
+**Mitigaciones en el código.**
 
-- Subprocess invocation is always a list, never `shell=True`: `kubeport/utils/helm.py:516, 525`. Module docstring at `kubeport/utils/helm.py:9` reiterates the rule.
-- Per-call timeouts: `_HELM_WORKER_TIMEOUT_SECONDS = 600` (mutations), `_HELM_READ_TIMEOUT_SECONDS = 30` (reads). Defined at `kubeport/utils/helm.py:31`.
-- Per-call kubeconfig is written to a temp path, only the long-worker process can read it, and the directory is removed after the call.
-- The Helm binary is on the bench host's `PATH` and trusted; supply-chain integrity of that binary is the operator's responsibility (called out in `SECURITY.md` "Hardening recommendations").
+- La invocación de subprocesos es siempre una lista, nunca `shell=True`: `kubeport/utils/helm.py:516, 525`. El docstring del módulo en `kubeport/utils/helm.py:9` reitera la regla.
+- Tiempos de espera por llamada: `_HELM_WORKER_TIMEOUT_SECONDS = 600` (mutaciones), `_HELM_READ_TIMEOUT_SECONDS = 30` (lecturas). Definidos en `kubeport/utils/helm.py:31`.
+- El kubeconfig por llamada se escribe en una ruta temporal, solo el proceso del worker largo puede leerlo, y el directorio se elimina tras la llamada.
+- El binario de Helm está en el `PATH` del host bench y es de confianza; la integridad de la cadena de suministro de ese binario es responsabilidad del operador (mencionado en `SECURITY.md` "Hardening recommendations").
 
-### B5 — Long worker / Helm → Kubernetes API
+### B5 — Worker largo / Helm → API de Kubernetes
 
-**Trust direction.** Outbound. The cluster trusts whatever credential the kubeconfig / bearer token presents. Kubeport must keep that credential scoped.
+**Dirección de confianza.** Saliente. El clúster confía en cualquier credencial que presente el kubeconfig / token bearer. Kubeport debe mantener esa credencial con un alcance limitado.
 
-**Data crossing.** Authentication material (kubeconfig, bearer token, in-cluster SA token); CRUD requests against the resource kinds in the Service Bundle allowlist plus the Frappe Site Job lifecycle resources; pod-list / pod-log / event reads for observability.
+**Datos que cruzan.** Material de autenticación (kubeconfig, token bearer, token de SA en clúster); solicitudes CRUD contra los tipos de recursos de la lista de tipos permitidos de Service Bundle, más los recursos del ciclo de vida del Job de Frappe Site; lecturas de lista de pods / logs de pods / eventos para observabilidad.
 
-**Mitigations in code.**
+**Mitigaciones en el código.**
 
-- Per-cluster scoped client: `get_k8s_api_client(cluster_name)` in `kubeport/utils/k8s_client.py`. No global state is shared.
-- Bearer-token auth without a CA certificate is rejected by default; the dev-only TLS bypass is named `Skip TLS Verification (Development Only)` and gated by a separate checkbox: see `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.json` and the controller validation block.
-- Resource-kind allowlist for Service Bundle apply: `kubeport/utils/k8s_resources.py` (17 built-in kinds; CRDs explicitly out of scope).
-- Per-call `_request_timeout` on every reconciliation-time and observability-time client call (see fault `F7` in `docs/fault-model.md`).
-- Service Bundle apply uses server-side apply (does not impersonate a user; uses the registered cluster credential).
+- Cliente con alcance por clúster: `get_k8s_api_client(cluster_name)` en `kubeport/utils/k8s_client.py`. No se comparte estado global.
+- La autenticación con token bearer sin certificado CA se rechaza de forma predeterminada; la omisión TLS solo para desarrollo tiene el nombre `Skip TLS Verification (Development Only)` y está protegida por una casilla de verificación separada: véase `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.json` y el bloque de validación del controlador.
+- Lista de tipos de recursos permitidos para aplicar Service Bundle: `kubeport/utils/k8s_resources.py` (17 tipos integrados; los CRDs quedan explícitamente fuera del alcance).
+- `_request_timeout` por llamada en cada llamada de cliente en tiempo de reconciliación y de observabilidad (véase el fallo `F7` en `docs/fault-model.md`).
+- La aplicación de Service Bundle usa server-side apply (no suplanta a un usuario; usa la credencial del clúster registrado).
 
-### B6 — Cluster API → bench pod (exec)
+### B6 — API del clúster → pod bench (exec)
 
-**Trust direction.** The Cluster API forwards an exec request from Kubeport into the bench pod's main container. The bench pod is treated as ground truth for site existence (see `docs/control-plane-state.md`).
+**Dirección de confianza.** La API del clúster reenvía una solicitud exec de Kubeport al contenedor principal del pod bench. El pod bench se trata como la fuente de verdad para la existencia del sitio (véase `docs/control-plane-state.md`).
 
-**Data crossing.** A fixed shell command (`bench list-apps`, `find` over the sites directory) — never operator-supplied; the response stream of stdout/stderr.
+**Datos que cruzan.** Un comando de shell fijo (`bench list-apps`, `find` sobre el directorio de sitios) — nunca suministrado por el operador; el flujo de respuesta de stdout/stderr.
 
-**Mitigations in code.**
+**Mitigaciones en el código.**
 
-- Commands are constructed from string literals in code (`kubeport/utils/discovery.py:309-322`, `kubeport/tasks/reconciliation.py:1641` and below), never from operator input. No shell-injection vector reaches the exec channel.
-- `_request_timeout` bounds the stream (`_POD_EXEC_TIMEOUT_SECONDS`).
-- Three-state probe protects desired-state writes: a transient exec failure returns `unknown` and the row is left in-flight rather than mis-marked `Failed` (fault `F3`).
+- Los comandos se construyen a partir de literales de cadena en el código (`kubeport/utils/discovery.py:309-322`, `kubeport/tasks/reconciliation.py:1641` y siguientes), nunca a partir de la entrada del operador. No hay vector de inyección de shell que llegue al canal exec.
+- `_request_timeout` limita el flujo (`_POD_EXEC_TIMEOUT_SECONDS`).
+- La sonda de tres estados protege las escrituras de estado deseado: un fallo transitorio de exec devuelve `unknown` y la fila se deja en vuelo en lugar de marcarse incorrectamente como `Failed` (fallo `F3`).
 
-**Documented residual risk.** Code execution inside the bench pod compromises the ground-truth source. `docs/fault-model.md` §"Faults explicitly out of scope" calls this out.
+**Riesgo residual documentado.** La ejecución de código dentro del pod bench compromete la fuente de verdad. `docs/fault-model.md` §"Faults explicitly out of scope" lo menciona explícitamente.
 
-### B7 — Long worker → public GHCR
+### B7 — Worker largo → GHCR público
 
-**Trust direction.** Outbound only. Kubeport never publishes to GHCR; the publish-site-image workflow runs on a tag push and is out-of-process from the bench.
+**Dirección de confianza.** Solo saliente. Kubeport nunca publica en GHCR; el flujo de trabajo de publicación de imágenes de sitio se ejecuta en un push de etiqueta y está fuera de proceso del bench.
 
-**Data crossing.** HTTPS pulls of the curated `kubeport/site_images/catalog.json` deltas during the daily site-image catalog sync.
+**Datos que cruzan.** Descargas HTTPS de los deltas de `kubeport/site_images/catalog.json` curado durante la sincronización diaria del catálogo de imágenes de sitio.
 
-**Mitigations in code.**
+**Mitigaciones en el código.**
 
-- Curated rows must be `ghcr.io/owner/image` repositories with a `sha256:` digest pinned: `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py` validation.
-- The catalog scrub runs in a background task (`kubeport/tasks/site_image_tasks.py`) and is idempotent: re-import never broadens the curated set without a corresponding manifest commit.
-- The publish-site-image workflow does not auto-commit — it uploads an artifact and the operator commits the bump through the normal review flow (see [`AGENTS.md`](../AGENTS.md) §"Scheduled Jobs").
+- Las filas curadas deben ser repositorios `ghcr.io/owner/image` con un digest `sha256:` fijado: validación en `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py`.
+- El saneamiento del catálogo se ejecuta en una tarea en segundo plano (`kubeport/tasks/site_image_tasks.py`) y es idempotente: la reimportación nunca amplía el conjunto curado sin el correspondiente commit de manifiesto.
+- El flujo de trabajo de publicación de imágenes de sitio no hace auto-commit — sube un artefacto y el operador confirma el bump a través del flujo de revisión normal (véase [`AGENTS.md`](../AGENTS.md) §"Scheduled Jobs").
 
-### B8 — Cluster Job pod → `kubeport-backups` PVC
+### B8 — Pod Job del clúster → PVC `kubeport-backups`
 
-**Trust direction.** Cluster-internal. Bench-side backup Jobs write archives; a short-lived busybox probe Job reads the `<archive>.size` sidecar.
+**Dirección de confianza.** Interna al clúster. Los Jobs de backup del lado bench escriben archivos; un Job de sonda busybox de corta duración lee el auxiliar `<archivo>.size`.
 
-**Data crossing.** Backup tarballs and their `.size` sidecar files; a per-archive `archive-delete` cleanup Job.
+**Datos que cruzan.** Archivos tar de backup y sus archivos auxiliares `.size`; un Job de limpieza `archive-delete` por archivo.
 
-**Mitigations in code.**
+**Mitigaciones en el código.**
 
-- The PVC is namespace-local; access requires being scheduled into that namespace.
-- The probe Job mounts the PVC read-only and runs only the size sidecar read (`kubeport/tasks/reconciliation.py:1245`).
-- Archive lifecycle is independent of the source `Frappe Site` row (Invariant 7 in `AGENTS.md`); a deletion of the source site does not orphan the archive.
+- El PVC es local al namespace; el acceso requiere estar programado en ese namespace.
+- El Job de sonda monta el PVC de solo lectura y solo ejecuta la lectura del auxiliar de tamaño (`kubeport/tasks/reconciliation.py:1245`).
+- El ciclo de vida del archivo es independiente de la fila fuente `Frappe Site` (Invariante 7 en `AGENTS.md`); la eliminación del sitio fuente no huerfana el archivo.
 
 ---
 
-## 3. STRIDE catalog
+## 3. Catálogo STRIDE
 
-One row per (boundary, threat) pair with a non-trivial mitigation. Threats that map to "out of scope" (e.g. denial-of-service via legitimate System Manager actions, per `SECURITY.md`) are not duplicated here.
+Una fila por par (frontera, amenaza) con una mitigación no trivial. Las amenazas que se corresponden con "fuera de alcance" (por ejemplo, denegación de servicio mediante acciones legítimas de System Manager, según `SECURITY.md`) no se duplican aquí.
 
-| Boundary | STRIDE | Threat | Mitigation | Witness |
+| Frontera | STRIDE | Amenaza | Mitigación | Testigo |
 |---|---|---|---|---|
-| B1 | Spoofing | Forged session impersonates an operator. | Frappe session + CSRF (framework default). | `kubeport/hooks.py` (no CSRF opt-outs registered for Kubeport routes). |
-| B1 | Tampering | Operator submits a manifest with disallowed kinds (e.g. CRD) to escape the allowlist. | Server-side `Service Bundle` validation against the resource-kind allowlist; rejected before enqueue. | `kubeport/utils/k8s_resources.py`, `kubeport/kubeport/doctype/service_bundle/service_bundle.py:44-60`. |
-| B1 | Repudiation | Operator deletes a `Pod`/`Job`/`ConfigMap` and denies the action. | Append-only `Kubernetes Command Audit Log` row written per execute, decoupled from the source row so it survives source deletion. | `kubeport/tasks/kubernetes_command_tasks.py:110-143`. |
-| B1 | Information disclosure | Browser exfiltrates `Kubernetes Cluster` credentials. | Bearer token uses encrypted `Password` fieldtype; field is not echoed back to forms in plaintext after first save (Frappe default for `Password`). | `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.json:133`. |
-| B1 | Denial of service | Operator clicks Deploy / Cancel rapidly to corrupt in-flight state. | Per-run `operation_token` rotated on every enqueue; worker re-checks before writes (fault `F5`). | `kubeport/kubeport/doctype/helm_release/helm_release.py:141`. |
-| B1 | Elevation of privilege | Non-System-Manager triggers a destructive ad-hoc op. | DocType-level role check on `Kubernetes Command`, plus typed `confirm_destructive` field gated at `validate` and `execute`. | `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.json:161-170`, `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:78-91`. |
-| B1g | Information disclosure | Guest endpoint is widened to expose row data. | Endpoint returns only `frappe.db.count("Helm Release")`; takes no parameters. | `kubeport/api/dashboard.py:76-86`. |
-| B2 | Information disclosure | Database backup is exfiltrated; bearer tokens leak. | Bearer tokens encrypted at rest via Frappe's `Password` field (encryption key is bench-level). Operators are expected to encrypt DB backups (`SECURITY.md` "Hardening recommendations"). | `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.json:133`. |
-| B2 | Tampering | Forged values in a desired-state row mislead reconciliation. | All writes from the worker path go through `db_set` with token re-check; writes from the controller path go through Frappe's validation pipeline. | `kubeport/tasks/site_tasks.py:1357`, `kubeport/tasks/reconciliation.py:1820`. |
-| B3 | Spoofing | Job picked up by a worker before the source row is committed. | `enqueue_after_commit=True` on every cluster-mutating enqueue. | `kubeport/kubeport/doctype/helm_release/helm_release.py:148-155`, mirrored in `service_bundle.py:78`, `frappe_site.py:149` (and sibling enqueue sites). |
-| B3 | Tampering | Worker acts on rotated state. | Pre-write `operation_token` re-check (fault `F5`). | `kubeport/tasks/site_tasks.py:1357`. |
-| B4 | Tampering / EoP | Operator-controlled string injected into a shell command. | `subprocess.run(list, ...)` only; module docstring forbids `shell=True`. | `kubeport/utils/helm.py:516, 525` and module rule at `:9`. |
-| B4 | Denial of service | Helm CLI hangs against an unreachable cluster. | Hard timeouts (`_HELM_WORKER_TIMEOUT_SECONDS = 600`, `_HELM_READ_TIMEOUT_SECONDS = 30`). Stuck row recovers via fault `F1`. | `kubeport/utils/helm.py:31`. |
-| B4 | Information disclosure | Per-call kubeconfig leaks to other processes on the bench host. | Written to a per-call temp file, removed on subprocess exit. | `kubeport/utils/helm.py` (helm wrapper, `_with_kubeconfig` block). |
-| B5 | Spoofing | Cluster API server forgery. | `ca_certificate` mandatory unless dev-only TLS bypass is explicitly enabled. | `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.py` (validation block). |
-| B5 | Tampering | Cluster credential scope creeps across registered clusters. | `get_k8s_api_client(cluster_name)` returns a freshly-built scoped client per call; no global cache shared between clusters. | `kubeport/utils/k8s_client.py`. |
-| B5 | Denial of service | API server stalls reads. | `_request_timeout` on every read (15 s for orphan-sweep job list, 10 s for storage-class discovery, configurable for per-form pod listing). | `kubeport/tasks/reconciliation.py:1577`, `kubeport/tasks/site_tasks.py:382`, `kubeport/utils/observability.py:63`. |
-| B5 | Elevation of privilege | Service Bundle apply mutates a kind outside the allowlist. | Allowlist enforced before apply; CRDs and arbitrary CRs are rejected. | `kubeport/utils/k8s_resources.py`. |
-| B6 | Tampering | Operator-supplied string reaches the exec command. | Command is hard-coded in source; no operator input flows to the shell. | `kubeport/utils/discovery.py:309-322`, `kubeport/tasks/reconciliation.py:1641` and below. |
-| B6 | Repudiation | Pod-exec result is silently treated as a write. | Three-state probe — transient exec failure returns `unknown` and the next tick retries; final state writes only on a definitive answer. | `kubeport/tasks/reconciliation.py:31, 1192`. |
-| B6 | Denial of service | Hung exec stream blocks the worker. | `_request_timeout` (`_POD_EXEC_TIMEOUT_SECONDS`). | `kubeport/utils/discovery.py:333`, `kubeport/tasks/reconciliation.py:1666` (exec_kwargs). |
-| B7 | Tampering | Curated catalog is replaced by a forged image reference. | Curated rows are digest-pinned (`sha256:`); the `update_site_catalog` workflow does not auto-commit, so a curated bump goes through normal code review. | `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py` (digest validation), `.github/workflows/publish-site-image.yml` (artifact-only flow). |
-| B8 | Tampering | Truncated archive is mistakenly marked `Available`. | Reconciliation does not trust Job exit codes; the PVC-side `<archive>.size` sidecar probe must also succeed (fault `F9`). | `kubeport/tasks/reconciliation.py:1245`. |
+| B1 | Suplantación | Sesión falsificada que se hace pasar por un operador. | Sesión de Frappe + CSRF (valor predeterminado del framework). | `kubeport/hooks.py` (no hay exclusiones de CSRF registradas para las rutas de Kubeport). |
+| B1 | Manipulación | El operador envía un manifiesto con tipos no permitidos (p. ej., CRD) para eludir la lista de tipos permitidos. | Validación de `Service Bundle` del lado del servidor contra la lista de tipos de recursos permitidos; rechazado antes del enqueue. | `kubeport/utils/k8s_resources.py`, `kubeport/kubeport/doctype/service_bundle/service_bundle.py:44-60`. |
+| B1 | Repudio | El operador elimina un `Pod`/`Job`/`ConfigMap` y niega la acción. | Fila de `Kubernetes Command Audit Log` de solo anexado escrita por cada ejecución, desacoplada de la fila fuente para sobrevivir a su eliminación. | `kubeport/tasks/kubernetes_command_tasks.py:110-143`. |
+| B1 | Divulgación de información | El navegador exfiltra credenciales de `Kubernetes Cluster`. | El token bearer usa el fieldtype `Password` cifrado; el campo no se devuelve a los formularios en texto plano tras el primer guardado (comportamiento predeterminado de Frappe para `Password`). | `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.json:133`. |
+| B1 | Denegación de servicio | El operador hace clic en Deploy / Cancel rápidamente para corromper el estado en vuelo. | `operation_token` por ejecución rotado en cada enqueue; el worker lo vuelve a comprobar antes de las escrituras (fallo `F5`). | `kubeport/kubeport/doctype/helm_release/helm_release.py:141`. |
+| B1 | Elevación de privilegios | Un usuario que no es System Manager desencadena una operación ad-hoc destructiva. | Comprobación de rol a nivel de DocType en `Kubernetes Command`, más campo tipado `confirm_destructive` bloqueado en `validate` y `execute`. | `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.json:161-170`, `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:78-91`. |
+| B1g | Divulgación de información | El endpoint de invitado se amplía para exponer datos de filas. | El endpoint solo devuelve `frappe.db.count("Helm Release")`; no acepta parámetros. | `kubeport/api/dashboard.py:76-86`. |
+| B2 | Divulgación de información | Se exfiltra una copia de seguridad de la base de datos; se filtran tokens bearer. | Los tokens bearer están cifrados en reposo mediante el campo `Password` de Frappe (la clave de cifrado es a nivel de bench). Se espera que los operadores cifren las copias de seguridad de la base de datos (`SECURITY.md` "Hardening recommendations"). | `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.json:133`. |
+| B2 | Manipulación | Valores falsificados en una fila de estado deseado engañan a la reconciliación. | Todas las escrituras desde la ruta del worker pasan por `db_set` con recomprobación del token; las escrituras desde la ruta del controlador pasan por el pipeline de validación de Frappe. | `kubeport/tasks/site_tasks.py:1357`, `kubeport/tasks/reconciliation.py:1820`. |
+| B3 | Suplantación | Job recogido por un worker antes de que se confirme la fila fuente. | `enqueue_after_commit=True` en cada enqueue que muta el clúster. | `kubeport/kubeport/doctype/helm_release/helm_release.py:148-155`, reflejado en `service_bundle.py:78`, `frappe_site.py:149` (y sitios de enqueue hermanos). |
+| B3 | Manipulación | El worker actúa sobre un estado rotado. | Recomprobación de `operation_token` previa a la escritura (fallo `F5`). | `kubeport/tasks/site_tasks.py:1357`. |
+| B4 | Manipulación / EoP | Cadena controlada por el operador inyectada en un comando de shell. | Solo `subprocess.run(list, ...)`; el docstring del módulo prohíbe `shell=True`. | `kubeport/utils/helm.py:516, 525` y regla del módulo en `:9`. |
+| B4 | Denegación de servicio | La CLI de Helm se cuelga contra un clúster inalcanzable. | Tiempos de espera estrictos (`_HELM_WORKER_TIMEOUT_SECONDS = 600`, `_HELM_READ_TIMEOUT_SECONDS = 30`). Una fila atascada se recupera mediante el fallo `F1`. | `kubeport/utils/helm.py:31`. |
+| B4 | Divulgación de información | El kubeconfig por llamada se filtra a otros procesos del host bench. | Escrito en un archivo temporal por llamada, eliminado al salir el subproceso. | `kubeport/utils/helm.py` (wrapper de helm, bloque `_with_kubeconfig`). |
+| B5 | Suplantación | Falsificación del servidor de la API del clúster. | `ca_certificate` obligatorio a menos que se habilite explícitamente la omisión TLS solo para desarrollo. | `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.py` (bloque de validación). |
+| B5 | Manipulación | El alcance de la credencial del clúster se extiende entre clústeres registrados. | `get_k8s_api_client(cluster_name)` devuelve un cliente con alcance recién construido por llamada; no hay caché global compartido entre clústeres. | `kubeport/utils/k8s_client.py`. |
+| B5 | Denegación de servicio | El servidor de la API paraliza las lecturas. | `_request_timeout` en cada lectura (15 s para la lista de Jobs del barrido de huérfanos, 10 s para el descubrimiento de clases de almacenamiento, configurable para el listado de pods por formulario). | `kubeport/tasks/reconciliation.py:1577`, `kubeport/tasks/site_tasks.py:382`, `kubeport/utils/observability.py:63`. |
+| B5 | Elevación de privilegios | La aplicación de Service Bundle muta un tipo fuera de la lista de tipos permitidos. | La lista de tipos permitidos se aplica antes de la operación apply; los CRDs y los CRs arbitrarios se rechazan. | `kubeport/utils/k8s_resources.py`. |
+| B6 | Manipulación | Una cadena suministrada por el operador llega al comando exec. | El comando está codificado en el código fuente; no hay entrada del operador que fluya al shell. | `kubeport/utils/discovery.py:309-322`, `kubeport/tasks/reconciliation.py:1641` y siguientes. |
+| B6 | Repudio | El resultado del pod-exec se trata silenciosamente como una escritura. | Sonda de tres estados — un fallo transitorio de exec devuelve `unknown` y el siguiente tick reintenta; las escrituras de estado final solo ocurren ante una respuesta definitiva. | `kubeport/tasks/reconciliation.py:31, 1192`. |
+| B6 | Denegación de servicio | Un flujo exec colgado bloquea el worker. | `_request_timeout` (`_POD_EXEC_TIMEOUT_SECONDS`). | `kubeport/utils/discovery.py:333`, `kubeport/tasks/reconciliation.py:1666` (exec_kwargs). |
+| B7 | Manipulación | El catálogo curado es reemplazado por una referencia de imagen falsificada. | Las filas curadas tienen el digest fijado (`sha256:`); el flujo de trabajo `update_site_catalog` no hace auto-commit, por lo que un bump curado pasa por la revisión de código normal. | `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py` (validación de digest), `.github/workflows/publish-site-image.yml` (flujo solo de artefacto). |
+| B8 | Manipulación | Un archivo truncado se marca erróneamente como `Available`. | La reconciliación no confía en los códigos de salida del Job; la sonda auxiliar `<archivo>.size` del lado del PVC también debe completarse con éxito (fallo `F9`). | `kubeport/tasks/reconciliation.py:1245`. |
 
 ---
 
-## 4. Endpoint × boundary mapping
+## 4. Mapeo de endpoints × frontera
 
-Every whitelisted entry-point and every privileged worker call is mapped to the boundary it crosses, so the boundary table above is exhaustive over the Kubeport codebase.
+Cada punto de entrada incluido en la lista blanca y cada llamada de worker privilegiada se mapea a la frontera que cruza, de modo que la tabla de fronteras anterior sea exhaustiva sobre el código base de Kubeport.
 
-### 4.1 Whitelisted endpoints (B1, plus B1g where noted)
+### 4.1 Endpoints en lista blanca (B1, más B1g donde se indica)
 
-| Endpoint | File:line | Crosses |
+| Endpoint | Archivo:línea | Cruza |
 |---|---|---|
-| `get_cluster_namespaces` | `kubeport/api/__init__.py:27` | B1 → B5 (live read) |
-| `parse_kubeconfig_contexts` | `kubeport/api/__init__.py:65` | B1 (parse only, no cluster contact) |
-| `extract_kubeconfig_context` | `kubeport/api/__init__.py:132` | B1 (parse only) |
+| `get_cluster_namespaces` | `kubeport/api/__init__.py:27` | B1 → B5 (lectura en vivo) |
+| `parse_kubeconfig_contexts` | `kubeport/api/__init__.py:65` | B1 (solo análisis, sin contacto con el clúster) |
+| `extract_kubeconfig_context` | `kubeport/api/__init__.py:132` | B1 (solo análisis) |
 | `get_cluster_discovery` | `kubeport/api/discovery.py:19` | B1 → B5 |
-| `adopt_helm_release` | `kubeport/api/discovery.py:94` | B1 → B2 (writes a desired-state row from a discovered live release) |
+| `adopt_helm_release` | `kubeport/api/discovery.py:94` | B1 → B2 (escribe una fila de estado deseado a partir de una release descubierta en vivo) |
 | `get_release_resource_logs` | `kubeport/api/observability.py:28` | B1 → B5 |
 | `get_release_resource_events` | `kubeport/api/observability.py:96` | B1 → B5 |
 | `get_release_resource_rollout` | `kubeport/api/observability.py:129` | B1 → B5 |
@@ -232,16 +232,16 @@ Every whitelisted entry-point and every privileged worker call is mapped to the 
 | `list_site_images` | `kubeport/api/site_images.py:13` | B1 → B2 |
 | `count_stale_operations` | `kubeport/api/dashboard.py:32` | B1 → B2 |
 | `stale_operations_card_value` | `kubeport/api/dashboard.py:64` | B1 → B2 |
-| `public_helm_release_count` | `kubeport/api/dashboard.py:76` | **B1g** → B2 (count only) |
+| `public_helm_release_count` | `kubeport/api/dashboard.py:76` | **B1g** → B2 (solo conteo) |
 | `Kubernetes Cluster.test_connection` | `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.py:66` | B1 → B5 |
 | `Helm Repository.sync_charts` | `kubeport/kubeport/doctype/helm_repository/helm_repository.py:59` | B1 → B3 → B4 |
-| `Helm Chart.fetch_default_values` | `kubeport/kubeport/doctype/helm_chart/helm_chart.py:42` | B1 → B4 (read-only `helm show values`) |
+| `Helm Chart.fetch_default_values` | `kubeport/kubeport/doctype/helm_chart/helm_chart.py:42` | B1 → B4 (solo lectura `helm show values`) |
 | `Helm Release.deploy_release` | `kubeport/kubeport/doctype/helm_release/helm_release.py:125` | B1 → B3 → B4/B5 |
 | `Helm Release.uninstall_release` | `kubeport/kubeport/doctype/helm_release/helm_release.py:162` | B1 → B3 → B4/B5 |
 | `Helm Release.rollback_release` | `kubeport/kubeport/doctype/helm_release/helm_release.py:203` | B1 → B3 → B4/B5 |
 | `Helm Release.get_release_health` | `kubeport/kubeport/doctype/helm_release/helm_release.py:241` | B1 → B5 |
-| `Helm Release.load_defaults` | `kubeport/kubeport/doctype/helm_release/helm_release.py:267` | B1 → B4 (read-only) |
-| `Helm Release.get_release_history` | `kubeport/kubeport/doctype/helm_release/helm_release.py:304` | B1 → B4 (read-only) |
+| `Helm Release.load_defaults` | `kubeport/kubeport/doctype/helm_release/helm_release.py:267` | B1 → B4 (solo lectura) |
+| `Helm Release.get_release_history` | `kubeport/kubeport/doctype/helm_release/helm_release.py:304` | B1 → B4 (solo lectura) |
 | `Service Bundle.apply_bundle` | `kubeport/kubeport/doctype/service_bundle/service_bundle.py:44` | B1 → B3 → B5 |
 | `Service Bundle.delete_bundle` | `kubeport/kubeport/doctype/service_bundle/service_bundle.py:62` | B1 → B3 → B5 |
 | `Frappe Site.create_site` | `kubeport/kubeport/doctype/frappe_site/frappe_site.py:124` | B1 → B3 → B5 |
@@ -250,15 +250,15 @@ Every whitelisted entry-point and every privileged worker call is mapped to the 
 | `Frappe Site.backup_site` | `kubeport/kubeport/doctype/frappe_site/frappe_site.py:244` | B1 → B3 → B5 → B8 |
 | `Frappe Site.restore_site` | `kubeport/kubeport/doctype/frappe_site/frappe_site.py:292` | B1 → B3 → B5 ← B8 |
 | `Frappe Site.cancel_site` | `kubeport/kubeport/doctype/frappe_site/frappe_site.py:368` | B1 → B3 → B5 |
-| `Kubernetes Command.execute` | `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:98` | B1 → B5 (read inline) or B1 → B3 → B5 (delete enqueue) |
+| `Kubernetes Command.execute` | `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:98` | B1 → B5 (lectura en línea) o B1 → B3 → B5 (eliminación por enqueue) |
 
-### 4.2 Privileged worker calls (B3 → B4/B5/B6)
+### 4.2 Llamadas de worker privilegiadas (B3 → B4/B5/B6)
 
-| Worker function | File:line | Crosses |
+| Función del worker | Archivo:línea | Cruza |
 |---|---|---|
 | `add_and_sync_repo` | `kubeport/tasks/helm_tasks.py:42` | B4 |
 | `sync_repo_charts` | `kubeport/tasks/helm_tasks.py:89` | B4 |
-| `sync_all_repos` (scheduled, daily) | `kubeport/tasks/helm_tasks.py:140` | B4 |
+| `sync_all_repos` (programado, diario) | `kubeport/tasks/helm_tasks.py:140` | B4 |
 | `install_or_upgrade_release` | `kubeport/tasks/helm_tasks.py:174` | B4 → B5 |
 | `rollback_release` | `kubeport/tasks/helm_tasks.py:306` | B4 → B5 |
 | `uninstall_release` | `kubeport/tasks/helm_tasks.py:430` | B4 → B5 |
@@ -271,46 +271,46 @@ Every whitelisted entry-point and every privileged worker call is mapped to the 
 | `backup_site_task` | `kubeport/tasks/site_tasks.py:478` | B5 → B8 |
 | `restore_site_task` | `kubeport/tasks/site_tasks.py:542` | B5 ← B8 |
 | `delete_backup_archive_task` | `kubeport/tasks/site_tasks.py:597` | B5 → B8 |
-| `run_kubernetes_command` | `kubeport/tasks/kubernetes_command_tasks.py:44` | B5 (Delete only; reads run inline at B1) |
-| `sync_site_image_catalog` (scheduled, daily) | `kubeport/tasks/site_image_tasks.py:20` | B7 → B2 |
-| `reconcile_all_releases` (scheduled, `*/5`) | `kubeport/tasks/reconciliation.py` (registered in `kubeport/hooks.py`) | B5, B6, B2 |
-| `reconcile_site_backups` (scheduled, `*/5`) | `kubeport/tasks/reconciliation.py` (registered in `kubeport/hooks.py`) | B5, B6, B8, B2 |
+| `run_kubernetes_command` | `kubeport/tasks/kubernetes_command_tasks.py:44` | B5 (solo Delete; las lecturas se ejecutan en línea en B1) |
+| `sync_site_image_catalog` (programado, diario) | `kubeport/tasks/site_image_tasks.py:20` | B7 → B2 |
+| `reconcile_all_releases` (programado, `*/5`) | `kubeport/tasks/reconciliation.py` (registrado en `kubeport/hooks.py`) | B5, B6, B2 |
+| `reconcile_site_backups` (programado, `*/5`) | `kubeport/tasks/reconciliation.py` (registrado en `kubeport/hooks.py`) | B5, B6, B8, B2 |
 
 ---
 
-## 5. Justification of the Kubernetes Command Delete allowlist
+## 5. Justificación de la lista de tipos permitidos para Delete en Kubernetes Command
 
-`Kubernetes Command` is the only doctype that exposes ad-hoc cluster operations to the operator. Read actions (`Get`, `List`) accept the full eight-kind read allowlist:
+`Kubernetes Command` es el único DocType que expone operaciones ad-hoc de clúster al operador. Las acciones de lectura (`Get`, `List`) aceptan la lista completa de ocho tipos para lectura:
 
 ```
 Pod, Job, ConfigMap, Secret, PersistentVolumeClaim,
 Service, Deployment, StatefulSet
 ```
 
-Delete actions accept only three kinds — `Pod`, `Job`, `ConfigMap` — defined in `_DELETABLE_KINDS` at `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:36`. The exclusions are deliberate. For each excluded kind, this section names the ground reason and the controller that should own the destructive path instead.
+Las acciones de eliminación solo aceptan tres tipos — `Pod`, `Job`, `ConfigMap` — definidos en `_DELETABLE_KINDS` en `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:36`. Las exclusiones son deliberadas. Para cada tipo excluido, esta sección indica el motivo fundamental y el controlador que debería ser propietario de la ruta destructiva en su lugar.
 
-| Kind | Excluded from Delete because… | Operator should use |
+| Tipo | Excluido de Delete porque… | El operador debería usar |
 |---|---|---|
-| `Secret` | A live workload's pods may have the Secret projected as env/volume; deleting it does not roll the consuming Pods, leaving them with stale credentials and a confusing failure mode at the next restart. The Secret's lifecycle should be owned by the controller that created it (Helm, the Frappe Site Job), not by an out-of-band operator delete. | `Helm Release` upgrade / uninstall; `Frappe Site` cancel flow (which removes the per-Job credentials Secret via owner reference). |
-| `PersistentVolumeClaim` | Deleting a PVC destroys data with no in-band undo. The Frappe Site bench PVC and the `kubeport-backups` PVC carry irreplaceable state; the backup PVC is also designed to outlive the source `Frappe Site` row (Invariant 7). Allowing PVC delete via an audit-log row would defeat the durability guarantee that backup metadata survives source-row deletion. | `Frappe Site Backup` trash flow (which uses an `archive-delete` Job to remove specific archives without disturbing the PVC); cluster-admin tooling for PVC removal. |
-| `Deployment` | Deleting a Deployment mass-terminates its replica set and orphans the workload Pods, causing an outage that no Kubeport row reflects. The desired-state row would still claim `Deployed`, breaking the invariant that the row predicts the cluster shape. | `Helm Release` upgrade / uninstall — the only path that updates the desired-state row in the same transaction. |
-| `StatefulSet` | Same outage profile as `Deployment`, with the additional cost that StatefulSet-managed PVCs may be retained or deleted depending on `persistentVolumeClaimRetentionPolicy` — a foot-gun for ad-hoc deletes. The Helm-managed lifecycle handles this consistently. | `Helm Release` upgrade / uninstall. |
-| `Service` | Deleting a Service silently breaks every consumer (intra-cluster traffic, Ingress backends, Frappe site routing) without surfacing on any Kubeport row. | `Helm Release` or `Service Bundle` (which re-applies via server-side apply and updates the row). |
+| `Secret` | Los pods de una carga de trabajo activa pueden tener el Secret proyectado como env/volumen; eliminarlo no reinicia los Pods que lo consumen, dejándolos con credenciales obsoletas y un modo de fallo confuso en el próximo reinicio. El ciclo de vida del Secret debería ser propiedad del controlador que lo creó (Helm, el Job de Frappe Site), no de una eliminación fuera de banda por el operador. | Actualización / desinstalación de `Helm Release`; flujo de cancelación de `Frappe Site` (que elimina el Secret de credenciales por Job mediante referencia de propietario). |
+| `PersistentVolumeClaim` | Eliminar un PVC destruye datos sin posibilidad de deshacer en banda. El PVC bench de Frappe Site y el PVC `kubeport-backups` contienen estado irremplazable; el PVC de backup también está diseñado para sobrevivir a la fila fuente `Frappe Site` (Invariante 7). Permitir la eliminación de PVC mediante una fila del registro de auditoría anularía la garantía de durabilidad de que los metadatos de backup sobreviven a la eliminación de la fila fuente. | Flujo de eliminación de `Frappe Site Backup` (que usa un Job `archive-delete` para eliminar archivos específicos sin perturbar el PVC); herramientas de administrador del clúster para la eliminación del PVC. |
+| `Deployment` | Eliminar un Deployment termina masivamente su conjunto de réplicas y deja los Pods de la carga de trabajo huérfanos, causando una interrupción que ninguna fila de Kubeport refleja. La fila de estado deseado seguiría afirmando `Deployed`, rompiendo el invariante de que la fila predice la forma del clúster. | Actualización / desinstalación de `Helm Release` — la única ruta que actualiza la fila de estado deseado en la misma transacción. |
+| `StatefulSet` | El mismo perfil de interrupción que `Deployment`, con el coste adicional de que los PVCs gestionados por StatefulSet pueden retenerse o eliminarse dependiendo de `persistentVolumeClaimRetentionPolicy` — un riesgo para eliminaciones ad-hoc. El ciclo de vida gestionado por Helm maneja esto de forma consistente. | Actualización / desinstalación de `Helm Release`. |
+| `Service` | Eliminar un Service rompe silenciosamente todos sus consumidores (tráfico intra-clúster, backends de Ingress, enrutamiento del sitio de Frappe) sin que aparezca en ninguna fila de Kubeport. | `Helm Release` o `Service Bundle` (que vuelve a aplicar mediante server-side apply y actualiza la fila). |
 
-The kinds that **are** allowed for Delete share a property: the resource is restartable or recoverable on its own.
+Los tipos que **sí** están permitidos para Delete comparten una propiedad: el recurso es reiniciable o recuperable por sí mismo.
 
-- `Pod` — the parent controller (Deployment, StatefulSet, Job) recreates it.
-- `Job` — already terminal at delete time in normal operation; recreation is the operator's normal recovery path for stuck reconciliation, and the orphan-Job sweep (fault `F6`) already deletes Jobs not referenced by any row.
-- `ConfigMap` — recoverable from source (the desired-state row that defined it can re-apply). No data loss.
+- `Pod` — el controlador padre (Deployment, StatefulSet, Job) lo vuelve a crear.
+- `Job` — ya está en estado terminal en el momento de la eliminación en funcionamiento normal; la recreación es la ruta de recuperación normal del operador para la reconciliación atascada, y el barrido de Jobs huérfanos (fallo `F6`) ya elimina los Jobs no referenciados por ninguna fila.
+- `ConfigMap` — recuperable desde el origen (la fila de estado deseado que lo definió puede volver a aplicarlo). Sin pérdida de datos.
 
-The double-gate (typed `confirm_destructive` enforced at both `validate` and `execute`, audit row written on every execute) ensures every Delete is recorded by source row and by audit row, and that the audit row outlives the source.
+La doble comprobación (campo tipado `confirm_destructive` aplicado tanto en `validate` como en `execute`, fila de auditoría escrita en cada ejecución) garantiza que cada Delete quede registrado por la fila fuente y por la fila de auditoría, y que la fila de auditoría sobreviva a la fuente.
 
 ---
 
-## 6. Cross-references
+## 6. Referencias cruzadas
 
-- [`SECURITY.md`](../SECURITY.md) — disclosure policy, in-scope / out-of-scope, hardening recommendations.
-- [`docs/architecture.md`](architecture.md) §3 — eight numbered safety / liveness / eventual-consistency properties enforced by code.
-- [`docs/fault-model.md`](fault-model.md) — tolerated faults, defences, recovery upper bounds.
-- [`docs/control-plane-state.md`](control-plane-state.md) §Robustness Properties — prose inventory of the same defences in product-feature framing.
-- [`AGENTS.md`](../AGENTS.md) — non-negotiable invariants for contributors that keep these properties true.
+- [`SECURITY.md`](../SECURITY.md) — política de divulgación, dentro y fuera del alcance, recomendaciones de hardening.
+- [`docs/architecture.md`](architecture.md) §3 — ocho propiedades numeradas de seguridad / disponibilidad / consistencia eventual aplicadas por el código.
+- [`docs/fault-model.md`](fault-model.md) — fallos tolerados, defensas, límites superiores de recuperación.
+- [`docs/control-plane-state.md`](control-plane-state.md) §Robustness Properties — inventario en prosa de las mismas defensas en términos de características del producto.
+- [`AGENTS.md`](../AGENTS.md) — invariantes no negociables para colaboradores que mantienen estas propiedades verdaderas.
