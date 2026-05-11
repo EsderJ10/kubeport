@@ -1,30 +1,30 @@
 # Kubeport — Agent Instructions
 
-This file is the authoritative reference for AI coding agents working on the Kubeport repository. It defines project context, architectural invariants, implementation patterns, and behavioral rules that agents must follow.
+Este archivo es la referencia autorizada para agentes de IA que trabajan en el repositorio Kubeport. Define el contexto del proyecto, los invariantes arquitectónicos, los patrones de implementación y las reglas de comportamiento que los agentes deben seguir.
 
 ---
 
 ## Project Context
 
-Kubeport is a Frappe app that acts as a Kubernetes control plane inside the Frappe/ERPNext UI. It manages cluster connectivity, Helm releases, raw Kubernetes manifests (via Service Bundles), and Frappe site provisioning.
+Kubeport es una app de Frappe que actúa como un control plane de Kubernetes dentro de la interfaz de Frappe/ERPNext. Gestiona la conectividad del cluster, los Helm releases, los Kubernetes manifests sin procesar (mediante Service Bundles) y el aprovisionamiento de sitios Frappe.
 
-**The defining architectural invariant**: desired state lives in MariaDB through Frappe DocTypes; observed state is always queried live from the cluster. Never blur these two categories.
+**El invariante arquitectónico principal**: el desired state vive en MariaDB mediante DocTypes de Frappe; el observed state siempre se consulta en vivo desde el cluster. Nunca mezcles estas dos categorías.
 
 ## Stack and Tooling
 
 | Attribute | Value |
 |---|---|
-| Type | Frappe app for ERPNext/Frappe |
+| Type | App de Frappe para ERPNext/Frappe |
 | Python | 3.14+ |
 | Build backend | `flit` |
-| Install | `bench get-app <url> --branch main` then `bench install-app kubeport` |
+| Install | `bench get-app <url> --branch main` luego `bench install-app kubeport` |
 | Dependencies | `kubernetes`, `urllib3`, `PyYAML` |
 
 ### Code Style
 
-- **Indentation**: tabs (not spaces)
-- **Quote style**: double quotes
-- **Line length**: 110 characters
+- **Indentation**: tabs (no espacios)
+- **Quote style**: comillas dobles
+- **Line length**: 110 caracteres
 - **Python formatting**: `ruff format`
 - **Python linting**: `ruff`
 - **JS/CSS formatting**: `prettier`
@@ -32,13 +32,13 @@ Kubeport is a Frappe app that acts as a Kubernetes control plane inside the Frap
 
 ### Type Annotations
 
-- `export_python_type_annotations = True` is enabled in `hooks.py`
-- Use `frappe.types.DF` for DocType field type hints
-- All whitelisted API methods must have type annotations
+- `export_python_type_annotations = True` está habilitado en `hooks.py`
+- Usa `frappe.types.DF` para type hints de campos DocType
+- Todos los métodos API whitelisted deben tener type annotations
 
 ### Pre-commit
 
-Pre-commit is expected to be installed in a bench checkout:
+Se espera que Pre-commit esté instalado en un bench checkout:
 
 ```bash
 cd apps/kubeport && pre-commit install
@@ -46,11 +46,11 @@ cd apps/kubeport && pre-commit install
 
 ## Repository Rules
 
-- Prefer `rg` / `rg --files` for search and file discovery.
-- Use `apply_patch` for manual edits when available.
-- Never revert user changes unless explicitly asked.
-- Do not use destructive git commands (`git reset --hard`, `git checkout --`, etc.).
-- Keep edits ASCII unless the file already uses non-ASCII text.
+- Prefiere `rg` / `rg --files` para búsqueda y descubrimiento de archivos.
+- Usa `apply_patch` para ediciones manuales cuando esté disponible.
+- Nunca reviertas cambios del usuario a menos que se solicite explícitamente.
+- No uses comandos destructivos de git (`git reset --hard`, `git checkout --`, etc.).
+- Mantén las ediciones en ASCII a menos que el archivo ya use texto no ASCII.
 
 ---
 
@@ -60,83 +60,83 @@ cd apps/kubeport && pre-commit install
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| DocTypes (desired state) | `kubeport/kubeport/doctype/` | MariaDB-backed documents; one per resource kind |
-| API endpoints | `kubeport/api/` | Whitelisted, read-only queries supporting forms |
-| K8s / Helm utilities | `kubeport/utils/` | Stateless clients and helpers |
-| Background tasks | `kubeport/tasks/` | All cluster-mutating operations |
-| Scheduled jobs | `hooks.py` | Reconciliation (every 5 min), daily repo sync |
-| Tests | `kubeport/tests/`, `doctype/*/test_*.py` | Unit and integration tests |
-| Patches | `kubeport/patches/` | Schema migration and cleanup |
+| DocTypes (desired state) | `kubeport/kubeport/doctype/` | Documentos respaldados por MariaDB; uno por tipo de recurso |
+| API endpoints | `kubeport/api/` | Consultas whitelisted de solo lectura que soportan formularios |
+| K8s / Helm utilities | `kubeport/utils/` | Clientes y utilidades sin estado |
+| Background tasks | `kubeport/tasks/` | Todas las operaciones que modifican el cluster |
+| Scheduled jobs | `hooks.py` | Reconciliación (cada 5 min), sincronización diaria de repos |
+| Tests | `kubeport/tests/`, `doctype/*/test_*.py` | Tests unitarios e integrados |
+| Patches | `kubeport/patches/` | Migración de esquema y limpieza |
 
 ### DocTypes
 
 | DocType | Purpose | Key Behavior |
 |---|---|---|
-| `Kubernetes Cluster` | Cluster credentials and connectivity | Multi-auth (kubeconfig, bearer token, in-cluster). Dev-only TLS bypass. Kubeconfig endpoint normalization. Client-side live discovery rendering. |
-| `Helm Repository` | Helm repo configuration | Background chart sync with per-run sync tokens. Full chart/version inventory rebuild. Stale chart pruning. |
-| `Helm Chart` | Synced chart metadata | Version history and cached default values. Autonamed as `{repository}/{chart_name}`. |
-| `Helm Chart Version` | Individual chart version record | Child table of `Helm Chart`. |
-| `Helm Release` | Desired Helm release state | Identity scoped to `cluster/namespace/release_name`. YAML values validation. Background deploy/uninstall. |
-| `Service Bundle` | Desired raw-manifest state | Validates against supported resource kind allowlist. Per-run operation tokens. Background apply/delete. |
-| `Frappe Site` | Desired Frappe site on a bench | Links to a Helm Release (the bench). Submits K8s Jobs for create/delete/migrate/backup/restore. Ground-truth reconciliation. |
-| `Frappe Site Backup` | Site backup archive metadata | Standalone metadata rows for PVC-backed backups. Archives live on namespace-local `kubeport-backups` PVCs and can outlive the source site row. |
-| `Kubeport Site Image` | Curated and user-registered Frappe runtime images | Repository must be a public GHCR coordinate (`ghcr.io/owner/image`); digest, when present, must be a `sha256:` reference. Curated active rows are required to record the pushed digest. `is_default` is reserved for curated active rows. Curated rows cannot be deleted (must be marked Deprecated); user-registered rows are deletable only when no `Helm Release` references them. Curated rows are seeded from `kubeport/site_images/catalog.json` by the daily sync. |
-| `Kubeport Site Image App` | Child of `Kubeport Site Image` | Records each Frappe/ERPNext/custom app baked into a Site Image with its source URL and ref. Edit-locked unless the parent is user-registered. |
-| `Kubernetes Command` | Operator-tools doctype for ad-hoc Get / List / Delete | Fixed kind allowlist (read: 8 kinds; delete: `Pod`/`Job`/`ConfigMap` only). System Manager only. Delete requires typed `confirm_destructive` enforced at validate and execute. Execution enqueued onto the `long` queue. |
-| `Kubernetes Command Audit Log` | Append-only execute log | One row per `Kubernetes Command` execute (success or failure). Decoupled from the source row so audit history survives row deletion. System Manager read-only; never written from the UI. |
+| `Kubernetes Cluster` | Credenciales y conectividad del cluster | Multi-auth (kubeconfig, bearer token, in-cluster). Bypass TLS solo en desarrollo. Normalización del endpoint kubeconfig. Renderizado de discovery en vivo del lado del cliente. |
+| `Helm Repository` | Configuración de repos Helm | Sincronización de charts en background con tokens por ejecución. Reconstrucción completa del inventario chart/version. Limpieza de charts obsoletos. |
+| `Helm Chart` | Metadatos sincronizados de charts | Historial de versiones y valores por defecto en caché. Autonombrado como `{repository}/{chart_name}`. |
+| `Helm Chart Version` | Registro individual de versión de chart | Tabla hija de `Helm Chart`. |
+| `Helm Release` | Desired state de un Helm release | Identidad delimitada por `cluster/namespace/release_name`. Validación de valores YAML. Deploy/uninstall en background. |
+| `Service Bundle` | Desired state de Kubernetes manifests sin procesar | Valida contra la allowlist de resource kinds soportados. Tokens de operación por ejecución. Apply/delete en background. |
+| `Frappe Site` | Desired state de un sitio Frappe en un bench | Enlaza a un Helm Release (el bench). Envía Kubernetes Jobs para create/delete/migrate/backup/restore. Reconciliación basada en ground-truth. |
+| `Frappe Site Backup` | Metadatos de archivos de backup de sitios | Filas independientes para backups almacenados en PVC. Los archivos viven en PVCs `kubeport-backups` locales al namespace y pueden sobrevivir al sitio original. |
+| `Kubeport Site Image` | Imágenes runtime de Frappe curadas o registradas por el usuario | El repositorio debe ser un GHCR público (`ghcr.io/owner/image`). El digest, si existe, debe ser una referencia `sha256:`. Las filas curadas activas deben registrar el digest publicado. `is_default` está reservado para filas curadas activas. Las filas curadas no pueden eliminarse (solo marcarse como Deprecated). Las filas registradas por el usuario solo pueden eliminarse si ningún `Helm Release` las referencia. Las filas curadas se generan desde `kubeport/site_images/catalog.json` mediante la sincronización diaria. |
+| `Kubeport Site Image App` | Hijo de `Kubeport Site Image` | Registra cada app Frappe/ERPNext/custom incluida en una Site Image con su URL de origen y ref. Bloqueado para edición salvo que el padre sea registrado por el usuario. |
+| `Kubernetes Command` | Doctype de herramientas de operador para Get / List / Delete ad-hoc | Allowlist fija de resource kinds (lectura: 8 tipos; delete: solo `Pod`/`Job`/`ConfigMap`). Solo System Manager. Delete requiere `confirm_destructive` tipado y validado. Ejecución encolada en la cola `long`. |
+| `Kubernetes Command Audit Log` | Log de ejecución append-only | Una fila por ejecución de `Kubernetes Command` (éxito o fallo). Desacoplado de la fila origen para que el historial sobreviva a su eliminación. Solo lectura para System Manager; nunca escrito desde la UI. |
 
 ### Scheduled Jobs
 
-Declared in `hooks.py`:
+Declarados en `hooks.py`:
 
-- `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_all_releases` (drift detection for Helm Releases, Service Bundles, and Frappe Sites; also runs the orphan-Job sweep)
-- `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_site_backups` (Frappe Site Backup Job polling and PVC-side completion probe)
-- Daily → `kubeport.tasks.helm_tasks.sync_all_repos` (chart catalog refresh)
-- Daily → `kubeport.tasks.site_image_tasks.enqueue_sync_site_image_catalog` (re-imports `kubeport/site_images/catalog.json` into the `Kubeport Site Image` doctype, marking curated rows and reconciling drift against the shipped manifest; also runs `after_install` and `after_migrate`)
+- `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_all_releases` (detección de drift para Helm Releases, Service Bundles y Frappe Sites; también ejecuta el barrido de Jobs huérfanos)
+- `*/5 * * * *` → `kubeport.tasks.reconciliation.reconcile_site_backups` (sondeo de Kubernetes Jobs de backup y comprobación de finalización en PVC)
+- Diario → `kubeport.tasks.helm_tasks.sync_all_repos` (actualización del catálogo de charts)
+- Diario → `kubeport.tasks.site_image_tasks.enqueue_sync_site_image_catalog` (reimporta `kubeport/site_images/catalog.json` en el doctype `Kubeport Site Image`, marcando filas curadas y reconciliando drift; también ejecuta `after_install` y `after_migrate`)
 
-The catalog itself is refreshed by CI: a `v*` tag push to `.github/workflows/publish-site-image.yml` runs `scripts/update_site_catalog.py` after digest verification, which rewrites the matched curated row's `image_tag`, `image_digest`, `source_revision`, and `apps_json_hash`. The workflow does not commit or open a PR — it uploads the rewritten file as the `site-image-catalog-<tag>` artifact and surfaces the diff in the run's step summary; the operator commits the bump through the normal review flow.
+El catálogo se actualiza mediante CI: un push de tag `v*` a `.github/workflows/publish-site-image.yml` ejecuta `scripts/update_site_catalog.py` tras verificar el digest, reescribiendo `image_tag`, `image_digest`, `source_revision` y `apps_json_hash` de la fila curada correspondiente. El workflow no hace commit ni abre PR — sube el archivo reescrito como `site-image-catalog-<tag>` y muestra el diff en el resumen del run; el operador hace el commit mediante el flujo normal de revisión.
 
 ---
 
 ## Design Invariants
 
-These are non-negotiable rules. Every code change must respect them.
+Estas reglas no son negociables. Cada cambio de código debe respetarlas.
 
 ### 1. Desired State vs. Observed State
 
-- **DO**: Store intent in DocType fields. Query live state from Kubernetes/Helm at read time.
-- **DO**: Store backup metadata in MariaDB, but keep backup archives outside MariaDB on the configured storage backend.
-- **DO NOT**: Persist discovered cluster state into MariaDB. Discovery is read-only.
+- **DO**: Guarda la intención en campos DocType. Consulta el estado en vivo desde Kubernetes/Helm en tiempo de lectura.
+- **DO**: Guarda metadatos de backups en MariaDB, pero mantén los archivos de backup fuera de MariaDB en el backend de almacenamiento configurado.
+- **DO NOT**: Persistas estado descubierto del cluster en MariaDB. El discovery es solo lectura.
 
 ### 2. Async-First Execution
 
-- **DO**: Route all cluster-mutating operations (Helm install/upgrade/uninstall, Service Bundle apply/delete, Frappe Site job submission) through `frappe.enqueue` background jobs on the `long` queue.
-- **DO NOT**: Make K8s/Helm API calls that modify cluster state from the web thread.
+- **DO**: Enruta todas las operaciones que modifican el cluster (Helm install/upgrade/uninstall, apply/delete de Service Bundle, envío de Kubernetes Jobs de Frappe Site) mediante background jobs en la cola `long`.
+- **DO NOT**: Hagas llamadas K8s/Helm que modifiquen el cluster desde el web thread.
 
 ### 3. Concurrency Safety
 
-- **DO**: Use per-run operation/sync tokens. Re-check document status and token before acting in background workers. Use targeted `frappe.db.set_value` / `db_set` updates.
-- **DO NOT**: Use broad `doc.reload()` calls in background tasks when concurrency matters. Allow duplicate actions while a document is `In Progress` or `Uninstalling` without token checks.
+- **DO**: Usa tokens de operación/sync por ejecución. Revisa estado y token antes de actuar en workers. Usa actualizaciones dirigidas con `frappe.db.set_value` / `db_set`.
+- **DO NOT**: Uses `doc.reload()` en workers cuando la concurrencia importa. Permite acciones duplicadas mientras un documento está `In Progress` o `Uninstalling` sin comprobaciones de token.
 
 ### 4. Discovery Is Read-Only
 
-- **DO**: Return partial results when individual releases or pods fail. Distinguish error categories clearly (no pods, only infra pods, workload pods not running, exec failure).
-- **DO NOT**: Persist discovered benches, sites, or pod state into the database. Discovery data is ephemeral.
+- **DO**: Devuelve resultados parciales cuando releases o pods individuales fallan. Distingue claramente categorías de error (sin pods, solo pods de infraestructura, pods de workload no ejecutándose, fallo en exec).
+- **DO NOT**: Persistas benches, sitios o estado de pods descubiertos en la base de datos. El discovery es efímero.
 
 ### 5. Form Rendering
 
-- **DO**: Prefer async form calls (`frappe.xcall` / `frappe.call`) plus client-side rendering for external data.
-- **DO NOT**: Use framework features that load external Kubernetes data during `doc.onload` or document fetch.
+- **DO**: Prefiere llamadas async (`frappe.xcall` / `frappe.call`) más renderizado del lado del cliente para datos externos.
+- **DO NOT**: Uses características del framework que carguen datos externos de Kubernetes durante `doc.onload` o la obtención del documento.
 
 ### 6. Cluster Access Scoping
 
-- **DO**: Keep all Kubernetes access scoped to the target cluster document. Build scoped API clients via `get_k8s_api_client(cluster_name)`.
-- **DO NOT**: Use global Kubernetes client configuration or share client state between requests.
+- **DO**: Mantén todo acceso a Kubernetes limitado al documento del cluster objetivo. Construye clientes API con ámbito mediante `get_k8s_api_client(cluster_name)`.
+- **DO NOT**: Uses configuración global del cliente Kubernetes ni compartas estado entre solicitudes.
 
 ### 7. Backup Archive Independence
 
-- **DO**: Treat backup archive lifecycle as independent from the source site's bench PVC and `Frappe Site` row lifecycle.
-- **DO NOT**: Delete or require the source `Frappe Site` row to restore from an `Available` `Frappe Site Backup` whose cluster/namespace/site metadata matches the target site.
+- **DO**: Trata el ciclo de vida del archivo de backup como independiente del PVC del bench del sitio origen y de la fila `Frappe Site`.
+- **DO NOT**: Borres o requieras la fila `Frappe Site` origen para restaurar desde un `Frappe Site Backup` en estado `Available` cuyo metadata de cluster/namespace/site coincida con el sitio destino.
 
 ---
 
@@ -144,41 +144,41 @@ These are non-negotiable rules. Every code change must respect them.
 
 ### Adding a New Background Task
 
-1. Create the task function in the appropriate `kubeport/tasks/` module.
-2. Accept a document identifier and an `operation_token` parameter.
-3. Re-check the document's current status and token before performing work (stale-job guard).
-4. Wrap the cluster operation in try/except. On failure: update status, log the error, publish realtime event.
-5. On success: update status fields with targeted `db_set` or `frappe.db.set_value`, publish realtime event.
-6. The task is enqueued from the DocType controller using `frappe.enqueue(..., queue="long", enqueue_after_commit=True)`.
+1. Crea la función de tarea en el módulo correspondiente dentro de `kubeport/tasks/`.
+2. Acepta un identificador de documento y un parámetro `operation_token`.
+3. Revisa el estado actual del documento y el token antes de ejecutar (protección contra jobs obsoletos).
+4. Envuelve la operación del cluster en try/except. En fallo: actualiza estado, registra el error, publica un evento realtime.
+5. En éxito: actualiza campos de estado con `db_set` o `frappe.db.set_value`, publica un evento realtime.
+6. La tarea se encola desde el controlador DocType usando `frappe.enqueue(..., queue="long", enqueue_after_commit=True)`.
 
 ### Adding a New API Endpoint
 
-1. Place it in `kubeport/api/` in the appropriate module.
-2. Decorate with `@frappe.whitelist()`.
-3. Add full type annotations (required by `require_type_annotated_api_methods = True`).
-4. Keep it read-only — no cluster mutations from API endpoints.
-5. Handle failures gracefully — return empty results or structured error payloads instead of raising.
+1. Colócalo en `kubeport/api/` en el módulo adecuado.
+2. Decóralo con `@frappe.whitelist()`.
+3. Añade type annotations completas (requeridas por `require_type_annotated_api_methods = True`).
+4. Manténlo de solo lectura — sin mutaciones del cluster desde endpoints API.
+5. Maneja fallos con elegancia — devuelve resultados vacíos o payloads de error estructurados en lugar de lanzar excepciones.
 
 ### Adding a New DocType Field
 
-1. Update the DocType JSON definition via the Frappe DocType editor or manually.
-2. Add the field to the Python controller if it requires validation or business logic.
-3. Use `frappe.types.DF` for type hints on the controller class.
-4. If the field affects discovery, reconciliation, or background-task behavior, update the relevant docs in the same change.
+1. Actualiza la definición JSON del DocType mediante el editor de DocTypes o manualmente.
+2. Añade el campo al controlador Python si requiere validación o lógica de negocio.
+3. Usa `frappe.types.DF` para type hints en la clase del controlador.
+4. Si el campo afecta discovery, reconciliación o comportamiento de background tasks, actualiza la documentación relevante en el mismo cambio.
 
 ### Discovery Pod Selection
 
-Pod lookup for site discovery follows a priority chain:
-1. Label selector: `app.kubernetes.io/instance=<release_name>` (preferred)
-2. Fallback: namespace-wide scan matching by `release` label or pod-name prefix
-3. Filter: only Frappe workload pods (gunicorn, scheduler, workers — not mariadb, valkey)
-4. Rank: score by Running phase, ready containers, component label
+La selección de pods para discovery de sitios sigue esta prioridad:
+1. Selector de etiquetas: `app.kubernetes.io/instance=<release_name>` (preferido)
+2. Alternativa: escaneo del namespace buscando coincidencias por etiqueta `release` o prefijo del nombre del pod
+3. Filtro: solo pods de workload Frappe (gunicorn, scheduler, workers — no mariadb, valkey)
+4. Ranking: puntuación por fase Running, contenedores listos, etiqueta de componente
 
 ### Supported Resource Kinds (Service Bundle)
 
-Service Bundle only supports a fixed allowlist of built-in Kubernetes resource kinds defined in `kubeport/utils/k8s_resources.py`. CRDs and arbitrary custom resources are out of scope.
+Service Bundle solo soporta una allowlist fija de resource kinds incorporados definida en `kubeport/utils/k8s_resources.py`. Los CRDs y recursos personalizados arbitrarios están fuera de alcance.
 
-Current allowlist: `Pod`, `Service`, `Deployment`, `ConfigMap`, `Secret`, `Namespace`, `Ingress`, `PersistentVolumeClaim`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, `Role`, `RoleBinding`.
+Allowlist actual: `Pod`, `Service`, `Deployment`, `ConfigMap`, `Secret`, `Namespace`, `Ingress`, `PersistentVolumeClaim`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding`, `Role`, `RoleBinding`.
 
 ---
 
@@ -192,39 +192,39 @@ bench --site <site> run-tests --app kubeport --doctype <DocType>
 
 ### Test Conventions
 
-- Test classes use `IntegrationTestCase` by default. Use `UnitTestCase` only for pure, isolated logic.
-- For local syntax checks when the Bench environment is unavailable, prefer targeted validation over full bench runs.
-- When adding a new API or form behavior, update or add tests close to the changed module.
+- Las clases de test usan `IntegrationTestCase` por defecto. Usa `UnitTestCase` solo para lógica aislada y pura.
+- Para comprobaciones locales de sintaxis cuando el entorno Bench no está disponible, prefiere validaciones específicas en lugar de ejecuciones completas.
+- Al añadir un nuevo API o comportamiento de formulario, actualiza o añade tests cerca del módulo modificado.
 
 ### Current Coverage
 
-Strongest coverage: discovery behavior, API timeouts, reconciliation state transitions, manifest validation, Helm worker concurrency guards, cleanup/migration patches.
+Cobertura más fuerte: comportamiento de discovery, timeouts de API, transiciones de estado de reconciliación, validación de manifests, protecciones de concurrencia en Helm workers, patches de limpieza/migración.
 
-Weakest coverage: Frappe Site job submission end-to-end, `Helm Repository` sync behavior, `Helm Chart` metadata flows, broader cross-DocType integration tests.
+Cobertura más débil: envío de Kubernetes Jobs de Frappe Site end-to-end, comportamiento de sincronización de `Helm Repository`, flujos de metadatos de `Helm Chart`, tests de integración amplios entre DocTypes.
 
 ---
 
 ## Documentation
 
-- Keep `README.md` aligned with the actual shipped feature set, not aspirational plans.
-- Use `docs/control-plane-state.md` for current capabilities, open gaps, and robustness notes.
-- Use `docs/codebase-summary.md` for module-level architecture summaries.
-- Use `docs/architecture.md` §3 for the eight numbered safety / liveness / eventual-consistency properties that govern the codebase, and `docs/fault-model.md` for the catalogue of tolerated faults, defences, and recovery upper bounds. Any change that adds a new defence, weakens an existing one, or shifts a recovery bound must update both files in the same commit.
-- When a change affects discovery, background-task behavior, or desired-state semantics, update docs in the same commit.
+- Mantén `README.md` alineado con las funcionalidades realmente entregadas, no con planes aspiracionales.
+- Usa `docs/control-plane-state.md` para capacidades actuales, huecos abiertos y notas de robustez.
+- Usa `docs/codebase-summary.md` para resúmenes de arquitectura a nivel de módulo.
+- Usa `docs/architecture.md` §3 para las ocho propiedades numeradas de seguridad / liveness / eventual consistency que gobiernan el código, y `docs/fault-model.md` para el catálogo de fallos tolerados, defensas y límites de recuperación. Cualquier cambio que añada una defensa nueva, debilite una existente o modifique un límite de recuperación debe actualizar ambos archivos en el mismo commit.
+- Cuando un cambio afecte discovery, comportamiento de background tasks o semántica del desired state, actualiza la documentación en el mismo commit.
 
 ---
 
 ## Common Pitfalls
 
-These are specific mistakes to avoid:
+Estos son errores específicos que deben evitarse:
 
 | Pitfall | Why It's Wrong | Correct Approach |
 |---|---|---|
-| Persisting discovered sites/benches to MariaDB | Violates read-only discovery invariant | Return discovery data as ephemeral API responses |
-| Calling Helm CLI from the web thread | Blocks the request; can time out | Enqueue on the `long` queue via `frappe.enqueue` |
-| Using `doc.reload()` in a background worker | Creates a race condition with concurrent updates | Use `frappe.db.get_value` for targeted reads, `db_set` for writes |
-| Assuming `helm status == deployed` means sites exist | Workload pods may be Pending or CrashLooping | Check actual pod phase and site existence separately |
-| Trusting K8s Job exit codes as ground truth | `bench new-site` can exit non-zero despite success | Verify site existence via exec-based discovery before marking Failed |
-| Mixing cluster/runtime failures with code bugs | Confuses debugging and root-cause analysis | Document whether a failure is code-path related or a real cluster/runtime issue |
-| Hardcoding chart image tags or PVC names | Breaks on chart version upgrades | Dynamically extract from a live reference pod |
-| Using `shell=True` in subprocess calls | Security risk, injection vector | Always pass command as a list of strings |
+| Persisting discovered sites/benches to MariaDB | Viola el invariante de discovery de solo lectura | Devuelve datos de discovery como API responses efímeras |
+| Calling Helm CLI from the web thread | Bloquea la solicitud; puede agotar el tiempo | Encola en la cola `long` mediante `frappe.enqueue` |
+| Using `doc.reload()` in a background worker | Crea race conditions con actualizaciones concurrentes | Usa `frappe.db.get_value` para lecturas dirigidas, `db_set` para escrituras |
+| Assuming `helm status == deployed` means sites exist | Los pods de workload pueden estar Pending o CrashLooping | Comprueba la fase real del pod y la existencia del sitio por separado |
+| Trusting K8s Job exit codes as ground truth | `bench new-site` puede fallar pese a haber tenido éxito | Verifica la existencia del sitio mediante exec antes de marcar como Failed |
+| Mixing cluster/runtime failures with code bugs | Confunde el análisis y la depuración | Documenta si el fallo es por código o por el entorno/cluster |
+| Hardcoding chart image tags or PVC names | Rompe al actualizar versiones del chart | Extrae dinámicamente desde un pod de referencia en vivo |
+| Using `shell=True` in subprocess calls | Riesgo de seguridad, vector de inyección | Pasa siempre el comando como lista de strings |
