@@ -1,1684 +1,834 @@
-# Kubeport Changelog
+# Changelog de Kubeport
 
-Architecture decision log for contributors and agents. Each entry records what changed, why the approach was chosen, and what alternatives were rejected.
+Registro de decisiones de arquitectura para colaboradores y agentes. Cada entrada registra qué cambió, por qué se eligió el enfoque y qué alternativas se descartaron.
 
-**Format**: Entries are ordered newest-first. Each entry includes Context (the problem or need), the Decision (what was chosen and why), Rejected Alternatives (what was not chosen and why), and Implementation Details (how it was built).
+**Formato**: Las entradas están ordenadas de más reciente a más antigua. Cada entrada incluye Contexto (el problema o la necesidad), la Decisión (qué se eligió y por qué), Alternativas descartadas (qué no se eligió y por qué) e Implementación (cómo se construyó).
 
 ---
 
-## 2026-05-10 — Bundled Bitnami MariaDB orchestration for Frappe releases
+## 2026-05-10 — Orquestación de MariaDB de Bitnami integrada para releases de Frappe
 
-### Context
+### Contexto
 
-The official Frappe / ERPNext Helm chart ships with `dbHost` empty: a
-freshly deployed release brings up the gunicorn / nginx / scheduler /
-worker / valkey workloads but has no database, so the very first
-`bench new-site` call inside the bench fails with a connection error.
-The pre-existing operator workflow was "deploy your own MariaDB
-elsewhere, copy its host into `values.dbHost`, copy its root credentials
-into every `Frappe Site` row." That fails the *deploys-out-of-the-box*
-promise the rest of the project is built around — discovery is live,
-ingress can be one toggle, the bench image is digest-pinned, but
-spinning up a working ERPNext stack still required the operator to
-run a parallel database provisioning workflow before they could click
-**Create Site**.
+El chart oficial de Frappe / ERPNext se entrega con `dbHost` vacío: una release recién desplegada arranca las cargas de trabajo de gunicorn / nginx / scheduler / worker / valkey pero no tiene base de datos, por lo que la primera llamada a `bench new-site` dentro del bench falla con un error de conexión. El flujo de trabajo previo del operador era "despliega tu propio MariaDB en otro lugar, copia su host en `values.dbHost`, copia sus credenciales de root en cada fila de `Frappe Site`". Esto incumple la promesa de *funciona desde el primer momento* sobre la que se construye el resto del proyecto — el descubrimiento es en vivo, el ingress puede activarse con un toggle, la imagen del bench está anclada por digest, pero levantar un stack ERPNext funcional seguía requiriendo que el operador ejecutase un flujo paralelo de aprovisionamiento de base de datos antes de poder hacer clic en **Create Site**.
 
-### Decision
+### Decisión
 
-When the chart matches `is_frappe_site_chart()` and the new
-`use_external_database` checkbox on `Helm Release` is unchecked
-(default), Kubeport's install/upgrade worker also installs a sibling
-Helm release named `<release-name>-mariadb` in the same namespace,
-using Bitnami's MariaDB OCI chart pinned at
-`oci://registry-1.docker.io/bitnamicharts/mariadb` version `25.1.1`.
-The parent release's rendered values get `dbHost: <release-name>-mariadb`
-so the chart resolves to the sibling Service. Uninstalling the parent
-uninstalls the sibling. The operator can opt out by ticking **Use
-External Database**, in which case Kubeport installs no sibling and
-will not touch `dbHost` — the operator keeps full control of the wiring.
+Cuando el chart coincide con `is_frappe_site_chart()` y la nueva casilla `use_external_database` en `Helm Release` no está marcada (valor por defecto), el worker de instalación/actualización de Kubeport también instala una release hermana llamada `<nombre-release>-mariadb` en el mismo namespace, usando el chart OCI de MariaDB de Bitnami anclado en `oci://registry-1.docker.io/bitnamicharts/mariadb` versión `25.1.1`. Los valores renderizados de la release padre reciben `dbHost: <nombre-release>-mariadb` para que el chart resuelva al Service hermano. Desinstalar la release padre desinstala la hermana. El operador puede desactivar esto marcando **Use External Database**, en cuyo caso Kubeport no instala ninguna release hermana y no tocará `dbHost` — el operador mantiene el control total del cableado.
 
-`Frappe Site._preflight_db_topology` runs synchronously on **Create
-Site** to refuse the click when the wiring obviously won't work:
-bundled topology requires the `<release-name>-mariadb` Service and root
-Secret to exist; external topology requires the operator to have
-supplied root credentials on the row. The pre-flight is a fast,
-synchronous Service / Secret lookup — green is necessary but not
-sufficient (the worker still resolves dynamically), but red reliably
-means the happy path is broken, so we surface that on the UI thread
-instead of letting a Job submit and fail seconds later.
+`Frappe Site._preflight_db_topology` se ejecuta de forma síncrona en **Create Site** para rechazar el clic cuando el cableado claramente no va a funcionar: la topología integrada requiere que el Service `<nombre-release>-mariadb` y el Secret de root existan; la topología externa requiere que el operador haya proporcionado credenciales de root en la fila. La comprobación previa es una búsqueda rápida y síncrona de Service / Secret — verde es necesario pero no suficiente (el worker sigue resolviendo dinámicamente), pero rojo significa de forma fiable que el camino feliz está roto, así que lo mostramos en el hilo de la UI en lugar de dejar que un Job se envíe y falle segundos después.
 
-The chart pin matters: a Bitnami breaking change would silently break
-every bundled-MariaDB Frappe release on the next install/upgrade tick.
-The pin is documented at the top of `helm_tasks.py` and bumps go
-through code review with `helm show chart … --version <new>` evidence.
+El anclaje del chart importa: un cambio incompatible de Bitnami rompería silenciosamente cada release de Frappe con MariaDB integrado en la siguiente instalación/actualización. El anclaje está documentado al principio de `helm_tasks.py` y las actualizaciones pasan por revisión de código con evidencia de `helm show chart … --version <nueva>`.
 
-A separate fix wraps this work end-to-end: Kubeport's helm subprocess
-calls now `frappe.db.commit()` before shelling out, so the bundled
-sibling's install never trips MariaDB's `commands out of sync` /
-"Connection is busy" error during the request-thread render path that
-materialises chart values from the database.
+Una corrección separada envuelve este trabajo de extremo a extremo: las llamadas al subproceso helm de Kubeport ahora ejecutan `frappe.db.commit()` antes de invocar el shell, de modo que la instalación de la release hermana integrada nunca activa el error "commands out of sync" / "Connection is busy" de MariaDB durante la ruta de renderizado en el hilo de la petición que materializa los valores del chart desde la base de datos.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **A subchart dependency in a Kubeport-owned chart wrapper.**
-  Couples Kubeport's release schedule to the upstream Frappe chart's
-  release schedule; every Frappe chart bump would require us to
-  rebuild and re-publish the wrapper. Sibling-release orchestration
-  is a thinner integration with the same end result.
-- **One shared cluster-wide MariaDB.** Multi-tenancy nightmare:
-  one release's runaway query would freeze every other release's
-  bench; backups would have to dance around shared schemas;
-  blast-radius widens at every level.
-- **Skip orchestration; document a "deploy MariaDB first" runbook.**
-  Status quo before this work. The friction is paid by every operator
-  on every fresh release; documenting it does not reduce it.
-- **Sibling release in a different namespace.** Adds a cross-namespace
-  Service-discovery problem on top, plus extra RBAC surface for the
-  control plane. Same-namespace siblings reuse the parent release's
-  RBAC and tear-down semantics.
-- **Auto-detect by parsing chart values for an existing `dbHost`.**
-  Brittle (charts vary in shape), and gives no answer for the
-  external-DB case (the operator may not yet have filled in the
-  field). An explicit checkbox is more honest.
+- **Una dependencia de subchart en un wrapper de chart propio de Kubeport.** Acopla el calendario de releases de Kubeport al del chart oficial de Frappe; cada actualización del chart de Frappe requeriría reconstruir y volver a publicar el wrapper. La orquestación de releases hermanas es una integración más ligera con el mismo resultado final.
+- **Un MariaDB compartido a nivel de clúster.** Pesadilla de multitenencia: la consulta desbocada de una release congelaría el bench de todas las demás; las copias de seguridad tendrían que sortear esquemas compartidos; el radio de explosión se amplía en todos los niveles.
+- **Sin orquestación; documentar un runbook de "desplegar MariaDB primero".** Estado previo a este trabajo. La fricción la paga cada operador en cada nueva release; documentarla no la reduce.
+- **Release hermana en un namespace diferente.** Añade un problema de descubrimiento de Service entre namespaces, más superficie de RBAC adicional para el plano de control. Las releases hermanas en el mismo namespace reutilizan el RBAC de la release padre y su semántica de teardown.
+- **Detección automática analizando los valores del chart en busca de un `dbHost` existente.** Frágil (los charts varían en forma) y no da respuesta para el caso de base de datos externa (el operador puede no haber rellenado el campo aún). Una casilla explícita es más honesta.
 
-### Implementation details
+### Implementación
 
 - `kubeport/tasks/helm_tasks.py`:
-  - `_BUNDLED_MARIADB_CHART_REF = "oci://registry-1.docker.io/bitnamicharts/mariadb"`
-    and `_BUNDLED_MARIADB_CHART_VERSION = "25.1.1"` pin the upstream
-    chart for reproducibility.
-  - `_ensure_bundled_mariadb_release(parent_release_name, …)` and
-    `_uninstall_bundled_mariadb_release(parent_release_name, …)`
-    wrap `helm.install_or_upgrade` / `helm.uninstall` for the
-    sibling release. `_bundled_mariadb_values()` renders a minimal
-    values YAML pinning the Bitnami sibling secret name so the
-    parent chart can reach the sibling's `<release>-mariadb` Secret
-    by Bitnami convention rather than depending on
-    `<sibling>-mariadb-mariadb` or other chart-version-specific paths.
-  - `install_or_upgrade_release` calls `_ensure_bundled_mariadb_release`
-    when `is_frappe_site_chart()` and `use_external_database` is
-    unchecked; `uninstall_release` calls
-    `_uninstall_bundled_mariadb_release` symmetrically and tolerates
-    "release: not found" as already-clean.
-- `kubeport/kubeport/doctype/helm_release/helm_release.json`: new
-  Database section with `use_external_database` (Check, default `0`).
-  `prepare_release_values` renders `dbHost: <release-name>-mariadb`
-  via `bundled_mariadb_release_name()` when the chart is Frappe and
-  the operator has not opted out. The user's `Values` YAML wins —
-  any pre-existing `dbHost` in raw values is left alone.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`:
-  `_preflight_db_topology` runs at the head of `create_site`. Bundled
-  flow uses `can_resolve_db_host_for_release` plus
-  `_resolve_db_root_secret_for_release`; external flow requires
-  `db_root_password` or `db_root_secret` on the Frappe Site row.
-- `kubeport/tasks/site_tasks.py`: per-Frappe-Site DB_HOST resolution
-  is scoped to the parent release's namespace and respects the
-  bundled-vs-external split. Stale `_resolve_db_host_for_release`
-  reads no longer leak across releases. Job pre-clean now retries
-  on a transient, releasing prior `kubeport-bench-creds` Secrets
-  before submitting the new Job.
-- `kubeport/tests/test_helm_tasks.py`: covers ensure/uninstall happy
-  path, non-Frappe-chart skip, external-DB opt-out skip, "release
-  not found" tolerance on uninstall, and other-error logging.
-- `kubeport/utils/helm.py` / call sites in
-  `kubeport/api/helm_diff.py` and the doctype controller:
-  `frappe.db.commit()` runs before each helm subprocess call from
-  the request thread. The cluster-mutating tasks already commit
-  before `enqueue` so this only patches the read-side helm shell-outs
-  (`helm template`, `helm get manifest`).
-- `docs/operator-guide.md` §3.5 (Database — bundled vs external) and
-  the §5.1 Create-a-site step now document the toggle and its
-  effect on Frappe Site fields.
+  - `_BUNDLED_MARIADB_CHART_REF = "oci://registry-1.docker.io/bitnamicharts/mariadb"` y `_BUNDLED_MARIADB_CHART_VERSION = "25.1.1"` anclan el chart upstream para reproducibilidad.
+  - `_ensure_bundled_mariadb_release(parent_release_name, …)` y `_uninstall_bundled_mariadb_release(parent_release_name, …)` envuelven `helm.install_or_upgrade` / `helm.uninstall` para la release hermana. `_bundled_mariadb_values()` renderiza un YAML de valores mínimo que ancla el nombre del Secret de la release hermana de Bitnami para que el chart padre pueda acceder al Secret `<release>-mariadb` de la hermana por convención de Bitnami en lugar de depender de `<hermana>-mariadb-mariadb` u otras rutas específicas de la versión del chart.
+  - `install_or_upgrade_release` llama a `_ensure_bundled_mariadb_release` cuando `is_frappe_site_chart()` y `use_external_database` no está marcado; `uninstall_release` llama a `_uninstall_bundled_mariadb_release` de forma simétrica y tolera "release: not found" como ya limpio.
+- `kubeport/kubeport/doctype/helm_release/helm_release.json`: nueva sección Database con `use_external_database` (Check, por defecto `0`). `prepare_release_values` renderiza `dbHost: <nombre-release>-mariadb` mediante `bundled_mariadb_release_name()` cuando el chart es Frappe y el operador no ha optado por la alternativa externa. El YAML de `Values` del usuario gana — cualquier `dbHost` preexistente en los valores brutos se deja intacto.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `_preflight_db_topology` se ejecuta al inicio de `create_site`. El flujo integrado usa `can_resolve_db_host_for_release` más `_resolve_db_root_secret_for_release`; el flujo externo requiere `db_root_password` o `db_root_secret` en la fila de Frappe Site.
+- `kubeport/tasks/site_tasks.py`: la resolución de DB_HOST por Frappe Site tiene alcance al namespace de la release padre y respeta la división integrado-vs-externo. Las lecturas obsoletas de `_resolve_db_host_for_release` ya no se filtran entre releases. La limpieza previa del Job ahora reintenta en caso de transición, liberando los Secrets `kubeport-bench-creds` previos antes de enviar el nuevo Job.
+- `kubeport/tests/test_helm_tasks.py`: cubre el camino feliz de ensure/uninstall, el salto en charts que no son de Frappe, el salto en opt-out de base de datos externa, la tolerancia a "release not found" en uninstall, y el registro de otros errores.
+- `kubeport/utils/helm.py` / puntos de llamada en `kubeport/api/helm_diff.py` y el controlador del doctype: `frappe.db.commit()` se ejecuta antes de cada llamada al subproceso helm desde el hilo de la petición. Las tareas que mutan el clúster ya hacen commit antes de `enqueue`, así que esto solo parchea los shell-outs de helm del lado de lectura (`helm template`, `helm get manifest`).
+- `docs/operator-guide.md` §3.5 (Base de datos — integrada vs. externa) y el paso §5.1 Crear-un-site ahora documentan el toggle y su efecto en los campos de Frappe Site.
 
 ---
 
-## 2026-05-10 — Ingress UX: read-only discovery hints and "advanced override" escape hatch
+## 2026-05-10 — UX de Ingress: sugerencias de descubrimiento de solo lectura y vía de escape "anulación avanzada"
 
-### Context
+### Contexto
 
-The structured ingress fields shipped earlier in the day let operators
-turn ingress on with four form fields, but the form gave no live signal
-about *what* to type. New operators stared at an empty `Ingress Class`
-and `cert-manager ClusterIssuer` not knowing whether the cluster had a
-default `IngressClass`, whether cert-manager was even installed, or
-what hostname to use on a `kind` / `k3d` cluster with no DNS zone. A
-secondary issue surfaced in testing: an empty / chart-default
-`ingress:` block in the user's raw `Values` YAML was leaking through
-and silently overriding the structured fields, while a non-trivial
-multi-host or custom-annotation block was being clobbered by them —
-the authoritative split between "structured form fields" and "raw
-YAML escape hatch" was not consistent and depended on which path
-materialised values first.
+Los campos de ingress estructurados que se publicaron antes en el día permitían a los operadores activar el ingress con cuatro campos del formulario, pero el formulario no daba ninguna señal en vivo sobre *qué escribir*. Los nuevos operadores miraban un `Ingress Class` y un `cert-manager ClusterIssuer` vacíos sin saber si el clúster tenía un `IngressClass` por defecto, si cert-manager estaba instalado siquiera, o qué hostname usar en un clúster `kind` / `k3d` sin zona DNS. Un problema secundario surgió durante las pruebas: un bloque `ingress:` vacío o por defecto del chart en el YAML de `Values` bruto del usuario se filtraba y anulaba silenciosamente los campos estructurados, mientras que un bloque con múltiples hosts o anotaciones personalizadas estaba siendo sobreescrito por ellos — la división autoritativa entre "campos estructurados del formulario" y "vía de escape YAML bruto" no era consistente y dependía de qué ruta materializaba los valores primero.
 
-### Decision
+### Decisión
 
-Add live, read-only ingress discovery to the Helm Release form via a
-single whitelisted endpoint `kubeport.api.discovery.get_ingress_suggestions(cluster_name, release_name)`
-that returns `{ingress_classes, default_ingress_class, cluster_issuers,
-default_cluster_issuer, controller_addresses, suggested_hostname,
-capabilities, errors}` in one round-trip. The form uses it to populate
-non-persisted suggestions:
+Añadir descubrimiento de ingress en vivo y de solo lectura al formulario de Helm Release mediante un único endpoint público `kubeport.api.discovery.get_ingress_suggestions(cluster_name, release_name)` que devuelve `{ingress_classes, default_ingress_class, cluster_issuers, default_cluster_issuer, controller_addresses, suggested_hostname, capabilities, errors}` en un solo round-trip. El formulario lo usa para poblar sugerencias no persistidas:
 
-1. **Ingress Class** — the cluster's default `IngressClass` (the one
-   annotated `ingressclass.kubernetes.io/is-default-class: "true"`),
-   or the only detected class when there is exactly one.
-2. **cert-manager ClusterIssuer** — a ready `ClusterIssuer` when
-   cert-manager is detected on the cluster. Empty when cert-manager
-   is absent or no issuer is in `Ready: True` state.
-3. **Suggested hostname** — when the chosen ingress controller exposes
-   a LoadBalancer service with an external IP, the form proposes
-   `<release-name>.<ip>.nip.io`. Useful on `kind` / `k3d` / minikube
-   without a real DNS zone.
+1. **Ingress Class** — el `IngressClass` por defecto del clúster (el anotado con `ingressclass.kubernetes.io/is-default-class: "true"`), o el único detectado cuando hay exactamente uno.
+2. **cert-manager ClusterIssuer** — un `ClusterIssuer` listo cuando se detecta cert-manager en el clúster. Vacío cuando cert-manager está ausente o ningún emisor está en estado `Ready: True`.
+3. **Hostname sugerido** — cuando el controlador de ingress elegido expone un Service LoadBalancer con una IP externa, el formulario propone `<nombre-release>.<ip>.nip.io`. Útil en `kind` / `k3d` / minikube sin una zona DNS real.
 
-Suggestions are pulled live, are never persisted to MariaDB, and the
-fields stay editable when nothing is detected so a fresh-cluster setup
-is not blocked by missing hints.
+Las sugerencias se obtienen en vivo, nunca se persisten en MariaDB, y los campos permanecen editables cuando no se detecta nada para que una configuración en un clúster nuevo no quede bloqueada por la ausencia de sugerencias.
 
-The authoritative split between structured fields and raw YAML is
-re-stated as an explicit "advanced override" rule. `render_ingress_values()`
-runs the user's YAML through `_has_advanced_ingress_override()`,
-which classifies an `ingress` block as advanced if it carries any
-key beyond `{enabled, className, hosts, annotations, tls}`, has more
-than one host, has any path other than the structured-default
-`/ ImplementationSpecific`, or has annotations beyond
-`cert-manager.io/cluster-issuer`. Advanced overrides preserve the
-user's YAML untouched (the multi-host SAN-cert escape hatch). Simple
-or empty `ingress:` blocks (chart defaults, leftover snippets) are
-replaced by the structured rendering so the form fields remain the
-source of truth.
+La división autoritativa entre campos estructurados y YAML bruto se reenuncia como una regla explícita de "anulación avanzada". `render_ingress_values()` pasa el YAML del usuario por `_has_advanced_ingress_override()`, que clasifica un bloque `ingress` como avanzado si lleva alguna clave más allá de `{enabled, className, hosts, annotations, tls}`, tiene más de un host, tiene algún path distinto del `/ ImplementationSpecific` por defecto estructurado, o tiene anotaciones más allá de `cert-manager.io/cluster-issuer`. Las anulaciones avanzadas preservan el YAML del usuario sin modificar (la vía de escape para certificados SAN multi-host). Los bloques `ingress:` simples o vacíos (valores por defecto del chart, fragmentos residuales) son reemplazados por el renderizado estructurado para que los campos del formulario sigan siendo la fuente de verdad.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Persist the discovered hints into MariaDB so they appear without
-  the cluster being reachable.** The hints would go stale (an
-  `IngressClass` deleted in the cluster would still appear in the
-  form), and Kubeport's defining invariant is that observed state
-  is never persisted.
-- **Block save when no `IngressClass` is detected.** Over-strict —
-  operators on dev clusters with no `IngressClass` still need a
-  way to set `Enable Ingress = false` and move on.
-- **"Any `ingress` key wins" rule.** Tempting because it is one
-  line of code, but it makes the structured fields useless for any
-  release whose chart defaults already include a stub `ingress:`
-  block (most do). The advanced-override classifier is more code
-  but matches operator intent.
-- **Three-way merge between raw YAML and structured fields.** YAML
-  merging gets ambiguous fast and would defeat the "form fields are
-  the source of truth for the simple case" goal.
-- **Skip the LoadBalancer IP → nip.io hint.** It is the difference
-  between "click Save and it just works on `kind`" and "go look up
-  what nip.io is." Cheap to render and easy to ignore.
+- **Persistir las sugerencias descubiertas en MariaDB para que aparezcan sin que el clúster sea accesible.** Las sugerencias quedarían obsoletas (un `IngressClass` eliminado en el clúster seguiría apareciendo en el formulario), y el invariante definitorio de Kubeport es que el estado observado nunca se persiste.
+- **Bloquear el guardado cuando no se detecta ningún `IngressClass`.** Demasiado restrictivo — los operadores en clústeres de desarrollo sin `IngressClass` aún necesitan una forma de establecer `Enable Ingress = false` y continuar.
+- **Regla "cualquier clave `ingress` gana".** Tentador porque es una línea de código, pero hace que los campos estructurados sean inútiles para cualquier release cuyo chart por defecto ya incluya un bloque `ingress:` stub (la mayoría lo hacen). El clasificador de anulación avanzada es más código pero coincide con la intención del operador.
+- **Fusión de tres vías entre el YAML bruto y los campos estructurados.** La fusión de YAML se vuelve ambigua rápidamente y frustraría el objetivo de "los campos del formulario son la fuente de verdad para el caso simple".
+- **Omitir la sugerencia de IP de LoadBalancer → nip.io.** Es la diferencia entre "haz clic en Guardar y funciona en `kind`" y "ve a buscar qué es nip.io". Barato de renderizar y fácil de ignorar.
 
-### Implementation details
+### Implementación
 
-- `kubeport/api/discovery.py`: one new whitelisted endpoint
-  `get_ingress_suggestions(cluster_name, release_name)` returning the
-  full payload above. Internal helpers `_pick_default_ingress_class`,
-  `_pick_default_cluster_issuer`, and `_suggest_hostname` shape the
-  defaults. `_discover_cluster_capabilities` swallows per-scope
-  errors into the `errors[]` payload so a missing CRD or RBAC denial
-  on (e.g.) `ClusterIssuer` does not blank out the whole response.
-- `kubeport/utils/discovery.py`: shared probes
-  `discover_ingress_classes(cluster_name)`,
-  `discover_ingress_controller_addresses(cluster_name)`, and
-  `discover_cluster_issuers(cluster_name)` (cert-manager listing
-  with a missing-CRD soft-fallback via apiextensions).
-- `kubeport/kubeport/doctype/helm_release/helm_release.js`: on-load
-  and on-cluster-change call the suggestions endpoint, populate
-  empty fields, and render a small "Detected: …" inline note next
-  to each field; suggestions never overwrite a non-empty field.
-- `kubeport/kubeport/doctype/helm_release/helm_release.py`:
-  `render_ingress_values()` calls `_has_advanced_ingress_override()`
-  on the user's `ingress` block; on advanced overrides it returns
-  the YAML unmodified. Helper `_is_single_root_ingress_host()` pins
-  the structured default shape (single host, single path `/` with
-  `pathType: ImplementationSpecific`).
-- `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.js`
-  surfaces ingress detection in the live discovery panel so the
-  operator can sanity-check the cluster from the cluster row before
-  ever opening a Helm Release form.
-- `docs/operator-guide.md` §3.4 (Ingress) updated to document the
-  read-only discovery hints and the advanced-override escape hatch.
+- `kubeport/api/discovery.py`: un nuevo endpoint público `get_ingress_suggestions(cluster_name, release_name)` que devuelve el payload completo anterior. Los helpers internos `_pick_default_ingress_class`, `_pick_default_cluster_issuer` y `_suggest_hostname` dan forma a los valores por defecto. `_discover_cluster_capabilities` absorbe los errores por alcance en el payload `errors[]` para que una CRD ausente o una denegación de RBAC en (p. ej.) `ClusterIssuer` no vacíe toda la respuesta.
+- `kubeport/utils/discovery.py`: sondas compartidas `discover_ingress_classes(cluster_name)`, `discover_ingress_controller_addresses(cluster_name)` y `discover_cluster_issuers(cluster_name)` (listado de cert-manager con fallback suave ante CRD ausente mediante apiextensions).
+- `kubeport/kubeport/doctype/helm_release/helm_release.js`: en la carga y en el cambio de clúster llama al endpoint de sugerencias, puebla los campos vacíos y renderiza una pequeña nota "Detectado: …" en línea junto a cada campo; las sugerencias nunca sobreescriben un campo no vacío.
+- `kubeport/kubeport/doctype/helm_release/helm_release.py`: `render_ingress_values()` llama a `_has_advanced_ingress_override()` en el bloque `ingress` del usuario; en anulaciones avanzadas devuelve el YAML sin modificar. El helper `_is_single_root_ingress_host()` ancla la forma por defecto estructurada (un único host, un único path `/` con `pathType: ImplementationSpecific`).
+- `kubeport/kubeport/doctype/kubernetes_cluster/kubernetes_cluster.js` expone la detección de ingress en el panel de descubrimiento en vivo para que el operador pueda comprobar el clúster desde la fila del clúster antes de abrir nunca un formulario de Helm Release.
+- `docs/operator-guide.md` §3.4 (Ingress) actualizado para documentar las sugerencias de descubrimiento de solo lectura y la vía de escape de anulación avanzada.
 
 ---
 
-## 2026-05-10 — Dedup reconciliation log noise and harden scaling-seed harness
+## 2026-05-10 — Deduplicación del ruido en el log de reconciliación y refuerzo del harness de seed de escalado
 
-### Context
+### Contexto
 
-A release whose chart was permanently broken (typo in a chart
-reference, removed upstream chart version, stuck PVC) caused the
-5-minute reconciler to call `frappe.log_error` with the same
-title-and-message every tick, forever. Frappe writes one
-`Error Log` row per call, so a single broken release produced 288
-log rows per day with no signal added past the first one. The error
-log's rotation never kept up.
+Una release cuyo chart estaba permanentemente roto (typo en una referencia de chart, versión de chart eliminada en upstream, PVC atascada) hacía que el reconciliador de 5 minutos llamara a `frappe.log_error` con el mismo título y mensaje en cada tick, indefinidamente. Frappe escribe una fila de `Error Log` por llamada, así que una sola release rota producía 288 filas de log al día sin añadir ninguna señal más allá de la primera. La rotación del log de errores nunca daba abasto.
 
-In a parallel issue, the eval/scaling-seed harness used a non-seeded
-`frappe.utils.now()` for backup timestamp generation in
-`eval/scaling/seed.py`, which made deterministic-replay scenarios
-non-deterministic on date boundaries.
+En un problema paralelo, el harness de seed de evaluación/escalado usaba un `frappe.utils.now()` sin semilla para la generación de marcas de tiempo de backup en `eval/scaling/seed.py`, lo que hacía que los escenarios de reproducción determinista fueran no deterministas en los límites de fecha.
 
-### Decision
+### Decisión
 
-A new `_TickErrorLog` helper holds a per-tick set of dedup `bucket`
-keys and routes every reconciler `frappe.log_error` call through
-`emit(bucket, *, title, message, warn_msg=None)`. The first occurrence
-of a bucket per tick writes the Error Log row as before; subsequent
-occurrences in the same tick log a single `frappe.logger("kubeport").warning`
-line instead so the recurring root cause is still visible in the
-worker log without multiplying database rows. A fresh `_TickErrorLog`
-is constructed at the top of each top-level reconcile function so
-ticks never share dedup state.
+Un nuevo helper `_TickErrorLog` mantiene un conjunto de claves `bucket` de deduplicación por tick y enruta cada llamada a `frappe.log_error` del reconciliador a través de `emit(bucket, *, title, message, warn_msg=None)`. La primera aparición de un bucket por tick escribe la fila del Error Log como antes; las apariciones posteriores del mismo bucket en el mismo tick registran una única línea `frappe.logger("kubeport").warning` para que la causa raíz recurrente siga siendo visible en el log del worker sin multiplicar filas en la base de datos. Se construye un `_TickErrorLog` nuevo al inicio de cada función de reconciliación de nivel superior para que los ticks nunca compartan estado de deduplicación.
 
-Buckets are stable strings of the form `"<scope>::<cluster>::<error class>"`,
-chosen so a single misconfigured release / bench / cluster collapses
-to one bucket regardless of how many rows enumerate it inside the
-tick. Helm `release: not found` errors get their own bucket suffix
-(`release-not-found`) via `_bucket_for_error()` so they never hide
-genuinely new error classes.
+Los buckets son cadenas estables de la forma `"<alcance>::<clúster>::<clase de error>"`, elegidas para que una release / bench / clúster mal configurado colapse en un único bucket independientemente de cuántas filas lo enumeren dentro del tick. Los errores de `helm release: not found` obtienen su propio sufijo de bucket (`release-not-found`) mediante `_bucket_for_error()` para que nunca oculten clases de error genuinamente nuevas.
 
-The scaling-seed harness now seeds backup timestamps off a fixture
-clock derived from the seed's deterministic RNG instead of the wall
-clock, so identical seeds produce identical row contents across runs.
+El harness de seed de escalado ahora genera las marcas de tiempo de backup a partir de un reloj de fixture derivado del RNG determinista del seed en lugar del reloj de pared, de modo que seeds idénticos producen contenidos de fila idénticos entre ejecuciones.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Rate-limit `frappe.log_error` globally.** Too coarse: would mask
-  unrelated errors firing in the same window from completely different
-  components.
-- **Drop the error to a debug log.** Reconciler errors are operator-
-  actionable; relegating them would hide real issues behind the
-  noise we were trying to suppress.
-- **Per-release suppression with a TTL window.** Tempting, but adds
-  state with a TTL that has to be reasoned about across worker
-  restarts. Per-tick is stateless and simpler.
-- **Hash the message instead of choosing a bucket key.** Two semantically
-  identical errors with different exception messages would fall into
-  different hash buckets and both log; an explicit
-  `<scope>::<cluster>::<error class>` bucket collapses them as
-  intended.
+- **Limitar la tasa de `frappe.log_error` globalmente.** Demasiado grueso: enmascararía errores no relacionados que se disparan en la misma ventana desde componentes completamente diferentes.
+- **Degradar el error a un log de debug.** Los errores del reconciliador son accionables por el operador; relegarlos ocultaría problemas reales detrás del ruido que intentábamos suprimir.
+- **Supresión por release con una ventana TTL.** Tentador, pero añade estado con un TTL sobre el que hay que razonar entre reinicios de workers. Por tick es sin estado y más simple.
+- **Hacer hash del mensaje en lugar de elegir una clave de bucket.** Dos errores semánticamente idénticos con mensajes de excepción diferentes caerían en buckets de hash distintos y ambos se registrarían; un bucket explícito `<alcance>::<clúster>::<clase de error>` los colapsa como se pretende.
 
-### Implementation details
+### Implementación
 
-- `kubeport/tasks/reconciliation.py`: new `_TickErrorLog` class with
-  `emit(bucket, *, title, message, warn_msg=None) -> bool` plus a
-  `_bucket_for_error(error: Exception) -> str` helper that gives Helm
-  "release not found" its own bucket suffix. Instantiated at the top
-  of each top-level reconcile function (`reconcile_all_releases`,
-  `reconcile_site_backups`); per-row loops thread the instance into
-  every error path that previously called `frappe.log_error` directly.
-- `kubeport/hooks.py`: scheduled-job entrypoints unchanged externally
-  but the per-tick collector lifetime matches a single tick.
-- `kubeport/tests/test_reconciliation.py`: regression tests pin the
-  per-tick dedup behaviour (same bucket twice in one tick → one
-  Error Log row plus a warning; same bucket in two consecutive ticks
-  → two Error Log rows).
-- `eval/scaling/seed.py` and `eval/scaling/_inproc.py`:
-  `now()` is replaced by a seeded clock helper. Existing scaling
-  scenarios reseed once per scenario start so cross-scenario state
-  bleed is eliminated.
+- `kubeport/tasks/reconciliation.py`: nueva clase `_TickErrorLog` con `emit(bucket, *, title, message, warn_msg=None) -> bool` más un helper `_bucket_for_error(error: Exception) -> str` que da a Helm "release not found" su propio sufijo de bucket. Se instancia al inicio de cada función de reconciliación de nivel superior (`reconcile_all_releases`, `reconcile_site_backups`); los bucles por fila propagan la instancia a cada ruta de error que antes llamaba a `frappe.log_error` directamente.
+- `kubeport/hooks.py`: los puntos de entrada del trabajo programado no cambian externamente, pero la vida útil del colector por tick coincide con un único tick.
+- `kubeport/tests/test_reconciliation.py`: los tests de regresión anclan el comportamiento de deduplicación por tick (mismo bucket dos veces en un tick → una fila de Error Log más una advertencia; mismo bucket en dos ticks consecutivos → dos filas de Error Log).
+- `eval/scaling/seed.py` y `eval/scaling/_inproc.py`: `now()` se reemplaza por un helper de reloj con semilla. Los escenarios de escalado existentes resiembran una vez al inicio de cada escenario para eliminar la contaminación de estado entre escenarios.
 
 ---
 
-## 2026-05-10 — Operator workspace reflects the Overview Dashboard
+## 2026-05-10 — El espacio de trabajo del operador refleja el Dashboard de visión general
 
-### Context
+### Contexto
 
-The `Kubeport Operations` workspace exposed eight number cards and a
-shortcut to the `Kubeport Overview` Dashboard, but none of the
-dashboard's four charts (three status donuts + a daily operations line
-chart) ever rendered on the workspace itself. Operators had to click
-through to a separate Dashboard page to see status distribution, which
-defeats the point of an at-a-glance landing surface.
+El espacio de trabajo `Kubeport Operations` exponía ocho tarjetas numéricas y un acceso directo al Dashboard `Kubeport Overview`, pero ninguno de los cuatro gráficos del dashboard (tres donuts de estado + un gráfico de líneas de operaciones diarias) se renderizaba nunca en el propio espacio de trabajo. Los operadores tenían que hacer clic en una página de Dashboard separada para ver la distribución de estados, lo que derrota el propósito de una superficie de aterrizaje de un vistazo.
 
-A second issue surfaced during the audit: every existing number card in
-`content[]` used `"type":"card"` with `"data":{"card_name":"…"}`. That
-block type renders Frappe's "Card" widget (a list of links), not a
-Number Card. The cards on the deployed workspace only appeared because
-Frappe falls back to the workspace's `number_cards[]` array when the
-content block fails to resolve — they were not actually being driven by
-the layout.
+Un segundo problema surgió durante la auditoría: cada tarjeta numérica existente en `content[]` usaba `"type":"card"` con `"data":{"card_name":"…"}`. Ese tipo de bloque renderiza el widget "Card" de Frappe (una lista de enlaces), no una Number Card. Las tarjetas en el espacio de trabajo desplegado solo aparecían porque Frappe recurre al array `number_cards[]` del espacio de trabajo cuando el bloque de contenido no puede resolverse — no estaban siendo controladas por el layout.
 
-### Decision
+### Decisión
 
-Rewrite the workspace `content[]` to (a) embed all four dashboard
-charts as `chart` blocks, (b) correct number-card blocks to
-`"type":"number_card"` so the layout drives rendering, and (c) add a
-short paragraph subtitle under each section header for the polish that
-distinguishes a landing surface from a debug grid.
+Reescribir el `content[]` del espacio de trabajo para (a) incrustar los cuatro gráficos del dashboard como bloques `chart`, (b) corregir los bloques de tarjetas numéricas a `"type":"number_card"` para que el layout controle el renderizado, y (c) añadir un subtítulo de párrafo corto bajo cada encabezado de sección para el acabado que distingue una superficie de aterrizaje de una cuadrícula de depuración.
 
-Section flow, top to bottom:
+Flujo de secciones, de arriba a abajo:
 
-1. **Fleet Health** — four red/amber number cards that should read
-   zero (Degraded Helm Releases, Failed Frappe Sites, Failed Backups,
-   Stale Operations).
-2. **Status Distribution** — two donuts side-by-side (Helm Release,
-   Frappe Site) and one full-width donut (Service Bundle). Service
-   Bundle is full-width to avoid the asymmetric "lone half-donut next
-   to empty space" layout.
-3. **Operations Activity** — full-width line chart of Helm Release
-   operations per day.
-4. **Internal Observability** — four blue/teal number cards (Reconcile
-   Ticks, Stale Ops Recovered, Orphan Jobs Swept, Helm p95 Latency).
-5. **Quick Access** — `Kubeport Overview` shortcut promoted to first
-   tile, then DocType list shortcuts grouped by frequency of use.
+1. **Fleet Health** — cuatro tarjetas numéricas rojas/ámbar que deberían leer cero (Helm Releases Degradadas, Frappe Sites Fallidos, Backups Fallidos, Operaciones Obsoletas).
+2. **Distribución de estados** — dos donuts lado a lado (Helm Release, Frappe Site) y un donut de ancho completo (Service Bundle). Service Bundle es de ancho completo para evitar el layout asimétrico de "donut solitario junto a espacio vacío".
+3. **Actividad de operaciones** — gráfico de líneas de ancho completo de operaciones de Helm Release por día.
+4. **Observabilidad interna** — cuatro tarjetas numéricas azul/teal (Ticks de Reconciliación, Ops Obsoletas Recuperadas, Jobs Huérfanos Barridos, Latencia p95 de Helm).
+5. **Acceso rápido** — acceso directo a `Kubeport Overview` promovido al primer tile, luego accesos directos a listas de DocType agrupados por frecuencia de uso.
 
-The four charts are also added to the workspace's `charts[]` array so
-Frappe's chart registry binds them to this workspace at sync time.
+Los cuatro gráficos también se añaden al array `charts[]` del espacio de trabajo para que el registro de gráficos de Frappe los vincule a este espacio de trabajo en el momento de la sincronización.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Keep the workspace card-only and rely on the separate Overview
-  Dashboard.** Two surfaces showing partially overlapping data — the
-  cost of one extra click is paid every operator session, and the
-  Dashboard's chart registry already exists.
-- **Three donuts at `col=4` each on one row.** Forbidden by the
-  workspace chart block (`min_width: 6` in `chart.js`).
-- **Three donuts stacked at `col=12`.** Vertically tall and visually
-  monotonous — burying the Operations line chart below three full-width
-  donuts pushes Internal Observability off the first viewport.
-- **Drop the donuts entirely and show only the line chart.** The
-  status donuts are the most-glanced widget on the Overview Dashboard;
-  cutting them would have been a regression in information density.
+- **Mantener el espacio de trabajo solo con tarjetas y confiar en el Dashboard de visión general separado.** Dos superficies mostrando datos parcialmente solapados — el coste de un clic extra se paga en cada sesión del operador, y el registro de gráficos del Dashboard ya existe.
+- **Tres donuts a `col=4` cada uno en una fila.** Prohibido por el bloque de gráficos del espacio de trabajo (`min_width: 6` en `chart.js`).
+- **Tres donuts apilados a `col=12`.** Verticalmente alto y visualmente monótono — enterrar el gráfico de líneas de Operaciones debajo de tres donuts de ancho completo empuja la Observabilidad Interna fuera del primer viewport.
+- **Eliminar los donuts por completo y mostrar solo el gráfico de líneas.** Los donuts de estado son el widget más consultado del Dashboard de visión general; eliminarlos habría sido una regresión en la densidad de información.
 
-### Implementation details
+### Implementación
 
-- `kubeport/kubeport/workspace/kubeport_operations/kubeport_operations.json`
-  — content blocks rewritten; `charts[]` populated with the four
-  dashboard charts; `modified` bumped.
-- No DocType, API, or task changes — this is a pure fixture/layout
-  edit. The dashboard charts and number cards referenced are unchanged
-  and continue to live in `kubeport/kubeport/dashboard_chart/` and
-  `kubeport/kubeport/number_card/`.
+- `kubeport/kubeport/workspace/kubeport_operations/kubeport_operations.json` — bloques de contenido reescritos; `charts[]` poblado con los cuatro gráficos del dashboard; `modified` actualizado.
+- Sin cambios en DocType, API o tareas — es una edición pura de fixture/layout. Los gráficos del dashboard y las tarjetas numéricas referenciadas no cambian y siguen viviendo en `kubeport/kubeport/dashboard_chart/` y `kubeport/kubeport/number_card/`.
 
 ---
 
-## 2026-05-10 — Helm Release ingress fields (Frappe charts)
+## 2026-05-10 — Campos de ingress en Helm Release (charts de Frappe)
 
-### Context
+### Contexto
 
-A freshly deployed ERPNext release renders all the workloads (gunicorn,
-nginx, socketio, scheduler, workers, valkey) but **no Ingress** — the
-Frappe Helm chart defaults `ingress.enabled=false`. Operators reaching
-the site had to either `kubectl port-forward` or hand-edit the raw
-`values` YAML, copying the chart's `ingress.*` schema (hosts, paths,
-className, annotations, tls) from memory or docs. The Helm Release
-doctype was already opinionated about Frappe charts (StorageClass
-injection, site-image rendering), so structured ingress fields with the
-same scope fit the existing design.
+Una release ERPNext recién desplegada levanta todas las cargas de trabajo (gunicorn, nginx, socketio, scheduler, workers, valkey) pero **sin Ingress** — el chart de Frappe tiene por defecto `ingress.enabled=false`. Los operadores que accedían al site tenían que hacer `kubectl port-forward` o editar manualmente el YAML de `values` bruto, copiando el esquema `ingress.*` del chart (hosts, paths, className, annotations, tls) de memoria o de la documentación. El doctype de Helm Release ya era específico para charts de Frappe (inyección de StorageClass, renderizado de imagen de site), así que los campos de ingress estructurados con el mismo alcance encajaban en el diseño existente.
 
-### Decision
+### Decisión
 
-Add four fields to the Helm Release doctype — `ingress_enabled`,
-`ingress_hostname`, `ingress_class_name`, `ingress_cluster_issuer` —
-that render the Frappe chart's `ingress.*` values when enabled. TLS is
-opt-in via cert-manager: when an issuer is named, Kubeport emits the
-`cert-manager.io/cluster-issuer` annotation and a `tls` block
-referencing a per-release secret `<release-name>-tls`.
+Añadir cuatro campos al doctype de Helm Release — `ingress_enabled`, `ingress_hostname`, `ingress_class_name`, `ingress_cluster_issuer` — que renderizan los valores `ingress.*` del chart de Frappe cuando están activados. TLS es opt-in mediante cert-manager: cuando se especifica un emisor, Kubeport emite la anotación `cert-manager.io/cluster-issuer` y un bloque `tls` que referencia un Secret por release `<nombre-release>-tls`.
 
-Rendering is gated on `is_frappe_site_chart()` (the same gate used for
-StorageClass injection), and the user-supplied `values` YAML wins —
-if the raw YAML already contains any `ingress` key Kubeport leaves it
-alone. That preserves the escape hatch for multi-host SAN certs and
-other advanced configurations.
+El renderizado está controlado por `is_frappe_site_chart()` (la misma puerta usada para la inyección de StorageClass), y el YAML de `values` proporcionado por el usuario gana — si el YAML bruto ya contiene alguna clave `ingress`, Kubeport lo deja intacto. Esto preserva la vía de escape para certificados SAN multi-host y otras configuraciones avanzadas.
 
-The four ingress fields are folded into `calculate_release_spec_hash`
-so toggling ingress without touching `values` still flips
-`pending_changes`. A one-time post-model-sync patch
-(`recompute_helm_release_spec_hash`) recomputes
-`last_applied_spec_hash` for every existing row so the new payload
-shape doesn't make every release falsely report drift after migration.
+Los cuatro campos de ingress se incorporan a `calculate_release_spec_hash` para que activar el ingress sin tocar `values` siga activando `pending_changes`. Un parche de post-sincronización de modelo único (`recompute_helm_release_spec_hash`) recalcula `last_applied_spec_hash` para cada fila existente para que la nueva forma del payload no haga que cada release informe falsamente de deriva tras la migración.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Raw values YAML only (status quo).** Required operators to
-  memorise the Frappe chart's ingress schema. High copy-paste risk
-  (wrong key names → silent no-op).
-- **Auto-render for any chart.** Chart ingress schemas vary
-  (older Bitnami charts use `ingress.hostname` instead of
-  `ingress.hosts`). Same blast-radius scope as the existing Frappe-only
-  StorageClass injection.
-- **Separate Ingress doctype linked from Helm Release.** Over-modelled
-  — the ingress lifetime is the release's lifetime, and the four
-  fields fit on the existing form without crowding it.
-- **Multi-host SAN as structured fields.** Schema explosion for a
-  rare case. Operators with that need fall through to the raw YAML
-  escape hatch.
+- **Solo YAML de valores bruto (estado actual).** Requería que los operadores memorizaran el esquema de ingress del chart de Frappe. Alto riesgo de copiar y pegar mal (nombres de clave incorrectos → sin efecto silencioso).
+- **Renderizado automático para cualquier chart.** Los esquemas de ingress de los charts varían (los charts más antiguos de Bitnami usan `ingress.hostname` en lugar de `ingress.hosts`). El mismo alcance de radio de explosión que la inyección de StorageClass existente solo para Frappe.
+- **Un doctype de Ingress separado vinculado desde Helm Release.** Sobremodelado — la vida útil del ingress es la de la release, y los cuatro campos caben en el formulario existente sin saturarlo.
+- **SAN multi-host como campos estructurados.** Explosión de esquema para un caso raro. Los operadores con esa necesidad pasan por la vía de escape del YAML bruto.
 
-### Implementation details
+### Implementación
 
-- New `render_ingress_values()` in
-  `kubeport/kubeport/doctype/helm_release/helm_release.py`. Same shape
-  as `render_chart_starter_values`: parse → Frappe-only → preserve
-  user values → emit. Hardcodes `path: /` and
-  `pathType: ImplementationSpecific` (Frappe chart defaults).
-- `prepare_release_values()` gains keyword-only ingress kwargs (defaults
-  preserve all existing call sites). Pipeline order: starter values →
-  ingress → site image. Threaded through
-  `kubeport/tasks/helm_tasks.py` (install/upgrade and rollback paths),
-  `kubeport/tasks/reconciliation.py` (stale-operation recovery), and
-  `kubeport/api/helm_diff.py` (diff preview). `api/discovery.py`
-  (release adoption) defaults to ingress-disabled — the structured
-  fields don't try to reverse-engineer ingress state from existing
-  values YAML.
-- DocType fields use `depends_on: "eval:doc.ingress_enabled"` so they
-  only show when ingress is on, plus
-  `mandatory_depends_on: "eval:doc.ingress_enabled"` on hostname.
-  Server-side `validate()` defends against direct API writes.
-- Migration: `kubeport/patches/post_model_sync/recompute_helm_release_spec_hash.py`
-  recomputes hashes for every existing row to absorb the payload-shape
-  change without flipping `pending_changes` everywhere.
-## 2026-05-10 — Scheduled backups and retention for Frappe Site
-
-### Context
-
-`Frappe Site` shipped with manual backup and restore, but operators had to
-click **Backup Now** by hand and prune old archives themselves.  TODO-20
-(P5) closes the gap: a per-site cron schedule that the reconciler honours,
-and per-site retention bounds so unbounded archive accumulation does not
-fill the `kubeport-backups` PVC.
-
-### Decision
-
-Three optional fields on `Frappe Site`: `backup_schedule` (five-field
-cron), `backup_retention_count` (max `Available` rows), and
-`backup_retention_days` (max age in days).  Plus a hidden read-only
-`backup_schedule_last_run` marker that drives the cron next-run
-computation.
-
-The schedule is honoured in the existing `reconcile_site_backups` tick
-(every 5 min, separate scheduled job from `reconcile_all_releases`).  Tick
-order is finalise in-flight rows → enqueue scheduled backups → prune
-retention, so a just-finalised `Available` row is visible to the pruner
-the same tick rather than waiting another 5 minutes.
-
-Cron evaluation uses Frappe's bundled `croniter`.  The base for
-`get_next` is `backup_schedule_last_run` (or `creation` on first run).
-The marker is advanced **before** the backup is enqueued, so a concurrent
-tick observing the same slot sees the marker has moved and skips.  After
-the marker advance, the scheduler re-fetches the site doc and re-checks
-status + `_has_in_flight_backup()` to handle the manual-vs-scheduler race
-(operator clicks **Backup Now** between the read and the enqueue).  The
-manual path's `backup_site` whitelisted method now delegates to a shared
-private `_enqueue_backup` helper so manual and scheduled flows produce
-identical backup row shape and lifecycle.
-
-Long downtime triggers exactly **one** catch-up backup per overdue slot,
-not a flood — `croniter.get_next(base)` returns the first missed slot,
-and the marker advance bounds the next tick's computation.
-
-Retention pruning only considers rows with status `Available`.  `Failed`
-rows stay for diagnostics, and `In Progress` / `Restoring` rows are
-already protected by `FrappeSiteBackup.on_trash`.  The pruner uses
-`frappe.delete_doc` so the existing on_trash path tears down the PVC
-archive — retention shares its cleanup with manual trash.
-
-### Rejected alternatives
-
-- **A separate scheduler cron entry per site.**  Would create N cron
-  entries on the Frappe scheduler — fragile to add/remove and outside
-  Kubeport's reconciliation window.  Reusing the every-5-min tick costs
-  at most 5 minutes of granularity (the design accepts this) and keeps
-  the scheduling logic alongside the rest of the backup tick.
-- **A `trigger_source` field on `Frappe Site Backup`.**  Tempting for
-  analytics ("manual" vs "scheduled"), but no existing consumer needs it.
-  `triggered_by = "Administrator"` for scheduled runs is sufficient for
-  now; provenance metadata can be a later TODO.
-- **Pruning during the in-flight loop.**  Coupling the two would make
-  retention's transactional behaviour bleed into a path that already
-  juggles probe budgets and Job re-reads.  A separate pass that runs
-  after finalisation is simpler and easier to reason about.
-
-### Implementation details
-
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`: new
-  `backup_schedule` (Data), `backup_retention_count` (Int, non_negative),
-  `backup_retention_days` (Int, non_negative), and
-  `backup_schedule_last_run` (Datetime, hidden) fields, grouped under
-  the existing Backups section break.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: extracted
-  `_enqueue_backup(triggered_by)` helper from `backup_site`; added
-  `_validate_backup_schedule` (uses `croniter.is_valid`); refused
-  negative retention bounds.
-- `kubeport/tasks/reconciliation.py`: new `_run_scheduled_backups` and
-  `_prune_backup_retention`, wired into `reconcile_site_backups` after
-  the existing in-flight finalisation.
-- `kubeport/tests/test_reconciliation.py`: extended the delegation test
-  with the two new sweeps; added `UnitTestRunScheduledBackups` (six
-  cases including catch-up, in-flight skip, marker race, status race)
-  and `UnitTestPruneBackupRetention` (count cap, age cap, union of both,
-  no-op when no sites configured).
-- `docs/control-plane-state.md`, `docs/operator-guide.md`,
-  `docs/codebase-summary.md`: described the new behaviour and edge cases.
+- Nueva `render_ingress_values()` en `kubeport/kubeport/doctype/helm_release/helm_release.py`. Misma forma que `render_chart_starter_values`: analizar → solo Frappe → preservar valores del usuario → emitir. Codifica `path: /` y `pathType: ImplementationSpecific` (valores por defecto del chart de Frappe).
+- `prepare_release_values()` gana kwargs de ingress solo por clave (los valores por defecto preservan todos los puntos de llamada existentes). Orden del pipeline: valores de inicio → ingress → imagen de site. Propagado a través de `kubeport/tasks/helm_tasks.py` (rutas de instalación/actualización y rollback), `kubeport/tasks/reconciliation.py` (recuperación de operaciones obsoletas) y `kubeport/api/helm_diff.py` (vista previa de diff). `api/discovery.py` (adopción de releases) tiene ingress desactivado por defecto — los campos estructurados no intentan hacer ingeniería inversa del estado del ingress desde el YAML de valores existente.
+- Los campos del DocType usan `depends_on: "eval:doc.ingress_enabled"` para que solo aparezcan cuando el ingress está activo, más `mandatory_depends_on: "eval:doc.ingress_enabled"` en el hostname. `validate()` del lado del servidor defiende contra escrituras directas a la API.
+- Migración: `kubeport/patches/post_model_sync/recompute_helm_release_spec_hash.py` recalcula los hashes de cada fila existente para absorber el cambio de forma del payload sin activar `pending_changes` en todas partes.
 
 ---
 
-## 2026-05-10 — Helm Release diff preview
+## 2026-05-10 — Backups programados y retención para Frappe Site
 
-### Context
+### Contexto
 
-`Helm Release` operators had no way to see what `helm upgrade --install`
-would actually change before clicking Deploy.  The capability was already
-listed as out of scope in `docs/control-plane-state.md` §Platform Coverage,
-and TODO-18 (P5) calls for closing it: a "Preview" surface that renders
-the desired manifest with `helm template` and diffs it against the live
-release manifest.
+`Frappe Site` se publicó con backup y restauración manuales, pero los operadores tenían que hacer clic en **Backup Now** a mano y podar los archivos antiguos ellos mismos. TODO-20 (P5) cierra la brecha: un calendario cron por site que el reconciliador respeta, y límites de retención por site para que la acumulación ilimitada de archivos no llene el PVC `kubeport-backups`.
 
-### Decision
+### Decisión
 
-Add a read-only whitelisted endpoint `kubeport.api.helm_diff.preview_release`
-plus a "Preview Diff" toolbar button on the Helm Release form.  Both
-sides of the diff are read-only Helm operations — `helm template` is
-local-only per the Helm 3 docs (no cluster contact) and `helm get
-manifest` is a read-only API call — so the endpoint is safe to invoke
-from the web thread without violating the async-first invariant.
+Tres campos opcionales en `Frappe Site`: `backup_schedule` (cron de cinco campos), `backup_retention_count` (máximo de filas `Available`) y `backup_retention_days` (antigüedad máxima en días). Más un marcador oculto de solo lectura `backup_schedule_last_run` que impulsa el cálculo de la próxima ejecución del cron.
 
-The endpoint reuses `prepare_release_values` from the Helm Release
-controller so the rendered desired state matches exactly what
-`install_or_upgrade_release` would apply (including site-image rendering
-and starter-value injection).  Both manifests are indexed by
-`(kind, namespace, name)`, canonicalised with `yaml.safe_dump(sort_keys=True)`,
-and run through `difflib.unified_diff` per resource.  A summary
-({added, removed, changed, unchanged, live_present}) accompanies the
-diff text so the form can show counters even when the diff is empty.
+El calendario se respeta en el tick existente de `reconcile_site_backups` (cada 5 min, trabajo programado separado de `reconcile_all_releases`). El orden del tick es: finalizar filas en vuelo → encolar backups programados → podar retención, de modo que una fila `Available` recién finalizada es visible para el podador en el mismo tick en lugar de esperar otros 5 minutos.
 
-### Rejected alternatives
+La evaluación del cron usa el `croniter` incluido en Frappe. La base para `get_next` es `backup_schedule_last_run` (o `creation` en la primera ejecución). El marcador se avanza **antes** de que el backup se encole, de modo que un tick concurrente que observe el mismo slot vea que el marcador se ha movido y lo omita. Tras el avance del marcador, el planificador vuelve a obtener el documento del site y vuelve a comprobar el estado + `_has_in_flight_backup()` para manejar la carrera manual-vs-planificador (el operador hace clic en **Backup Now** entre la lectura y el encolado). El método público `backup_site` ahora delega a un helper privado `_enqueue_backup` compartido para que los flujos manual y programado produzcan la misma forma de fila de backup y el mismo ciclo de vida.
 
-- **Background job for the diff.**  Both helm subcalls are read-only and
-  capped by the existing `_HELM_READ_TIMEOUT_SECONDS=30` ceiling; routing
-  them through `frappe.enqueue` would add latency without changing the
-  safety profile.
-- **External `helm-diff` plugin.**  Adds a system dependency and a second
-  CLI to package; a `difflib`-based per-resource diff matches the use
-  case (operator preview, not strict three-way merge) without it.
-- **Form button beside Deploy.**  Would require a new DocType field
-  rendered as a button.  Toolbar `add_custom_button` matches the existing
-  Force Uninstall / Show History pattern and keeps the doctype JSON
-  unchanged.
+El tiempo de inactividad prolongado activa exactamente **un** backup de recuperación por slot vencido, no una avalancha — `croniter.get_next(base)` devuelve el primer slot perdido, y el avance del marcador limita el cómputo del siguiente tick.
 
-### Implementation details
+La poda de retención solo considera filas con estado `Available`. Las filas `Failed` permanecen para diagnóstico, y las filas `In Progress` / `Restoring` ya están protegidas por `FrappeSiteBackup.on_trash`. El podador usa `frappe.delete_doc` para que la ruta on_trash existente desmonte el archivo del PVC — la retención comparte su limpieza con la papelera manual.
 
-- New `helm.template(release_name, chart_ref, namespace, values_yaml,
-  chart_version)` wrapper in `kubeport/utils/helm.py`.  Mirrors the
-  `get_manifest` parsed-list shape; no kubeconfig because `helm template`
-  does not contact the cluster.
-- New `kubeport/api/helm_diff.py` with `preview_release(name) -> dict`
-  (System Manager only).  Returns
-  `{diff, added, removed, changed, unchanged, live_present, error}`.
-  Treats "release: not found" from `helm get manifest` as `live_present:
-  False` and lets the diff present every desired resource as added.
-- Toolbar `Preview Diff` button in `helm_release.js` opens a modal with
-  a counters summary and the unified diff.  Hidden while an operation
-  is in flight; blocks if the form is dirty.
-- Tests in `kubeport/tests/test_helm_tasks.py` cover four scenarios:
-  identical desired/live (empty diff, `unchanged` only), value-only
-  change, chart-version-driven image change (also asserts the version
-  propagates to `helm.template` kwargs), and live-release missing
-  (`live_present: false`, all desired classified as `added`).
-- `docs/control-plane-state.md` §Platform Coverage line updated — diff
-  preview is no longer listed as out of scope.
+### Alternativas descartadas
+
+- **Una entrada cron del planificador separada por site.** Crearía N entradas cron en el planificador de Frappe — frágil para añadir/eliminar y fuera de la ventana de reconciliación de Kubeport. Reutilizar el tick de cada 5 min cuesta como máximo 5 minutos de granularidad (el diseño acepta esto) y mantiene la lógica de planificación junto al resto del tick de backup.
+- **Un campo `trigger_source` en `Frappe Site Backup`.** Tentador para analíticas ("manual" vs "programado"), pero ningún consumidor existente lo necesita. `triggered_by = "Administrator"` para las ejecuciones programadas es suficiente por ahora; los metadatos de procedencia pueden ser un TODO posterior.
+- **Poda durante el bucle en vuelo.** Acoplar los dos haría que el comportamiento transaccional de la retención se filtrara en una ruta que ya gestiona presupuestos de sonda y relecturas de Job. Un paso separado que se ejecuta tras la finalización es más simple y más fácil de razonar.
+
+### Implementación
+
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`: nuevos campos `backup_schedule` (Data), `backup_retention_count` (Int, non_negative), `backup_retention_days` (Int, non_negative) y `backup_schedule_last_run` (Datetime, oculto), agrupados bajo el salto de sección Backups existente.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: helper `_enqueue_backup(triggered_by)` extraído de `backup_site`; añadido `_validate_backup_schedule` (usa `croniter.is_valid`); rechaza límites de retención negativos.
+- `kubeport/tasks/reconciliation.py`: nuevos `_run_scheduled_backups` y `_prune_backup_retention`, conectados a `reconcile_site_backups` tras la finalización en vuelo existente.
+- `kubeport/tests/test_reconciliation.py`: extendido el test de delegación con los dos nuevos barridos; añadido `UnitTestRunScheduledBackups` (seis casos incluyendo recuperación, salto en vuelo, carrera del marcador, carrera de estado) y `UnitTestPruneBackupRetention` (límite de recuento, límite de antigüedad, unión de ambos, sin operación cuando no hay sites configurados).
+- `docs/control-plane-state.md`, `docs/operator-guide.md`, `docs/codebase-summary.md`: describen el nuevo comportamiento y los casos límite.
 
 ---
 
-## 2026-05-10 — Internal observability: counters, helm-latency histogram, and correlation IDs
+## 2026-05-10 — Vista previa de diff de Helm Release
 
-### Context
+### Contexto
 
-The thesis claims robustness defenses (stale-operation reconciler, orphan-job
-sweep, helm subprocess timing) but had no way to measure how often any of
-them fire under load.  TODO-14 calls for in-process counters surfaced on the
-operator workspace plus a UUID4 correlation ID threaded through `frappe.enqueue`
-so a single operation can be grep-ed from web → enqueue → worker.
+Los operadores de `Helm Release` no tenían forma de ver qué cambiaría `helm upgrade --install` antes de hacer clic en Deploy. La capacidad ya estaba listada como fuera del alcance en `docs/control-plane-state.md` §Cobertura de plataforma, y TODO-18 (P5) llama a cerrarla: una superficie de "Vista previa" que renderiza el manifiesto deseado con `helm template` y lo compara con el manifiesto de la release en vivo.
 
-### Decision
+### Decisión
 
-Add a Frappe-native `kubeport/utils/metrics.py` backed by `frappe.cache()`
-(Redis under the hood, the same store Frappe already uses).  Counters
-(`reconcile_ticks_total`, `stale_ops_recovered_total`, `orphan_jobs_swept_total`)
-use raw `INCRBY` against keys made site-scoped via `RedisWrapper.make_key`.
-A rolling-window histogram of helm subprocess wall-clock latency is recorded
-via `LPUSH` + `LTRIM`; percentiles (p50/p95/p99) are computed at read time.
+Añadir un endpoint público de solo lectura `kubeport.api.helm_diff.preview_release` más un botón de barra de herramientas "Preview Diff" en el formulario de Helm Release. Ambos lados del diff son operaciones de Helm de solo lectura — `helm template` es solo local según la documentación de Helm 3 (sin contacto con el clúster) y `helm get manifest` es una llamada de API de solo lectura — por lo que el endpoint es seguro de invocar desde el hilo web sin violar el invariante de asíncrono primero.
 
-The correlation ID is generated at the `frappe.enqueue` site, passed as a
-kwarg to the worker, and bound onto `frappe.local.correlation_id` for the
-duration of the worker body via a `correlation_scope` context manager.  A
-small `metrics.logger(name)` proxy reads that local and prefixes every log
-line with `[correlation_id=<cid>]`, giving the same log substring on both
-sides of the enqueue.
+El endpoint reutiliza `prepare_release_values` del controlador de Helm Release para que el estado deseado renderizado coincida exactamente con lo que aplicaría `install_or_upgrade_release` (incluyendo el renderizado de imagen de site y la inyección de valores de inicio). Ambos manifiestos se indexan por `(kind, namespace, name)`, se canonizan con `yaml.safe_dump(sort_keys=True)` y se procesan con `difflib.unified_diff` por recurso. Un resumen ({added, removed, changed, unchanged, live_present}) acompaña al texto del diff para que el formulario pueda mostrar contadores incluso cuando el diff está vacío.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Prometheus / external metrics dependency.**  Out of scope for the thesis
-  surface; the TODO explicitly forbids it.  Frappe-native is enough to
-  surface live values on the operator workspace.
-- **Process-local counters only.**  Would not satisfy the acceptance
-  criterion (the worker and the web request live in different processes).
-- **Persisting metrics into a new DocType row.**  Deferred; in-Redis values
-  meet the criterion and avoid a write hot path on every reconciliation tick.
+- **Trabajo en segundo plano para el diff.** Ambas llamadas a helm son de solo lectura y están limitadas por el techo existente de `_HELM_READ_TIMEOUT_SECONDS=30`; enrutarlas a través de `frappe.enqueue` añadiría latencia sin cambiar el perfil de seguridad.
+- **Plugin externo `helm-diff`.** Añade una dependencia del sistema y una segunda CLI que empaquetar; un diff por recurso basado en `difflib` se ajusta al caso de uso (vista previa del operador, no fusión de tres vías estricta) sin él.
+- **Botón del formulario junto a Deploy.** Requeriría un nuevo campo de DocType renderizado como botón. El `add_custom_button` de la barra de herramientas coincide con el patrón existente de Force Uninstall / Show History y mantiene el JSON del doctype sin cambios.
 
-### Implementation details
+### Implementación
 
-- New `kubeport/utils/metrics.py`: counters (whitelist-checked), rolling
-  histogram, `correlation_scope` / `current_correlation_id` / `logger`
-  helpers.
-- New whitelisted endpoints on `kubeport/api/dashboard.py`:
-  `internal_metrics_summary`, `reconcile_ticks_card_value`,
-  `stale_ops_recovered_card_value`, `orphan_jobs_swept_card_value`,
-  `helm_p95_latency_card_value`.
-- Four new Number Cards under `kubeport/kubeport/number_card/`, surfaced as
-  a new "Internal Observability" section on `Kubeport Operations` workspace.
-- Counter increments wired into `kubeport/tasks/reconciliation.py`
-  (`reconcile_all_releases`, `reconcile_site_backups`,
-  `_set_stale_helm_operation_state`, `_sweep_orphan_site_jobs`) and the
-  helm-subprocess timer wired into `kubeport/utils/helm.py` (`_run_helm`).
-- Correlation ID generated in `Helm Release` `deploy_release`,
-  `uninstall_release`, `rollback_release`; propagated as a `correlation_id`
-  kwarg into `install_or_upgrade_release`, `rollback_release`,
-  `uninstall_release` worker tasks.  Follow-up commit extended the same
-  pattern to every remaining enqueue site: `Frappe Site` (create / delete /
-  migrate / backup / restore / cancel / on_trash / cascade), `Frappe Site
-  Backup.on_trash` → `delete_backup_archive_task`, `Service Bundle` (apply /
-  delete), `Helm Repository` (`add_and_sync_repo` / `sync_repo_charts` and
-  the daily `sync_all_repos` scheduler tick), `Kubernetes Command.execute`,
-  and `site_image_tasks.enqueue_sync_site_image_catalog`.  Each task accepts
-  `correlation_id: str | None = None` and wraps its body in
-  `metrics.correlation_scope`.
-- `stale_ops_recovered_total` counts every successful `_set_stale_helm_operation_state`
-  write (including the `Failed` terminal); `orphan_jobs_swept_total` counts
-  every sweep action taken (404s on the cluster side are still counted as
-  the orphan was already gone — the row was nonetheless reconciled).
-- New unit suite `kubeport/tests/test_metrics.py` covers counter, histogram,
-  and correlation-scope contracts; `kubeport/tests/test_api_dashboard.py`
-  is extended with one test per new endpoint.
+- Nuevo wrapper `helm.template(release_name, chart_ref, namespace, values_yaml, chart_version)` en `kubeport/utils/helm.py`. Refleja la forma de lista analizada de `get_manifest`; sin kubeconfig porque `helm template` no contacta el clúster.
+- Nuevo `kubeport/api/helm_diff.py` con `preview_release(name) -> dict` (solo System Manager). Devuelve `{diff, added, removed, changed, unchanged, live_present, error}`. Trata "release: not found" de `helm get manifest` como `live_present: False` y deja que el diff presente cada recurso deseado como añadido.
+- Botón de barra de herramientas `Preview Diff` en `helm_release.js` abre un modal con un resumen de contadores y el diff unificado. Oculto mientras haya una operación en vuelo; se bloquea si el formulario tiene cambios sin guardar.
+- Tests en `kubeport/tests/test_helm_tasks.py` cubren cuatro escenarios: deseado/live idénticos (diff vacío, solo `unchanged`), cambio solo de valores, cambio de versión de chart (también afirma que la versión se propaga a los kwargs de `helm.template`), y release en vivo ausente (`live_present: false`, todo lo deseado clasificado como `added`).
+- Línea de `docs/control-plane-state.md` §Cobertura de plataforma actualizada — la vista previa de diff ya no aparece como fuera del alcance.
 
 ---
 
-## 2026-05-10 — Documentation overhaul: industry-standard layout
+## 2026-05-10 — Observabilidad interna: contadores, histograma de latencia de helm e IDs de correlación
 
-### Context
+### Contexto
 
-The repository's documentation had grown organically. The shipped surface was
-a comprehensive `README.md`, an `AGENTS.md` of invariants, the architecture
-decision log here, and two reference docs under `docs/` (`control-plane-state.md`,
-`codebase-summary.md`). What it was missing, against the industry-standard
-layout for an open-source project, was a clear separation between an entry-point
-README, a contributor onboarding doc, a security disclosure policy, an
-architecture document with diagrams, and a user-facing operator guide. The
-`docs/codebase-summary.md` reference had also drifted — it predated the
-addition of `Kubernetes Command`, `Kubernetes Command Audit Log`,
-`api/observability.py`, `api/dashboard.py`, and `tasks/kubernetes_command_tasks.py`
-and listed 10 DocTypes when the actual count is 12 (plus the
-`Kubernetes Command Audit Log` audit row). `license.txt` still carried the
-unfilled `[year] [fullname]` placeholders. Three planning docs lived under
-`docs/plans/` alongside a manual smoke procedure (`docs/frappe-site-smoke.md`),
-mixing historical planning material with current reference material.
+La tesis afirma defensas de robustez (reconciliador de operaciones obsoletas, barrido de Jobs huérfanos, temporización del subproceso helm) pero no tenía forma de medir con qué frecuencia se activaba alguna de ellas bajo carga. TODO-14 pide contadores en proceso expuestos en el espacio de trabajo del operador más un ID de correlación UUID4 propagado a través de `frappe.enqueue` para que una única operación pueda rastrearse por grep desde web → enqueue → worker.
 
-### Decision
+### Decisión
 
-- Restructured the documentation tree to match the industry-standard layout for
-  an OSS project:
-  - `README.md` is now a focused entry point — capability summary, architecture
-    sketch, install, getting-started, and a documentation map pointing at every
-    other doc by goal.
-  - Added `CONTRIBUTING.md` (development environment, branching and PR
-    conventions, commit-message style matching the existing `git log`, code
-    style table, test commands, the seven invariants every contributor must
-    respect, and a per-doc "update when" matrix).
-  - Added `SECURITY.md` (private disclosure policy, scope, trust model, and
-    hardening recommendations specific to a Frappe-app-as-control-plane).
-  - Added `docs/architecture.md` with C4 context / container diagrams in
-    Mermaid, a DocType relationship diagram, runtime sequence diagrams for the
-    deploy / create-site / reconciliation flows, and a layer-mutation
-    truth-table that makes the "desired vs observed" invariant auditable.
-  - Added `docs/operator-guide.md` covering every operator workflow end-to-end:
-    cluster connection, repo registration, Helm release lifecycle,
-    Service Bundle, Frappe Site lifecycle (create / migrate / cancel / drop),
-    backup / restore, discovery, operator tools, reconciliation, and the
-    pre-release smoke procedure (folded in from `docs/frappe-site-smoke.md`).
-  - Added `docs/thesis.md` framing the project: problem statement, prior-art
-    survey, five testable objectives, methodology, results vs. objectives,
-    declared limitations, and future work. This is the load-bearing
-    deliverable-context document.
-- Updated `docs/codebase-summary.md` to reflect actual code:
-  added `Kubernetes Command`, `Kubernetes Command Audit Log`, the missing
-  `api/observability.py` and `api/dashboard.py` modules, the missing
-  `tasks/kubernetes_command_tasks.py` module, and references to the
-  `kubeport/workspace/` and `kubeport/number_card/` fixture directories.
-- Updated `AGENTS.md` DocType table to list the two `Kubernetes Command`
-  DocTypes that were previously only mentioned in `control-plane-state.md`.
-- Updated `CLAUDE.md` documentation index to reflect the new layout.
-- Renamed `license.txt` → `LICENSE` (industry convention — capital, no
-  extension) and filled in the copyright placeholders with `2026 Los Favs`
-  (matching `app_publisher` in `hooks.py` and `authors` in `pyproject.toml`).
-- Moved `docs/plans/` → `docs/history/` and folded `docs/frappe-site-smoke.md`
-  into the same archive, with a `docs/history/README.md` that explicitly marks
-  the archive as non-authoritative and points readers at the current docs for
-  each topic.
+Añadir un `kubeport/utils/metrics.py` nativo de Frappe respaldado por `frappe.cache()` (Redis por debajo, el mismo almacén que Frappe ya usa). Los contadores (`reconcile_ticks_total`, `stale_ops_recovered_total`, `orphan_jobs_swept_total`) usan `INCRBY` bruto contra claves con alcance de site mediante `RedisWrapper.make_key`. Un histograma de ventana deslizante de latencia de reloj de pared del subproceso helm se registra mediante `LPUSH` + `LTRIM`; los percentiles (p50/p95/p99) se calculan en el momento de la lectura.
 
-### Rejected alternatives
+El ID de correlación se genera en el punto de encolado de `frappe.enqueue`, se pasa como kwarg al worker y se vincula a `frappe.local.correlation_id` durante el cuerpo del worker mediante un gestor de contexto `correlation_scope`. Un pequeño proxy `metrics.logger(name)` lee ese local y prefija cada línea de log con `[correlation_id=<cid>]`, dando la misma subcadena de log en ambos lados del enqueue.
 
-- **Wholesale rewrite of `README.md`, `AGENTS.md`, `control-plane-state.md`,
-  and `codebase-summary.md`.** They are dense and accurate. Wholesale rewrites
-  would lose information without improving anything demonstrable. The work was
-  scoped to drift fixes plus restructuring around the new entry-point /
-  architecture / operator triad.
-- **A `CODE_OF_CONDUCT.md`.** Performative for a solo-author project; would
-  add maintenance surface without changing behaviour. Skipped — can be added
-  later when there are external contributors to govern.
-- **Generated API reference (Sphinx / mkdocs-material).** The whitelisted API
-  surface is small and already enumerated in `docs/codebase-summary.md` with
-  more useful per-endpoint commentary than auto-generated signatures would
-  provide. Generation tooling adds CI surface for negligible benefit.
-- **Splitting `CHANGELOG.md` into "decisions" and "release notes".**
-  The decision-log format already explicitly captures Context / Decision /
-  Rejected Alternatives / Implementation Details, which is the auditable
-  trail the project needs. A second release-notes file would duplicate without
-  adding signal.
+### Alternativas descartadas
 
-### Implementation details
+- **Dependencia de Prometheus / métricas externas.** Fuera del alcance de la superficie de la tesis; el TODO lo prohíbe explícitamente. Lo nativo de Frappe es suficiente para exponer valores en vivo en el espacio de trabajo del operador.
+- **Solo contadores locales al proceso.** No satisfaría el criterio de aceptación (el worker y la petición web viven en procesos diferentes).
+- **Persistir métricas en una nueva fila de DocType.** Aplazado; los valores en Redis cumplen el criterio y evitan una ruta de escritura intensiva en cada tick de reconciliación.
 
-- New / restructured files:
-  `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` (renamed from
-  `license.txt`), `CLAUDE.md` (updated doc index), `AGENTS.md` (added two
-  `Kubernetes Command` DocType rows), `docs/architecture.md`,
-  `docs/operator-guide.md`, `docs/thesis.md`, `docs/codebase-summary.md`
-  (drift fixes), `docs/history/README.md`, `docs/history/plan-*.md` (moved
-  from `docs/plans/`), `docs/history/frappe-site-smoke.md` (moved from
-  `docs/`).
-- The architecture document uses Mermaid for C4 diagrams (rendered natively
-  by GitHub), so no external diagram tool is introduced. Sequence diagrams
-  cover deploy, Frappe Site create, and reconciliation tick — the three
-  flows that exercise every invariant.
-- The operator guide is opinionated about the order of operations (connect
-  cluster → register repo → deploy release → create site → backup) so a
-  reader can follow it linearly without cross-referencing.
-- `docs/thesis.md` states each of the five objectives as a testable claim and
-  evaluates each in §5 with concrete code-level evidence — so the deliverable's
-  "results vs. objectives" claim is auditable, not aspirational.
+### Implementación
+
+- Nuevo `kubeport/utils/metrics.py`: contadores (comprobados en lista blanca), histograma deslizante, helpers `correlation_scope` / `current_correlation_id` / `logger`.
+- Nuevos endpoints públicos en `kubeport/api/dashboard.py`: `internal_metrics_summary`, `reconcile_ticks_card_value`, `stale_ops_recovered_card_value`, `orphan_jobs_swept_card_value`, `helm_p95_latency_card_value`.
+- Cuatro nuevas Number Cards bajo `kubeport/kubeport/number_card/`, expuestas como una nueva sección "Observabilidad Interna" en el espacio de trabajo `Kubeport Operations`.
+- Incrementos de contadores conectados a `kubeport/tasks/reconciliation.py` (`reconcile_all_releases`, `reconcile_site_backups`, `_set_stale_helm_operation_state`, `_sweep_orphan_site_jobs`) y el temporizador del subproceso helm conectado a `kubeport/utils/helm.py` (`_run_helm`).
+- ID de correlación generado en `Helm Release` `deploy_release`, `uninstall_release`, `rollback_release`; propagado como kwarg `correlation_id` a los workers de tarea `install_or_upgrade_release`, `rollback_release`, `uninstall_release`. Un commit posterior extendió el mismo patrón a cada punto de encolado restante: `Frappe Site` (create / delete / migrate / backup / restore / cancel / on_trash / cascade), `Frappe Site Backup.on_trash` → `delete_backup_archive_task`, `Service Bundle` (apply / delete), `Helm Repository` (`add_and_sync_repo` / `sync_repo_charts` y el tick del planificador diario `sync_all_repos`), `Kubernetes Command.execute` y `site_image_tasks.enqueue_sync_site_image_catalog`. Cada tarea acepta `correlation_id: str | None = None` y envuelve su cuerpo en `metrics.correlation_scope`.
+- `stale_ops_recovered_total` cuenta cada escritura exitosa de `_set_stale_helm_operation_state` (incluyendo el terminal `Failed`); `orphan_jobs_swept_total` cuenta cada acción de barrido tomada (los 404 en el lado del clúster siguen contando como el huérfano ya había desaparecido — la fila se reconcilió de todas formas).
+- Nueva suite de tests unitarios `kubeport/tests/test_metrics.py` cubre los contratos de contador, histograma y alcance de correlación; `kubeport/tests/test_api_dashboard.py` se extiende con un test por nuevo endpoint.
 
 ---
 
-## 2026-05-09 — Code-quality cleanup pass and CI test gating
+## 2026-05-10 — Revisión de documentación: estructura estándar de la industria
 
-### Context
+### Contexto
 
-A thorough review of the codebase was conducted to find bugs, inefficiencies, security concerns,
-and deviations from best practices. The architecture itself was found to be sound: 12 DocTypes for
-desired state only, all cluster mutations enqueued onto the long queue with operation/sync token
-re-checks, discovery is read-only, no shell=True, no SQL string-building, type hints enforced on
-whitelisted APIs. What the audit surfaced was a short list of tactical issues that were not
-worth a structural rewrite but were worth fixing in place. The publish-site-image workflow also
-did not gate tests on PR — formatting and unit-test regressions could merge unnoticed.
+La documentación del repositorio había crecido de forma orgánica. La superficie publicada era un `README.md` completo, un `AGENTS.md` de invariantes, el registro de decisiones de arquitectura aquí, y dos documentos de referencia bajo `docs/` (`control-plane-state.md`, `codebase-summary.md`). Lo que faltaba, frente a la estructura estándar de la industria para un proyecto de código abierto, era una separación clara entre un README de punto de entrada, un documento de incorporación de colaboradores, una política de divulgación de seguridad, un documento de arquitectura con diagramas y una guía de operador orientada al usuario. La referencia `docs/codebase-summary.md` también había derivado — era anterior a la adición de `Kubernetes Command`, `Kubernetes Command Audit Log`, `api/observability.py`, `api/dashboard.py` y `tasks/kubernetes_command_tasks.py` y listaba 10 DocTypes cuando el recuento real es 12 (más la fila de auditoría de `Kubernetes Command Audit Log`). `license.txt` aún llevaba los marcadores de posición `[year] [fullname]` sin rellenar. Tres documentos de planificación vivían bajo `docs/plans/` junto a un procedimiento de verificación manual (`docs/frappe-site-smoke.md`), mezclando material de planificación histórico con material de referencia actual.
 
-### Decision
+### Decisión
 
-- Replaced the single `self.reload()` violation in
-  `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py` with a targeted
-  `frappe.db.get_value()` lookup. This is the only `reload()` call in the repo and the project
-  invariant (CLAUDE.md, AGENTS.md) explicitly bans it in favour of `db_set` / `frappe.db.get_value`.
-- Extracted a `_cleanup_op_resources()` helper in `kubeport/tasks/site_tasks.py` and replaced three
-  identical job-and-secret cleanup blocks inside `_run_site_op` with calls to it. The orchestrator's
-  control flow is now linear: token-recheck → build → apply → record → on-rollback cleanup →
-  on-exception cleanup, with one named place where rollback semantics live.
-- Added `.github/workflows/ci.yml` with two jobs: a fast `lint` job (ruff format + check, pinned
-  to v0.14.10 to match `.pre-commit-config.yaml`) and a `test` job that boots a Frappe v16 bench
-  against MariaDB and Redis service containers, installs the kubeport app, and runs
-  `bench --site test_site run-tests --app kubeport`. Both gate on PR and push to main.
+- Reestructurado el árbol de documentación para coincidir con la estructura estándar de la industria para un proyecto de código abierto:
+  - `README.md` es ahora un punto de entrada enfocado — resumen de capacidades, esquema de arquitectura, instalación, primeros pasos y un mapa de documentación que apunta a cada otro documento por objetivo.
+  - Añadido `CONTRIBUTING.md` (entorno de desarrollo, convenciones de ramas y PR, estilo de mensajes de commit que coincide con el `git log` existente, tabla de estilo de código, comandos de test, los siete invariantes que todo colaborador debe respetar y una matriz "actualizar cuando" por documento).
+  - Añadido `SECURITY.md` (política de divulgación privada, alcance, modelo de confianza y recomendaciones de hardening específicas para una app Frappe como plano de control).
+  - Añadido `docs/architecture.md` con diagramas C4 de contexto / contenedor en Mermaid, un diagrama de relaciones de DocType, diagramas de secuencia en tiempo de ejecución para los flujos de deploy / create-site / reconciliación, y una tabla de verdad de mutación por capa que hace auditable el invariante "deseado vs. observado".
+  - Añadido `docs/operator-guide.md` que cubre cada flujo de trabajo del operador de extremo a extremo: conexión de clúster, registro de repositorio, ciclo de vida de Helm Release, Service Bundle, ciclo de vida de Frappe Site (create / migrate / cancel / drop), backup / restore, descubrimiento, herramientas del operador, reconciliación y el procedimiento de verificación previo a la publicación (integrado desde `docs/frappe-site-smoke.md`).
+  - Añadido `docs/thesis.md` encuadrando el proyecto: declaración del problema, revisión del arte previo, cinco objetivos testables, metodología, resultados frente a objetivos, limitaciones declaradas y trabajo futuro. Este es el documento de contexto de entregable de carga.
+- Actualizado `docs/codebase-summary.md` para reflejar el código real: añadidos `Kubernetes Command`, `Kubernetes Command Audit Log`, los módulos faltantes `api/observability.py` y `api/dashboard.py`, el módulo faltante `tasks/kubernetes_command_tasks.py` y referencias a los directorios de fixtures `kubeport/workspace/` y `kubeport/number_card/`.
+- Actualizada la tabla de DocTypes de `AGENTS.md` para listar los dos DocTypes de `Kubernetes Command` que anteriormente solo se mencionaban en `control-plane-state.md`.
+- Actualizado el índice de documentación de `CLAUDE.md` para reflejar la nueva estructura.
+- Renombrado `license.txt` → `LICENSE` (convención de la industria — mayúsculas, sin extensión) y rellenados los marcadores de posición del copyright con `2026 Los Favs` (coincidiendo con `app_publisher` en `hooks.py` y `authors` en `pyproject.toml`).
+- Movido `docs/plans/` → `docs/history/` e integrado `docs/frappe-site-smoke.md` en el mismo archivo, con un `docs/history/README.md` que marca explícitamente el archivo como no autoritativo y dirige a los lectores a los documentos actuales para cada tema.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Wholesale rewrite into hexagonal/DDD/repository-pattern layering.** DocType controllers,
-  whitelisted methods, and `frappe.enqueue` *are* the framework's idioms — wrapping them in a
-  service-layer shell would fight Frappe and produce churn against the existing 8.7k LoC of
-  integration tests without improving anything demonstrable.
-- **Consolidating the duplicated `_APP_NAME_RE` between `frappe_site.py:29` and
-  `tasks/site_tasks.py:67`.** The comment at `tasks/site_tasks.py:64-67` explicitly documents the
-  duplication as deliberate defense-in-depth: a malformed value reaching the worker through a
-  direct DB write or schema import must still be rejected at the shell-interpolation boundary.
-  Sharing a constant would not change the security property, but it works against the author's
-  stated "validate at every trust boundary" intent.
-- **Wrapping `kubernetes.client.exceptions.ApiException` in a custom `KubeportApiError`.** The
-  initial review punch list flagged this, but a closer audit found the codebase already does
-  layered exception handling correctly: `k8s_resources.py` uses narrow `ApiException` catches with
-  proper re-raise, and `observability.py`/`discovery.py`/`release_health.py` consistently extract
-  `.status` and `.reason` for useful messages before falling back to `RuntimeError`. The remaining
-  broad `except Exception` blocks in `tasks/` are correct — they are last-resort orchestrator
-  hooks where any unexpected failure must still trigger state cleanup. No actionable change.
-- **Replacing the Helm subprocess wrapper with a Python SDK.** The Python Helm SDK ecosystem
-  (PyHelm and forks) is unmaintained; `subprocess.run` with a list of args (no `shell=True`) is
-  the industry standard.
+- **Reescritura total de `README.md`, `AGENTS.md`, `control-plane-state.md` y `codebase-summary.md`.** Son densos y precisos. Las reescrituras totales perderían información sin mejorar nada demostrable. El trabajo se limitó a correcciones de deriva más reestructuración en torno a la nueva tríada de punto de entrada / arquitectura / operador.
+- **Un `CODE_OF_CONDUCT.md`.** Decorativo para un proyecto de autor único; añadiría superficie de mantenimiento sin cambiar el comportamiento. Omitido — puede añadirse más adelante cuando haya colaboradores externos que gobernar.
+- **Referencia de API generada (Sphinx / mkdocs-material).** La superficie de API pública es pequeña y ya está enumerada en `docs/codebase-summary.md` con comentarios por endpoint más útiles que las firmas autogeneradas. Las herramientas de generación añaden superficie de CI por un beneficio insignificante.
+- **Dividir `CHANGELOG.md` en "decisiones" y "notas de versión".** El formato de registro de decisiones ya captura explícitamente Contexto / Decisión / Alternativas descartadas / Implementación, que es el rastro auditable que el proyecto necesita. Un segundo archivo de notas de versión duplicaría sin añadir señal.
 
-### Implementation details
+### Implementación
 
-- `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:130-131` — replaced
-  `self.reload(); return {... "status": self.status}` with
-  `status = frappe.db.get_value("Kubernetes Command", self.name, "status")` and returned that.
-- `kubeport/tasks/site_tasks.py` — added `_cleanup_op_resources()` adjacent to the existing
-  `_best_effort_delete_*` helpers, and substituted it for the three duplicated cleanup blocks
-  inside `_run_site_op` (the post-apply token-recheck rollback, the rejected-`record_job`
-  rollback, and the broad-`except` cleanup). Behaviour is unchanged — the third call site forwards
-  `job_name_for_cleanup if job_applied else None` so the helper still respects the
-  "only delete the job if it was actually applied" guard.
-- `.github/workflows/ci.yml` — `lint` job runs ruff against the repo root using a Python 3.14
-  runner; `test` job sets up MariaDB 10.6, Redis 7 (cache + queue), and a fresh Frappe v16 bench,
-  then exercises the full kubeport test suite. The test suite was previously runnable only inside
-  the project's dev container; the CI job reproduces that environment on stock GitHub-hosted
-  runners. The `test` job ships with `continue-on-error: true` for the first cycle — bench-in-CI
-  bring-up has known fragility points (Python 3.14 wheel coverage on Ubuntu, occasional `bench`
-  flag drift, service-container timing) that are easier to surface and fix from a real run than to
-  pre-empt. The flag is to be removed once a green run lands, restoring full PR gating.
+- Ficheros nuevos / reestructurados: `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `LICENSE` (renombrado desde `license.txt`), `CLAUDE.md` (índice de documentos actualizado), `AGENTS.md` (añadidas dos filas de DocType de `Kubernetes Command`), `docs/architecture.md`, `docs/operator-guide.md`, `docs/thesis.md`, `docs/codebase-summary.md` (correcciones de deriva), `docs/history/README.md`, `docs/history/plan-*.md` (movidos desde `docs/plans/`), `docs/history/frappe-site-smoke.md` (movido desde `docs/`).
+- El documento de arquitectura usa Mermaid para los diagramas C4 (renderizados de forma nativa por GitHub), así que no se introduce ninguna herramienta de diagrama externa. Los diagramas de secuencia cubren deploy, creación de Frappe Site y tick de reconciliación — los tres flujos que ejercitan cada invariante.
+- La guía del operador es dogmática sobre el orden de las operaciones (conectar clúster → registrar repositorio → desplegar release → crear site → backup) para que un lector pueda seguirla linealmente sin referencias cruzadas.
+- `docs/thesis.md` enuncia cada uno de los cinco objetivos como una afirmación testable y evalúa cada uno en §5 con evidencia concreta a nivel de código — para que la afirmación "resultados frente a objetivos" del entregable sea auditable, no aspiracional.
 
 ---
 
-## 2026-05-09 — Automate curated site image catalog bumps on tag publish
+## 2026-05-09 — Limpieza de calidad de código y gating de tests en CI
 
-### Context
+### Contexto
 
-The publish-site-image workflow already builds and pushes Kubeport's curated GHCR image with a
-verified digest, but `kubeport/site_images/catalog.json` was still updated by hand after each
-release (commit `ec2a398` was the manual prototype). The manifest of "what we ship" drifts away
-from "what was actually published" between releases, and a wrong-by-one-character paste re-enters
-the doctype on the next daily catalog sync.
+Se realizó una revisión exhaustiva del código para detectar bugs, ineficiencias, problemas de seguridad y desviaciones de las mejores prácticas. La arquitectura en sí se encontró sólida: 12 DocTypes solo para estado deseado, todas las mutaciones del clúster encoladas en la cola long con recomprobaciones de token de operación/sincronización, el descubrimiento es de solo lectura, sin `shell=True`, sin construcción de cadenas SQL, anotaciones de tipo aplicadas en APIs públicas. Lo que la auditoría detectó fue una lista corta de problemas tácticos que no merecían una reescritura estructural pero sí merecían corregirse in situ. El flujo de trabajo de publicación de imágenes de site tampoco bloqueaba los tests en PR — las regresiones de formato y tests unitarios podían fusionarse sin ser detectadas.
 
-### Decision
+### Decisión
 
-- Added `scripts/update_site_catalog.py`: a standalone, frappe-free Python script that mirrors the
-  doctype's GHCR repository, image-tag, and sha256 digest regexes, locates the curated row by
-  `(image_repository, frappe_major)`, and rewrites only its `image_tag`, `image_digest`,
-  `source_revision`, and `apps_json_hash`. The script aborts non-zero on any validation failure
-  or ambiguous match.
-- Wired the script into `.github/workflows/publish-site-image.yml` so a `v*` tag push runs the
-  bump after the existing digest verification, writes the diff and the new values to the run's
-  step summary, and uploads the rewritten `catalog.json` as a build artifact named
-  `site-image-catalog-<tag>`.
-- Kept the operator in the loop for the commit and PR: the workflow does not push, commit, or
-  open a PR. The operator downloads the artifact (or copies the values from the step summary),
-  commits to a topic branch, and opens the bump PR through whatever review flow they prefer.
-- Catalog mutation is gated on `startsWith(github.ref, 'refs/tags/v')`, so push-to-main and PR
-  builds skip it entirely. The daily `sync_site_image_catalog` task continues to reconcile the
-  shipped catalog into MariaDB without change.
+- Reemplazada la única violación de `self.reload()` en `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py` con una búsqueda dirigida de `frappe.db.get_value()`. Esta es la única llamada a `reload()` en el repositorio y el invariante del proyecto (`CLAUDE.md`, `AGENTS.md`) lo prohíbe explícitamente a favor de `db_set` / `frappe.db.get_value`.
+- Extraído un helper `_cleanup_op_resources()` en `kubeport/tasks/site_tasks.py` y reemplazados tres bloques idénticos de limpieza de job-and-secret dentro de `_run_site_op` con llamadas al mismo. El flujo de control del orquestador es ahora lineal: recomprobación de token → build → apply → record → limpieza en rollback → limpieza en excepción, con un único lugar con nombre donde vive la semántica de rollback.
+- Añadido `.github/workflows/ci.yml` con dos jobs: un job `lint` rápido (`ruff format + check`, anclado a v0.14.10 para coincidir con `.pre-commit-config.yaml`) y un job `test` que arranca un bench Frappe v16 contra contenedores de servicio MariaDB y Redis, instala la app kubeport y ejecuta `bench --site test_site run-tests --app kubeport`. Ambos bloquean en PR y push a main.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Auto-open a PR with `peter-evans/create-pull-request@v6`.** Would require bumping the
-  workflow's `contents` permission to `write` and adds another moving piece in CI. The operator
-  preferred to keep the commit/PR step manual; the artifact + step-summary path delivers the
-  computed values without that escalation.
-- **Push the bump directly to `main`.** Loses the review trail and bypasses the protected-branch
-  flow used everywhere else in this repo.
-- **Hold the script inside `kubeport/site_images/`.** A future edit could pull `frappe` into the
-  import graph and break the publish runner, which has no Frappe install. `scripts/` keeps the
-  helper unambiguously CI-side.
+- **Reescritura total en capas hexagonal/DDD/repositorio.** Los controladores de DocType, los métodos públicos y `frappe.enqueue` *son* los modismos del framework — envolverlos en una capa de servicio lucharía contra Frappe y produciría cambios contra los 8.7k LoC existentes de tests de integración sin mejorar nada demostrable.
+- **Consolidar el `_APP_NAME_RE` duplicado entre `frappe_site.py:29` y `tasks/site_tasks.py:67`.** El comentario en `tasks/site_tasks.py:64-67` documenta explícitamente la duplicación como defensa en profundidad deliberada: un valor malformado que llegue al worker a través de una escritura directa en BD o una importación de esquema debe seguir siendo rechazado en el límite de interpolación del shell. Compartir una constante no cambiaría la propiedad de seguridad, pero va en contra de la intención declarada del autor de "validar en cada límite de confianza".
+- **Envolver `kubernetes.client.exceptions.ApiException` en un `KubeportApiError` personalizado.** La lista inicial de revisión lo señaló, pero una auditoría más detallada encontró que el código ya hace el manejo de excepciones por capas correctamente: `k8s_resources.py` usa capturas estrechas de `ApiException` con re-raise adecuado, y `observability.py`/`discovery.py`/`release_health.py` extraen consistentemente `.status` y `.reason` para mensajes útiles antes de recurrir a `RuntimeError`. Los bloques `except Exception` amplios restantes en `tasks/` son correctos — son hooks del orquestador de último recurso donde cualquier fallo inesperado debe aún activar la limpieza del estado. Sin cambio accionable.
+- **Reemplazar el wrapper del subproceso Helm con un SDK de Python.** El ecosistema de SDK de Python para Helm (PyHelm y forks) no tiene mantenimiento; `subprocess.run` con una lista de args (sin `shell=True`) es el estándar de la industria.
 
-### Implementation details
+### Implementación
 
-- Catalog rewriter: `scripts/update_site_catalog.py`. Regexes are copy-pasted verbatim from
-  `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py:11-13`.
-- Workflow steps: `Bump curated catalog row`, `Summarize catalog bump`, `Upload rewritten catalog`
-  in `.github/workflows/publish-site-image.yml`. Step summary includes the four before/after
-  fields plus a `git diff` of the rewritten file.
-- Drift guard: `kubeport/tests/test_publish_automation.py::UnitTestRegexDriftFromDoctype` loads
-  the script via `importlib.util` and asserts its regex `pattern` strings equal the doctype's, so
-  the test suite fails immediately if either side changes without the other.
-- Rewrite tests: same module's `UnitTestSiteCatalogRewrite` covers the happy path, end-to-end
-  validity through `kubeport.site_images.catalog.load_catalog`, and every validation/match
-  abort path.
+- `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py:130-131` — reemplazado `self.reload(); return {... "status": self.status}` con `status = frappe.db.get_value("Kubernetes Command", self.name, "status")` y devuelto ese valor.
+- `kubeport/tasks/site_tasks.py` — añadido `_cleanup_op_resources()` adyacente a los helpers `_best_effort_delete_*` existentes, y sustituido por las tres llamadas a los tres bloques de limpieza duplicados dentro de `_run_site_op` (el rollback de recomprobación de token post-apply, el rollback de `record_job` rechazado, y la limpieza de `except` amplio). El comportamiento no cambia — el tercer punto de llamada reenvía `job_name_for_cleanup if job_applied else None` para que el helper siga respetando la salvaguarda "solo eliminar el job si fue realmente aplicado".
+- `.github/workflows/ci.yml` — el job `lint` ejecuta ruff contra la raíz del repositorio usando un runner de Python 3.14; el job `test` configura MariaDB 10.6, Redis 7 (caché + cola) y un bench Frappe v16 nuevo, luego ejercita la suite completa de tests de kubeport. La suite de tests era anteriormente ejecutable solo dentro del contenedor de desarrollo del proyecto; el job de CI reproduce ese entorno en runners estándar alojados en GitHub. El job `test` se publica con `continue-on-error: true` para el primer ciclo — el arranque de bench-en-CI tiene puntos de fragilidad conocidos (cobertura de wheels de Python 3.14 en Ubuntu, deriva ocasional de flags de `bench`, temporización de contenedores de servicio) que es más fácil detectar y corregir desde una ejecución real que anticipar. El flag se eliminará una vez que aterrice una ejecución en verde, restaurando el bloqueo completo en PR.
 
 ---
 
-## 2026-05-09 — Curated Site Image catalog and digest-pinned bench deploys
+## 2026-05-09 — Automatizar las actualizaciones del catálogo curado de imágenes de site al publicar una etiqueta
 
-### Context
+### Contexto
 
-Helm Releases backing Frappe benches were rendered with arbitrary `frappe/erpnext` image references
-supplied by the operator. Nothing prevented an unreviewed image from landing on a cluster, and the
-release spec hash ignored the image identity entirely, so swapping the image tag in-place did not
-trigger a redeploy. Bench deploys also broke on clusters without a default StorageClass annotated:
-`helm upgrade` would fail deep inside the chart with an opaque "no PV found" error.
+El flujo de trabajo de publicación de imágenes de site ya construía y publicaba la imagen GHCR de Kubeport con un digest verificado, pero `kubeport/site_images/catalog.json` aún se actualizaba a mano después de cada versión (el commit `ec2a398` fue el prototipo manual). El manifiesto de "lo que publicamos" se aleja de "lo que se publicó realmente" entre versiones, y un pegado con un carácter incorrecto vuelve a entrar en el doctype en la siguiente sincronización diaria del catálogo.
 
-### Decision
+### Decisión
 
-- Introduced a `Kubeport Site Image` doctype (with child `Kubeport Site Image App`) that records a
-  curated GHCR-published image, its pinned `sha256:` digest, and the apps baked into it.
-- Shipped a JSON catalog at `kubeport/site_images/catalog.json` and a daily sync task that seeds
-  the doctype from the manifest, marking curated rows. Curated rows are deletable only by being
-  marked Deprecated; user-registered rows live alongside curated ones and stay deletable while
-  unreferenced.
-- Validated the GHCR coordinates and digest at doctype save time so unreviewable image refs cannot
-  enter the desired-state record.
-- Folded the resolved image digest into the Helm Release spec hash so digest changes (curated
-  republishes, user-registered pin updates) trigger a redeploy on the next reconciliation pass.
-- Auto-injected the cluster's default StorageClass and a compatible access-mode list into the
-  rendered Helm values when a Site Image is selected, so single-node and `local-path` clusters
-  deploy without operator intervention. The deploy is aborted up front with an actionable message
-  when no default class is annotated and the operator did not supply one in values.
-- Added a GitHub Actions workflow that builds the Kubeport-owned `frappe/erpnext/kubeport`
-  composite image and publishes it to GHCR, with provenance attestation and digest verification.
+- Añadido `scripts/update_site_catalog.py`: un script Python independiente, sin frappe, que refleja las expresiones regulares de repositorio GHCR, etiqueta de imagen y digest sha256 del doctype, localiza la fila curada por `(image_repository, frappe_major)` y reescribe solo sus campos `image_tag`, `image_digest`, `source_revision` y `apps_json_hash`. El script aborta con error en cualquier fallo de validación o coincidencia ambigua.
+- Conectado el script a `.github/workflows/publish-site-image.yml` para que un push de etiqueta `v*` ejecute la actualización tras la verificación del digest existente, escriba el diff y los nuevos valores en el resumen del paso de la ejecución y suba el `catalog.json` reescrito como artefacto de build llamado `site-image-catalog-<etiqueta>`.
+- El operador sigue en el bucle para el commit y el PR: el flujo de trabajo no hace push, no hace commit ni abre un PR. El operador descarga el artefacto (o copia los valores del resumen del paso), hace commit en una rama temática y abre el PR de actualización mediante el flujo de revisión que prefiera.
+- La mutación del catálogo está condicionada a `startsWith(github.ref, 'refs/tags/v')`, por lo que los push a main y las builds de PR lo omiten por completo. La tarea diaria `sync_site_image_catalog` sigue reconciliando el catálogo publicado en MariaDB sin cambios.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Pulling unpinned tags at deploy time.** Loses reproducibility — the same release row would
-  resolve to different image content over time, and rollbacks become impossible.
-- **Building images inside Frappe at request time.** Would pull a Docker daemon into the
-  control-plane footprint and violate the async-first/desired-state-vs-observed-state invariants.
-  Image build belongs in CI.
-- **Catalog rows in MariaDB only, no JSON source.** No review trail, no way for contributors to
-  propose a curated image via PR, and no way to bootstrap a fresh install.
-- **Forcing operators to specify `persistence.worker.storageClass` manually.** Bench deploys are
-  the most common workflow; making the obvious cluster-default case ergonomic is worth the small
-  amount of value-injection logic. Manual overrides still work because the auto-injection only
-  fires when the operator did not set the key.
+- **Abrir un PR automáticamente con `peter-evans/create-pull-request@v6`.** Requeriría elevar el permiso `contents` del flujo de trabajo a `write` y añade otra pieza móvil en CI. El operador prefirió mantener el paso de commit/PR manual; la ruta del artefacto + resumen del paso entrega los valores calculados sin esa escalada.
+- **Hacer push de la actualización directamente a `main`.** Pierde el rastro de revisión y evita el flujo de rama protegida usado en todo lo demás en este repositorio.
+- **Guardar el script dentro de `kubeport/site_images/`.** Una edición futura podría traer `frappe` al grafo de importación y romper el runner de publicación, que no tiene instalación de Frappe. `scripts/` mantiene el helper inequívocamente en el lado de CI.
 
-### Implementation details
+### Implementación
 
-- Doctype + child controllers: `kubeport/kubeport/doctype/kubeport_site_image/` and
-  `kubeport/kubeport/doctype/kubeport_site_image_app/`.
-- Catalog manifest and loader: `kubeport/site_images/catalog.json`,
-  `kubeport/site_images/catalog.py`.
-- Daily sync task: `kubeport.tasks.site_image_tasks.sync_site_image_catalog` (registered in
-  `hooks.py`).
-- Spec hash + StorageClass injection: `kubeport/tasks/helm_tasks.py`
-  (`_get_site_image_digest_for_hash`, `_image_tag_with_digest`, `_resolve_default_storage_class`,
-  `_user_values_have_worker_storage_class`).
-- StorageClass discovery helper: `kubeport.utils.discovery.discover_default_storage_class`.
-- Read-only API for Site Image lookup: `kubeport/api/site_images.py`.
-- Publish workflow: `.github/workflows/publish-site-image.yml` (push on `main` and `v*` tags).
-- Tests: `kubeport/tests/test_site_image_catalog.py`,
-  `kubeport/kubeport/doctype/kubeport_site_image/test_kubeport_site_image.py`, plus extensions to
-  `kubeport/tests/test_helm_tasks.py` and `kubeport/tests/test_reconciliation.py`.
+- Reescritor del catálogo: `scripts/update_site_catalog.py`. Las expresiones regulares se copian literalmente desde `kubeport/kubeport/doctype/kubeport_site_image/kubeport_site_image.py:11-13`.
+- Pasos del flujo de trabajo: `Bump curated catalog row`, `Summarize catalog bump`, `Upload rewritten catalog` en `.github/workflows/publish-site-image.yml`. El resumen del paso incluye los cuatro campos antes/después más un `git diff` del fichero reescrito.
+- Salvaguarda de deriva: `kubeport/tests/test_publish_automation.py::UnitTestRegexDriftFromDoctype` carga el script mediante `importlib.util` y afirma que sus cadenas de `pattern` de expresión regular igualan a las del doctype, para que la suite de tests falle inmediatamente si cualquiera de los lados cambia sin el otro.
+- Tests de reescritura: el `UnitTestSiteCatalogRewrite` del mismo módulo cubre el camino feliz, la validez de extremo a extremo a través de `kubeport.site_images.catalog.load_catalog` y cada ruta de abort por validación/coincidencia.
 
 ---
 
-## 2026-05-08 — Helm Release observability drilldown
+## 2026-05-09 — Catálogo de imágenes de site curado y despliegues de bench con digest anclado
 
-### Context
+### Contexto
 
-Helm Release readiness already identified which rendered resource was failing, but operators still
-had to leave Kubeport for the next diagnostic step: pod logs, scoped Kubernetes events, or workload
-rollout context.
+Las Helm Releases que respaldaban benches de Frappe se renderizaban con referencias de imagen `frappe/erpnext` arbitrarias suministradas por el operador. Nada impedía que una imagen no revisada llegara a un clúster, y el hash de especificación de la release ignoraba completamente la identidad de la imagen, por lo que intercambiar la etiqueta de imagen en el lugar no activaba un redespliegue. Los despliegues de bench también fallaban en clústeres sin un StorageClass predeterminado anotado: `helm upgrade` fallaba en lo profundo del chart con un error opaco de "no PV found".
 
-### Decision
+### Decisión
 
-- Added read-only Helm Release observability endpoints that resolve cluster identity from the
-  release row, enforce System Manager plus document read access, and validate the requested
-  resource against the live Helm manifest before returning diagnostic data.
-- Added Kubernetes observability helpers for resource-scoped pod logs, events, and
-  Deployment / StatefulSet / DaemonSet rollout context. Log reads are bounded by tail line count
-  and response size; the API resolves ownership-proven pods for the resource and returns logs only
-  for the selected pod, plus the pod list and default `selected_pod` for the UI.
-- Extended the Helm Release readiness panel into an in-form persistent observability panel. Each
-  unready row exposes Logs, Events, and Rollout actions; the Logs view ships a pod picker that
-  fetches the selected pod on each switch, while Events and Rollout return uniform `{rows, error}`
-  payloads so the panel can degrade per-section.
-- Added a `pod_count` field to the workload readiness rows so the form can hide the pod picker
-  when only one pod backs a resource.
-- Kept all observability data ephemeral. No new DocTypes or persisted observed-state fields were
-  added.
+- Introducido el doctype `Kubeport Site Image` (con hijo `Kubeport Site Image App`) que registra una imagen publicada en GHCR curada, su digest `sha256:` anclado y las apps incluidas en ella.
+- Publicado un catálogo JSON en `kubeport/site_images/catalog.json` y una tarea de sincronización diaria que siembra el doctype desde el manifiesto, marcando las filas curadas. Las filas curadas solo son eliminables marcándolas como Deprecated; las filas registradas por el usuario conviven con las curadas y siguen siendo eliminables cuando no están referenciadas.
+- Validadas las coordenadas GHCR y el digest al guardar el doctype para que las referencias de imagen no revisables no puedan entrar en el registro de estado deseado.
+- Incorporado el digest de imagen resuelto en el hash de especificación de Helm Release para que los cambios de digest (republicaciones curadas, actualizaciones de anclaje registradas por el usuario) activen un redespliegue en el siguiente paso de reconciliación.
+- Inyectado automáticamente el StorageClass predeterminado del clúster y una lista de modos de acceso compatible en los valores Helm renderizados cuando se selecciona una imagen de site, para que los clústeres de un solo nodo y `local-path` se desplieguen sin intervención del operador. El despliegue se aborta de antemano con un mensaje accionable cuando no hay ninguna clase predeterminada anotada y el operador no proporcionó una en los valores.
+- Añadido un flujo de trabajo de GitHub Actions que construye la imagen compuesta `frappe/erpnext/kubeport` propia de Kubeport y la publica en GHCR, con atestación de procedencia y verificación de digest.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Persisting logs/events/history.** This violates Kubeport's desired-state versus observed-state
-  boundary and would make stale diagnostics look authoritative.
-- **Modal dialogs per action.** The first iteration used `frappe.ui.Dialog` per Logs/Events/Rollout
-  click; switching pods or actions repeatedly closed and reopened modals. A persistent in-form
-  panel keeps the readiness table and diagnostics visible together and survives panel-internal
-  refreshes.
-- **Fetching every pod log in one request.** This made a single form request scale with workload
-  pod count and could stall the web thread on large or unhealthy releases. The API now fetches one
-  selected pod per request while still returning the pod list for picker navigation.
-- **Adding streaming logs.** Useful later, but larger than the current diagnostic drilldown scope.
+- **Obtener etiquetas sin anclar en el momento del despliegue.** Pierde reproducibilidad — la misma fila de release resolvería a contenido de imagen diferente con el tiempo, y los rollbacks se vuelven imposibles.
+- **Construir imágenes dentro de Frappe en el momento de la petición.** Llevaría un daemon Docker al footprint del plano de control y violaría los invariantes de asíncrono primero/estado deseado vs. estado observado. La construcción de imágenes pertenece a CI.
+- **Filas del catálogo solo en MariaDB, sin fuente JSON.** Sin rastro de revisión, sin forma de que los colaboradores propongan una imagen curada mediante PR y sin forma de arrancar una instalación nueva.
+- **Obligar a los operadores a especificar `persistence.worker.storageClass` manualmente.** Los despliegues de bench son el flujo de trabajo más común; hacer el caso obvio del predeterminado del clúster ergonómico vale la pequeña cantidad de lógica de inyección de valores. Las anulaciones manuales siguen funcionando porque la auto-inyección solo se activa cuando el operador no ha establecido la clave.
 
-### Implementation details
+### Implementación
 
-- `kubeport/api/observability.py`: whitelisted read-only endpoints with release-scope
-  authorization and manifest membership validation. Events and rollout return `{rows, error}`;
-  logs return `{pods, selected_pod, logs_by_pod, errors_by_pod, error}`.
-- `kubeport/utils/observability.py`: Kubernetes helpers with request timeouts and per-pod payload
-  caps; `list_pods_for_resource` walks owner references for `Deployment` / `StatefulSet` /
-  `DaemonSet` / standalone `Pod`.
-- `kubeport/utils/release_health.py`: per-workload `pod_count` so the form knows whether to render
-  the pod picker.
-- `kubeport/kubeport/doctype/helm_release/helm_release.js`: readiness-row Logs / Events / Rollout
-  actions render into a persistent in-form observability panel that shares the existing realtime
-  refresh channel and ignores stale async responses after operators switch resources, views, or pods.
-- `kubeport/tests/test_observability.py` and `kubeport/tests/test_api_observability.py`: utility
-  and API coverage for caps, authorization, selected-pod log fetching, `{rows, error}` wrapping,
-  and malformed requests.
+- Controladores de doctype + hijo: `kubeport/kubeport/doctype/kubeport_site_image/` y `kubeport/kubeport/doctype/kubeport_site_image_app/`.
+- Manifiesto del catálogo y cargador: `kubeport/site_images/catalog.json`, `kubeport/site_images/catalog.py`.
+- Tarea de sincronización diaria: `kubeport.tasks.site_image_tasks.sync_site_image_catalog` (registrada en `hooks.py`).
+- Hash de especificación + inyección de StorageClass: `kubeport/tasks/helm_tasks.py` (`_get_site_image_digest_for_hash`, `_image_tag_with_digest`, `_resolve_default_storage_class`, `_user_values_have_worker_storage_class`).
+- Helper de descubrimiento de StorageClass: `kubeport.utils.discovery.discover_default_storage_class`.
+- API de solo lectura para búsqueda de imagen de site: `kubeport/api/site_images.py`.
+- Flujo de publicación: `.github/workflows/publish-site-image.yml` (push en etiquetas `main` y `v*`).
+- Tests: `kubeport/tests/test_site_image_catalog.py`, `kubeport/kubeport/doctype/kubeport_site_image/test_kubeport_site_image.py`, más extensiones a `kubeport/tests/test_helm_tasks.py` y `kubeport/tests/test_reconciliation.py`.
 
 ---
 
-## 2026-05-04 — Backup ground truth, cancel cascade, and Kubernetes Command hardening
+## 2026-05-08 — Desglose de observabilidad de Helm Release
 
-### Context
+### Contexto
 
-The `feat/frappe-site-backup` branch shipped backup/restore but a primary-source audit surfaced four
-themes worth fixing before merge: (1) backup rows whose Job aged out of the cluster were silently
-marked `Failed` even when the archive existed on the PVC, (2) cancelling a site mid-backup left the
-backup row stuck in `Pending` forever because only the site's `operation_token` was rotated, (3) the
-cluster-mutation `cancel_site_task` was queued on `short` instead of `long`, violating the design
-rule, and (4) the new `Kubernetes Command` doctype exposed Delete on Secret / PVC / Deployment /
-StatefulSet — a privilege surface broader than the diagnostic use cases warrant, with no audit log
-distinct from the row itself.
+La preparación de Helm Release ya identificaba qué recurso renderizado estaba fallando, pero los operadores aún tenían que salir de Kubeport para el siguiente paso de diagnóstico: logs de pod, eventos de Kubernetes con alcance o contexto de rollout de la carga de trabajo.
 
-### Decision
+### Decisión
 
-- **PVC-side ground-truth probe for backup completion.** Added
-  `_probe_backup_archive_on_pvc(backup, api_client, core_v1)` in `kubeport/tasks/reconciliation.py`.
-  It submits a short-lived `busybox` Pod with the `kubeport-backups` PVC mounted, reads the
-  `<archive>.size` sidecar that the bench backup script already writes only on success, and returns
-  `(exists, size_bytes)` / `(missing, None)` / `(unknown, None)` mirroring `_probe_site_state`.
-  `_reconcile_site_backup` consults the probe in both branches: gone-Job (replaces the broken
-  `size_bytes` heuristic) and post-success (defends against the narrow window where `tar` exits zero
-  but the inode is lost before reconciliation reads it).
-- **Cancel-cascade to in-flight backups.** `FrappeSite.cancel_site` and `FrappeSite.on_trash` now
-  call `_cancel_inflight_backups_for_site(self.name, ...)`, which rotates `operation_token`, sets
-  `status = "Failed"` on every backup row linked to the site whose status is `Pending` /
-  `In Progress` / `Restoring`, publishes a realtime event, and enqueues `cancel_site_task` for any
-  recorded Job. This is what keeps the backup row from being orphaned by site-level cancellation.
-- **Long queue for cluster mutations.** `cancel_site_task` is enqueued on `queue="long"` from both
-  call sites. Short queue had aggressive timeouts and minimal retries; long queue matches every
-  other cluster-mutating background task.
-- **Failed-backup archive cleanup.** `FrappeSiteBackup.on_trash` now enqueues archive cleanup
-  whenever `storage_path` is set, regardless of status. A backup that partial-wrote an archive then
-  failed (e.g., `tar` corruption mid-flush) used to leak the file on the PVC; now it is deleted on
-  trash like an `Available` row would be.
-- **Explicit operation label for self-managed Jobs.** Added
-  `OPERATION_LABEL = "kubeport.io/operation"` and `SELF_MANAGED_OPERATION_VALUES = {"archive-delete"}`
-  in `site_tasks`. The orphan sweep skips Jobs carrying these labels so the cleanup path is no
-  longer accidentally handled by the grace-window race in the sweep.
-- **Tightened `Kubernetes Command` Delete allowlist.** Delete is now restricted to `Pod`, `Job`,
-  `ConfigMap` — restartable / recoverable kinds. Secret, PVC, Deployment, StatefulSet, Service are
-  excluded from the destructive path; operators go through the proper controllers (Helm Release,
-  Service Bundle, Frappe Site) for those. `validate()` now throws on Delete without
-  `confirm_destructive` (was a `pass` masquerading as a check).
-- **`Kubernetes Command Audit Log` doctype.** Append-only, System Manager read-only. Every execute
-  appends a row capturing user, cluster, namespace, action, kind, name, outcome, and an output
-  excerpt — decoupled from the source row so the audit trail survives row deletion.
-- **Visible output truncation.** `_finalize` now appends a `[... truncated, original N chars ...]`
-  marker so an operator debugging a long error message knows the body is incomplete.
-- **Backup form realtime listener.** `frappe_site_backup.js` now subscribes to
-  `frappe_site_backup_status_update` and reloads on docname match, mirroring the existing listener
-  on the `Frappe Site` form.
+- Añadidos endpoints de observabilidad de Helm Release de solo lectura que resuelven la identidad del clúster desde la fila de la release, aplican acceso de lectura del documento más System Manager, y validan el recurso solicitado contra el manifiesto Helm en vivo antes de devolver datos de diagnóstico.
+- Añadidos helpers de observabilidad de Kubernetes para logs de pod con alcance de recurso, eventos y contexto de rollout de Deployment / StatefulSet / DaemonSet. Las lecturas de log están limitadas por recuento de líneas de cola y tamaño de respuesta; la API resuelve pods cuya propiedad está probada para el recurso y devuelve logs solo para el pod seleccionado, más la lista de pods y el `selected_pod` por defecto para la UI.
+- Extendido el panel de preparación de Helm Release a un panel de observabilidad persistente en el formulario. Cada fila no lista expone acciones de Logs, Eventos y Rollout; la vista de Logs incluye un selector de pod que obtiene el pod seleccionado en cada cambio, mientras que Eventos y Rollout devuelven payloads uniformes `{rows, error}` para que el panel pueda degradarse por sección.
+- Añadido un campo `pod_count` a las filas de preparación de carga de trabajo para que el formulario pueda ocultar el selector de pod cuando solo un pod respalda un recurso.
+- Todos los datos de observabilidad permanecen efímeros. No se añadieron nuevos DocTypes ni campos de estado observado persistidos.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **No probe — defer everything via `unknown`.** Without a probe, the gone-Job branch has no signal
-  to recover from; deferring forever is the same as silent loss.
-- **Asynchronous probe Job tracked across reconciliation ticks.** Adds a state field on the backup
-  row plus two-tick latency. The synchronous probe Pod is bounded (15-second `activeDeadlineSeconds`)
-  and gone-Job recovery is rare in practice.
-- **Reverting `Kubernetes Command` entirely.** The diagnostic use cases (delete a stuck PVC, list
-  pods) are real. Tightening the allowlist plus an audit log is sufficient.
+- **Persistir logs/eventos/historial.** Viola el límite de estado deseado frente a estado observado de Kubeport y haría que los diagnósticos obsoletos parecieran autoritativos.
+- **Diálogos modales por acción.** La primera iteración usaba `frappe.ui.Dialog` por clic de Logs/Eventos/Rollout; cambiar pods o acciones repetidamente cerraba y reabría modales. Un panel persistente en el formulario mantiene la tabla de preparación y los diagnósticos visibles juntos y sobrevive a las actualizaciones internas del panel.
+- **Obtener todos los logs de pod en una sola petición.** Hacía que una sola petición del formulario escalara con el recuento de pods de la carga de trabajo y podía bloquear el hilo web en releases grandes o no saludables. La API ahora obtiene un pod seleccionado por petición mientras sigue devolviendo la lista de pods para la navegación del selector.
+- **Añadir logs en streaming.** Útil más adelante, pero mayor que el alcance actual de desglose de diagnóstico.
 
-### Implementation details
+### Implementación
 
-- `kubeport/tasks/reconciliation.py`: new `_probe_backup_archive_on_pvc`, updated
-  `_reconcile_site_backup` signature (now takes `api_client`), orphan sweep recognizes
-  `OPERATION_LABEL` + `SELF_MANAGED_OPERATION_VALUES`.
-- `kubeport/tasks/site_tasks.py`: added `OPERATION_LABEL`, `SELF_MANAGED_OPERATION_VALUES`;
-  `delete_backup_archive_task` tags its Job with `kubeport.io/operation=archive-delete`.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `cancel_site` / `on_trash` use
-  `queue="long"` and call `_cancel_inflight_backups_for_site`.
-- `kubeport/kubeport/doctype/frappe_site_backup/frappe_site_backup.py`: `on_trash` covers Failed
-  rows with a stamped `storage_path`.
-- `kubeport/kubeport/doctype/frappe_site_backup/frappe_site_backup.js`: realtime listener.
-- `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py`: `_DELETABLE_KINDS`
-  allowlist, validate() throws on missing `confirm_destructive`.
-- `kubeport/kubeport/doctype/kubernetes_command_audit_log/`: new audit log doctype.
-- `kubeport/tasks/kubernetes_command_tasks.py`: `_finalize` appends truncation marker, calls
-  `_append_audit_log`.
-- Tests added in `kubeport/tests/test_reconciliation.py`,
-  `kubeport/tests/test_site_tasks.py`,
-  `kubeport/kubeport/doctype/frappe_site_backup/test_frappe_site_backup.py`,
-  `kubeport/kubeport/doctype/kubernetes_command/test_kubernetes_command.py`.
+- `kubeport/api/observability.py`: endpoints públicos de solo lectura con autorización de alcance de release y validación de pertenencia al manifiesto. Eventos y rollout devuelven `{rows, error}`; logs devuelven `{pods, selected_pod, logs_by_pod, errors_by_pod, error}`.
+- `kubeport/utils/observability.py`: helpers de Kubernetes con timeouts de petición y límites de payload por pod; `list_pods_for_resource` recorre referencias de propietario para `Deployment` / `StatefulSet` / `DaemonSet` / `Pod` independiente.
+- `kubeport/utils/release_health.py`: `pod_count` por carga de trabajo para que el formulario sepa si renderizar el selector de pod.
+- `kubeport/kubeport/doctype/helm_release/helm_release.js`: las acciones Logs / Eventos / Rollout de las filas de preparación se renderizan en un panel de observabilidad persistente en el formulario que comparte el canal de actualización en tiempo real existente e ignora las respuestas asíncronas obsoletas después de que los operadores cambien recursos, vistas o pods.
+- `kubeport/tests/test_observability.py` y `kubeport/tests/test_api_observability.py`: cobertura de utilidades y API para límites, autorización, obtención de logs de pod seleccionado, envoltorio `{rows, error}` y peticiones malformadas.
 
 ---
 
-## 2026-04-30 — Frappe Site backup and restore lifecycle
+## 2026-05-04 — Ground truth de backup, cascada de cancelación y refuerzo de Kubernetes Command
 
-### Context
+### Contexto
 
-`Frappe Site` supported create, drop, and migrate, but `drop-site --no-backup --force` made a mistaken
-delete irreversible from inside Kubeport. Operators needed a first-class backup/restore path that preserved
-the desired-vs-observed split and kept cluster mutations out of the web thread.
+La rama `feat/frappe-site-backup` publicó backup/restauración pero una auditoría de fuente primaria detectó cuatro temas que valía la pena corregir antes de la fusión: (1) las filas de backup cuyo Job había expirado del clúster se marcaban silenciosamente como `Failed` incluso cuando el archivo existía en el PVC, (2) cancelar un site a mitad de backup dejaba la fila de backup atascada en `Pending` para siempre porque solo se rotaba el `operation_token` del site, (3) el `cancel_site_task` de mutación del clúster se encolaba en `short` en lugar de `long`, violando la regla de diseño, y (4) el nuevo doctype `Kubernetes Command` exponía Delete en Secret / PVC / Deployment / StatefulSet — una superficie de privilegio más amplia de lo que justifican los casos de uso de diagnóstico, sin log de auditoría distinto de la propia fila.
 
-### Decision
+### Decisión
 
-- **Standalone backup metadata.** Added `Frappe Site Backup` as a normal DocType, not a child table, so
-  `Available` backup metadata can outlive the source `Frappe Site` row.
-- **PVC-backed storage for this cycle.** Backup Jobs create archives on a namespace-local RWX
-  `kubeport-backups` PVC. `Kubernetes Cluster.backup_storage_class` can override the storage class; blank
-  uses the namespace default.
-- **Async backup/restore operations.** `backup_site` and `restore_site` rotate the parent site's
-  `operation_token`, write backup-row operation metadata, and enqueue long-queue Jobs through the shared
-  site operation scaffolding. Restore requires destructive confirmation and reuses the `Migrating` parent
-  state.
-- **Reconciliation owns final state.** Backup rows become `Available` or `Failed` from Job status and
-  archive metadata. Restore completion uses the same functional bench probe as migrate so a false-negative
-  Job exit can still recover to `Active`.
-- **Orphan sweep recognizes backup Jobs.** The sweep now accounts for both `Frappe Site` and
-  `Frappe Site Backup` operation Job names and labels.
+- **Sonda de ground truth en el lado del PVC para la finalización del backup.** Añadida `_probe_backup_archive_on_pvc(backup, api_client, core_v1)` en `kubeport/tasks/reconciliation.py`. Envía un Pod de corta duración de `busybox` con el PVC `kubeport-backups` montado, lee el sidecar `<archivo>.size` que el script de backup del bench ya escribe solo en éxito, y devuelve `(exists, size_bytes)` / `(missing, None)` / `(unknown, None)` reflejando `_probe_site_state`. `_reconcile_site_backup` consulta la sonda en ambas ramas: Job desaparecido (reemplaza la heurística rota de `size_bytes`) y post-éxito (defiende contra la ventana estrecha donde `tar` sale con cero pero el inodo se pierde antes de que la reconciliación lo lea).
+- **Cascada de cancelación a backups en vuelo.** `FrappeSite.cancel_site` y `FrappeSite.on_trash` ahora llaman a `_cancel_inflight_backups_for_site(self.name, ...)`, que rota `operation_token`, establece `status = "Failed"` en cada fila de backup vinculada al site cuyo estado es `Pending` / `In Progress` / `Restoring`, publica un evento en tiempo real y encola `cancel_site_task` para cualquier Job registrado. Esto es lo que evita que la fila de backup quede huérfana por la cancelación a nivel de site.
+- **Cola long para mutaciones del clúster.** `cancel_site_task` se encola en `queue="long"` desde ambos puntos de llamada. La cola short tenía timeouts agresivos y reintentos mínimos; la cola long coincide con todas las demás tareas en segundo plano que mutan el clúster.
+- **Limpieza del archivo de backup fallido.** `FrappeSiteBackup.on_trash` ahora encola la limpieza del archivo siempre que `storage_path` esté establecido, independientemente del estado. Un backup que escribió parcialmente un archivo y luego falló (p. ej., corrupción de `tar` a mitad de escritura) antes filtraba el fichero en el PVC; ahora se elimina al mover a la papelera como lo haría una fila `Available`.
+- **Etiqueta de operación explícita para Jobs autogestionados.** Añadidos `OPERATION_LABEL = "kubeport.io/operation"` y `SELF_MANAGED_OPERATION_VALUES = {"archive-delete"}` en `site_tasks`. El barrido de huérfanos omite los Jobs que llevan estas etiquetas para que la ruta de limpieza no sea manejada accidentalmente por la carrera de ventana de gracia en el barrido.
+- **Lista de permitidos de Delete de `Kubernetes Command` reducida.** Delete ahora está restringido a `Pod`, `Job`, `ConfigMap` — tipos reiniciables / recuperables. Secret, PVC, Deployment, StatefulSet, Service están excluidos de la ruta destructiva; los operadores pasan por los controladores adecuados (Helm Release, Service Bundle, Frappe Site) para esos. `validate()` ahora lanza en Delete sin `confirm_destructive` (antes era un `pass` enmascarado como comprobación).
+- **Doctype `Kubernetes Command Audit Log`.** De solo adición, solo lectura para System Manager. Cada ejecución añade una fila que captura usuario, clúster, namespace, acción, kind, nombre, resultado y un extracto de salida — desacoplado de la fila origen para que el rastro de auditoría sobreviva a la eliminación de la fila.
+- **Truncado de salida visible.** `_finalize` ahora añade un marcador `[... truncated, original N chars ...]` para que un operador depurando un mensaje de error largo sepa que el cuerpo está incompleto.
+- **Listener en tiempo real del formulario de backup.** `frappe_site_backup.js` ahora se suscribe a `frappe_site_backup_status_update` y recarga al coincidir el docname, reflejando el listener existente en el formulario de `Frappe Site`.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Store archives in MariaDB.** Large binary blobs in the desired-state database would blur metadata and
-  storage responsibilities.
-- **Object storage first.** S3/GCS/Azure support needs credentials, retention, and cross-cluster transfer
-  policy; PVC storage is enough to close the immediate no-data-loss gap.
-- **Attach backups as a child table.** Child rows would disappear with the parent site row, undermining
-  recovery from mistaken deletion.
+- **Sin sonda — diferir todo mediante `unknown`.** Sin una sonda, la rama de Job desaparecido no tiene señal de la que recuperarse; diferir indefinidamente es lo mismo que pérdida silenciosa.
+- **Job de sonda asíncrono rastreado entre ticks de reconciliación.** Añade un campo de estado en la fila de backup más latencia de dos ticks. El Pod de sonda síncrono está limitado (`activeDeadlineSeconds` de 15 segundos) y la recuperación de Job desaparecido es rara en la práctica.
+- **Revertir `Kubernetes Command` completamente.** Los casos de uso de diagnóstico (eliminar un PVC atascado, listar pods) son reales. Reducir la lista de permitidos más un log de auditoría es suficiente.
 
-### Implementation details
+### Implementación
 
-- `kubeport/kubeport/doctype/frappe_site_backup/`: new DocType, controller guards, form script, and tests.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: added `backup_site()` and `restore_site(...)`.
-- `kubeport/tasks/site_tasks.py`: added backup/restore commands, backup PVC ensure/mount logic, archive
-  delete best effort task, and backup-specific Job labels.
-- `kubeport/tasks/reconciliation.py`: added backup/restore reconciliation and extended orphan sweep.
-- `kubeport/api/site.py` and `frappe_site.js`: added backup listing, restore action, and backup/restore logs.
-
-### Known follow-ups
-
-Scheduled backups, retention policy, object-store backends, encryption, cross-cluster restore, and
-restore-to-different-site-name remain deferred.
+- `kubeport/tasks/reconciliation.py`: nuevo `_probe_backup_archive_on_pvc`, firma de `_reconcile_site_backup` actualizada (ahora toma `api_client`), el barrido de huérfanos reconoce `OPERATION_LABEL` + `SELF_MANAGED_OPERATION_VALUES`.
+- `kubeport/tasks/site_tasks.py`: añadidos `OPERATION_LABEL`, `SELF_MANAGED_OPERATION_VALUES`; `delete_backup_archive_task` etiqueta su Job con `kubeport.io/operation=archive-delete`.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `cancel_site` / `on_trash` usan `queue="long"` y llaman a `_cancel_inflight_backups_for_site`.
+- `kubeport/kubeport/doctype/frappe_site_backup/frappe_site_backup.py`: `on_trash` cubre las filas Failed con un `storage_path` registrado.
+- `kubeport/kubeport/doctype/frappe_site_backup/frappe_site_backup.js`: listener en tiempo real.
+- `kubeport/kubeport/doctype/kubernetes_command/kubernetes_command.py`: lista de permitidos `_DELETABLE_KINDS`, `validate()` lanza en `confirm_destructive` ausente.
+- `kubeport/kubeport/doctype/kubernetes_command_audit_log/`: nuevo doctype de log de auditoría.
+- `kubeport/tasks/kubernetes_command_tasks.py`: `_finalize` añade el marcador de truncado, llama a `_append_audit_log`.
+- Tests añadidos en `kubeport/tests/test_reconciliation.py`, `kubeport/tests/test_site_tasks.py`, `kubeport/kubeport/doctype/frappe_site_backup/test_frappe_site_backup.py`, `kubeport/kubeport/doctype/kubernetes_command/test_kubernetes_command.py`.
 
 ---
 
-## 2026-04-30 — Helm Release lifecycle: rollback, uninstall, and manifest-based health
+## 2026-04-30 — Ciclo de vida de backup y restauración de Frappe Site
 
-### Context
+### Contexto
 
-`Helm Release` rows could be deployed and re-deployed, but the post-deploy lifecycle was thin:
-runtime classification was based on `helm status` alone (so a `deployed` release with crash-looping
-pods looked healthy), there was no first-class uninstall path (rows could be deleted in any state,
-silently orphaning cluster resources), no rollback (operators had to `helm rollback` out-of-band and
-then live with the row's desired spec drifting from reality), and no recovery for releases stuck
-mid-operation. The deploy worker also had no concurrency guard against a newer operation
-superseding it mid-call, so a slow `helm upgrade` could write back stale status over a fresh one.
+`Frappe Site` soportaba creación, eliminación y migración, pero `drop-site --no-backup --force` hacía que un borrado por error fuera irreversible desde dentro de Kubeport. Los operadores necesitaban una ruta de backup/restauración de primera clase que preservara la separación deseado-vs-observado y mantuviera las mutaciones del clúster fuera del hilo web.
 
-### Decision
+### Decisión
 
-- **Manifest-based readiness walk.** `kubeport/utils/release_health.py:walk` parses the rendered
-  output of `helm get manifest`, filters to eight built-in workload kinds (`Deployment`,
-  `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, `Ingress`), and
-  queries each resource's live status. `classify_release_state` combines Helm runtime state with
-  the walker's per-resource readiness: `deployed` + all-ready ⇒ `Deployed`; `deployed` + any
-  unready ⇒ `Degraded`; pending/failed Helm states ⇒ `Failed`. Deploy workers and reconciliation
-  both call the same classifier so health policy lives in one place.
-- **Per-operation tokens for Helm.** `tasks/helm_tasks.py:_release_operation_matches` mirrors the
-  site-task pattern: every whitelisted method rotates `operation_token` before enqueue, and the
-  worker re-checks both token and status before each writeback (entry, post-Helm-call, finalize).
-  If a newer operation has taken over, the worker drops its writeback silently. Same guard in
-  `_set_helm_reconciliation_state` so reconciliation cannot overwrite an in-flight operator action.
-- **Stale-operation recovery at 30 minutes.** `tasks/reconciliation.py:_reconcile_stale_helm_operations`
-  picks up `In Progress` / `Uninstalling` rows older than `_HELM_OPERATION_STALE_SECONDS = 1800`,
-  re-checks live Helm state, and either recovers them (re-classifying via the shared classifier) or
-  routes uninstall through `_reconcile_stale_uninstall` (which treats "release not found" as success
-  and resets the row to `Draft`). Fixed window rather than a worker heartbeat: simpler, no extra
-  state, and matches the 5-minute scheduler cadence well.
-- **Rollback as a background operation.** `helm_release.py:rollback_release` accepts a target
-  revision, validates it, rotates the operation token, and enqueues `helm_tasks.rollback_release`.
-  On success the worker writes back the rolled-back chart version and live values into the row's
-  desired spec — so the row's desired state matches what's actually running, and the next
-  reconciliation tick does not flag drift.
-- **Dependency-aware uninstall with a force path.** Normal `uninstall_release` blocks while any
-  linked `Frappe Site` is in `Active` / `In Progress` / `Deleting` / `Migrating`, or in `Failed`
-  with a Job pointer (the bench may still own state inside the release). The force path requires a
-  typed `UNINSTALL <release_name>` confirmation in the UI and records the override in
-  `helm_status_detail`. Helm `release: not found` errors are treated as success (idempotency).
-- **Direct delete blocked outside `Draft`.** `on_trash` refuses any non-`Draft` row; uninstall is
-  the only cleanup path. Same rationale as the site-lifecycle `on_trash` widening: a `Failed` row
-  may still own cluster resources and silently dropping it from MariaDB orphans them.
-- **Spec-hash drift signal.** `calculate_release_spec_hash` produces a stable hash over chart,
-  chart version, namespace, and values; `validate()` recomputes `desired_spec_hash` on every save
-  and flags `pending_changes` when it diverges from `last_applied_spec_hash`. The applied hash is
-  updated only on successful deploy or rollback, so operators see unsaved intent before the next
-  operation.
+- **Metadatos de backup independientes.** Añadido `Frappe Site Backup` como DocType normal, no como tabla hija, para que los metadatos de backup `Available` puedan sobrevivir a la fila de `Frappe Site` origen.
+- **Almacenamiento respaldado por PVC para este ciclo.** Los Jobs de backup crean archivos en un PVC RWX `kubeport-backups` local al namespace. `Kubernetes Cluster.backup_storage_class` puede anular la clase de almacenamiento; en blanco usa el predeterminado del namespace.
+- **Operaciones de backup/restauración asíncronas.** `backup_site` y `restore_site` rotan el `operation_token` del site padre, escriben los metadatos de operación de la fila de backup y encolan Jobs de cola long a través del andamiaje de operación de site compartido. La restauración requiere confirmación destructiva y reutiliza el estado padre `Migrating`.
+- **La reconciliación posee el estado final.** Las filas de backup se convierten en `Available` o `Failed` a partir del estado del Job y los metadatos del archivo. La finalización de la restauración usa la misma sonda funcional de bench que migrate para que una salida falsa negativa del Job aún pueda recuperarse a `Active`.
+- **El barrido de huérfanos reconoce los Jobs de backup.** El barrido ahora tiene en cuenta los nombres y etiquetas de Jobs de operación tanto de `Frappe Site` como de `Frappe Site Backup`.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Trust `helm status` alone for health.** Cheap, but a `deployed` release with crash-looping pods
-  or unbound PVCs would report green. The whole point of a control plane is to observe ground
-  truth, so the manifest walk is non-negotiable.
-- **Maintain a worker heartbeat instead of a fixed staleness window.** More moving parts (heartbeat
-  table, expiry sweep) for a problem that a 30-minute timestamp comparison already solves. The
-  existing token re-check already handles the "newer op wins" race; staleness is only for genuinely
-  stuck workers.
-- **Walk arbitrary resource kinds via CRD discovery.** Out of scope; per-CRD health has no general
-  semantics. Restricting to the eight built-in kinds keeps the walker predictable and matches what
-  the docs already promise.
-- **Allow uninstall regardless of linked sites.** Risks orphaning a bench's database/files inside
-  the release's PVC. Blocking-by-default + typed force gate gives the operator a deliberate path
-  without making the unsafe path easy.
-- **Persist per-resource readiness rows.** Violates the "observed state is never persisted" rule
-  in `AGENTS.md`. The form drilldown re-queries on demand via `frappe.xcall`.
-- **Auto-uninstall when the row is deleted.** Implicit destructive cluster mutation triggered by a
-  MariaDB delete is exactly what the desired-state-vs-observed-state separation is meant to avoid;
-  uninstall remains an explicit operator action.
+- **Almacenar archivos en MariaDB.** Los grandes blobs binarios en la base de datos de estado deseado difuminarían las responsabilidades de metadatos y almacenamiento.
+- **Almacenamiento de objetos primero.** El soporte de S3/GCS/Azure necesita credenciales, retención y política de transferencia entre clústeres; el almacenamiento en PVC es suficiente para cerrar la brecha inmediata de no pérdida de datos.
+- **Adjuntar backups como tabla hija.** Las filas hija desaparecerían con la fila del site padre, frustrando la recuperación de una eliminación por error.
 
-### Implementation details
+### Implementación
 
-- `kubeport/kubeport/doctype/helm_release/helm_release.py`: added `deploy_release`,
-  `uninstall_release` (with `force: bool = False` and blocking-site detection),
-  `rollback_release`, `get_release_health`, `load_defaults`, `get_release_history`;
-  `validate()` computes `desired_spec_hash` and `pending_changes`; `on_trash` blocks non-`Draft`
-  rows; `build_release_docname` scopes identity to cluster/namespace/release; storage validation
-  rejects `local-path` + `ReadWriteMany` combinations.
-- `kubeport/kubeport/doctype/helm_release/helm_release.js`: status indicators, realtime
-  `helm_release_status_update` listener, button-state machine (Install / Upgrade / Retry /
-  Redeploy), force-uninstall typed-confirmation dialog, history/rollback dialog with revision
-  picker, post-deploy health drilldown, namespace + chart-version autocomplete.
-- `kubeport/tasks/helm_tasks.py`: `install_or_upgrade_release`, `rollback_release`,
-  `uninstall_release` all routed through `_release_operation_matches` with token+status re-checks
-  before each writeback; `_safe_walk` isolates walker errors; `_finalize_uninstall_success` resets
-  the row to `Draft`; `_is_release_not_found_error` classifies idempotent uninstall.
-- `kubeport/tasks/reconciliation.py`: `_reconcile_helm_releases` (Deployed/Degraded healing),
-  `_reconcile_stale_helm_operations` + `_reconcile_stale_uninstall` (30-min staleness window),
-  `_set_helm_reconciliation_state` (token-guarded writeback), `_helm_operation_is_stale` window
-  check.
-- `kubeport/utils/release_health.py`: `walk`, `summarize`, `classify_release_state`,
-  `classify_release_from_cluster`, plus per-kind readiness for the eight built-in kinds and
-  `_attach_warning_events` for last-N event annotation.
-- `kubeport/utils/helm.py`: `install_or_upgrade`, `rollback`, `uninstall`, `status`,
-  `get_manifest`, `get_values`, `history`, `show_chart`, `show_values` — all subprocess wrappers
-  over a per-call temporary kubeconfig.
-- `kubeport/api/discovery.py`: `get_cluster_discovery` annotates each live release with whether a
-  tracking row exists; `adopt_helm_release` creates a desired-state row from a discovered release
-  with chart version + values baselined.
-- Tests added: `test_helm_release.py` (validation, immutability, deploy gate),
-  `test_helm_tasks.py` (token staleness for install/rollback/uninstall, repo sync supersession,
-  chart inventory), `test_release_health.py` (all eight kinds + warning-event attachment),
-  `test_reconciliation.py` (Helm healing + stale-op recovery + uninstall-not-found path),
-  `test_discovery.py` (release annotation + adoption).
-- Documentation: `README.md`, `docs/codebase-summary.md`, and `docs/control-plane-state.md`
-  updated in the same cycle to describe rollback/uninstall/health/reconciliation as shipped.
+- `kubeport/kubeport/doctype/frappe_site_backup/`: nuevo DocType, guardas del controlador, script de formulario y tests.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: añadidos `backup_site()` y `restore_site(...)`.
+- `kubeport/tasks/site_tasks.py`: añadidos comandos de backup/restauración, lógica de asegurar/montar PVC de backup, tarea de eliminación de archivo por best effort y etiquetas de Job específicas de backup.
+- `kubeport/tasks/reconciliation.py`: añadida reconciliación de backup/restauración y extendido el barrido de huérfanos.
+- `kubeport/api/site.py` y `frappe_site.js`: añadidos listado de backups, acción de restauración y logs de backup/restauración.
 
-### Known follow-ups
+### Seguimientos conocidos
 
-Helm diff/preview, pod-log and event-history drilldown in the form, application-level HTTP health,
-and CRD-aware health remain out of scope (recorded in `docs/control-plane-state.md` Open Gaps).
+Los backups programados, la política de retención, los backends de almacenamiento de objetos, el cifrado, la restauración entre clústeres y la restauración a un nombre de site diferente permanecen aplazados.
 
 ---
 
-## 2026-04-27 — Frappe Site lifecycle: pre-merge hardening
+## 2026-04-30 — Ciclo de vida de Helm Release: rollback, desinstalación y salud basada en manifiesto
 
-### Context
+### Contexto
 
-Pre-merge audit of `feat/site-lifecycle` surfaced five items: cancelling a running migration is unsafe
-because MariaDB DDL is not atomic, the orphan sweep could race the worker's Job apply to `db_set` window,
-`on_trash` ignored `Failed` rows that still held a Job pointer, the new `Deleting`/`Migrating`
-reconciliation branches lacked direct behavioural tests, and the three site-task functions duplicated most
-of their apply scaffolding.
+Las filas de `Helm Release` podían desplegarse y redesplegarse, pero el ciclo de vida post-despliegue era escaso: la clasificación en tiempo de ejecución se basaba solo en `helm status` (por lo que una release `deployed` con pods en crash-loop parecía sana), no había ruta de desinstalación de primera clase (las filas podían eliminarse en cualquier estado, huerfanando silenciosamente los recursos del clúster), no había rollback (los operadores tenían que hacer `helm rollback` fuera de banda y luego convivir con que la especificación deseada de la fila divergía de la realidad), y no había recuperación para las releases atascadas a mitad de operación. El worker de despliegue tampoco tenía salvaguarda de concurrencia contra una operación más nueva que lo superara a mitad de llamada, por lo que un `helm upgrade` lento podía sobrescribir el estado de uno más reciente.
 
-### Decision
+### Decisión
 
-- **Confirmation-gated cancel for `Migrating`.** `cancel_site` accepts
-  `confirm_destructive: bool = False`; `Migrating` requires it. Status detail records
-  "destructive cancel acknowledged". The client uses a typed `CANCEL` dialog, and `on_trash` refuses
-  `Migrating` rows so operators must use the gated path.
-- **Orphan-sweep grace period.** `_sweep_orphan_site_jobs` skips Jobs younger than
-  `_ORPHAN_SWEEP_GRACE_SECONDS` (5 minutes, matching the reconciliation tick), closing the worker
-  apply-to-DB race.
-- **`on_trash` cleanup widened.** After the `Active` and `Migrating` refusals, cleanup runs whenever
-  `operation_job_name` is set, regardless of row status.
-- **D1 orchestrator refactor.** `create_site_task`, `delete_site_task`, and `migrate_site_task` are thin
-  wrappers over `_run_site_op(...)`. Per-op behavior lives in `SiteOpConfig` plus plain callables for
-  command, env, and optional creds Secret construction.
-- **H4 behavioural tests.** Direct tests now cover `Deleting` and `Migrating` reconciliation branch
-  transitions, orphan-sweep grace behavior, and the shared `_run_site_op` success/supersession paths.
+- **Recorrido de preparación basado en manifiesto.** `kubeport/utils/release_health.py:walk` analiza la salida renderizada de `helm get manifest`, filtra a ocho tipos de carga de trabajo integrados (`Deployment`, `StatefulSet`, `DaemonSet`, `Pod`, `Job`, `PersistentVolumeClaim`, `Service`, `Ingress`) y consulta el estado en vivo de cada recurso. `classify_release_state` combina el estado en tiempo de ejecución de Helm con la preparación por recurso del walker: `deployed` + todos listos ⇒ `Deployed`; `deployed` + alguno no listo ⇒ `Degraded`; estados Helm pendientes/fallidos ⇒ `Failed`. Los workers de despliegue y la reconciliación llaman al mismo clasificador para que la política de salud viva en un único lugar.
+- **Tokens por operación para Helm.** `tasks/helm_tasks.py:_release_operation_matches` refleja el patrón de la tarea de site: cada método público rota `operation_token` antes de encolar, y el worker vuelve a comprobar tanto el token como el estado antes de cada escritura (entrada, post-llamada-Helm, finalización). Si una operación más nueva ha tomado el control, el worker descarta su escritura silenciosamente. La misma salvaguarda en `_set_helm_reconciliation_state` para que la reconciliación no pueda sobrescribir una acción del operador en vuelo.
+- **Recuperación de operaciones obsoletas a los 30 minutos.** `tasks/reconciliation.py:_reconcile_stale_helm_operations` recoge filas `In Progress` / `Uninstalling` de más de `_HELM_OPERATION_STALE_SECONDS = 1800` segundos, vuelve a comprobar el estado Helm en vivo y las recupera (reclasificando mediante el clasificador compartido) o enruta la desinstalación a través de `_reconcile_stale_uninstall` (que trata "release not found" como éxito y restablece la fila a `Draft`). Ventana fija en lugar de un heartbeat del worker: más simple, sin estado adicional y encaja bien con la cadencia del planificador de 5 minutos.
+- **Rollback como operación en segundo plano.** `helm_release.py:rollback_release` acepta una revisión objetivo, la valida, rota el token de operación y encola `helm_tasks.rollback_release`. En éxito el worker escribe de vuelta la versión del chart revertida y los valores en vivo en la especificación deseada de la fila — para que el estado deseado de la fila coincida con lo que está ejecutándose realmente, y el siguiente tick de reconciliación no señale deriva.
+- **Desinstalación con reconocimiento de dependencias y ruta forzada.** La `uninstall_release` normal se bloquea mientras algún `Frappe Site` vinculado esté en `Active` / `In Progress` / `Deleting` / `Migrating`, o en `Failed` con un puntero a Job (el bench puede aún tener estado dentro de la release). La ruta forzada requiere una confirmación escrita `UNINSTALL <nombre_release>` en la UI y registra la anulación en `helm_status_detail`. Los errores `release: not found` de Helm se tratan como éxito (idempotencia).
+- **Eliminación directa bloqueada fuera de `Draft`.** `on_trash` rechaza cualquier fila que no sea `Draft`; la desinstalación es la única ruta de limpieza. Misma justificación que la ampliación de `on_trash` del ciclo de vida del site: una fila `Failed` puede aún tener recursos del clúster y eliminarla silenciosamente de MariaDB los huerfana.
+- **Señal de deriva del hash de especificación.** `calculate_release_spec_hash` produce un hash estable sobre chart, versión del chart, namespace y valores; `validate()` recalcula `desired_spec_hash` en cada guardado y señala `pending_changes` cuando diverge de `last_applied_spec_hash`. El hash aplicado solo se actualiza en un despliegue o rollback exitoso, para que los operadores vean la intención no guardada antes de la siguiente operación.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Block cancel for `Migrating` entirely.** Too harsh for genuinely hung migrations; the operator would
-  have to wait for `activeDeadlineSeconds`.
-- **SIGTERM with a long grace period.** `bench migrate` has no safe DDL-boundary signal handler, so this
-  only delays the same risk.
-- **Shorter orphan-sweep grace.** A shorter grace would work, but five minutes matches the scheduler cadence:
-  a Job younger than one full reconciliation tick is never swept.
-- **Object-oriented operation classes.** Heavier than the codebase's plain-function style; dataclass config
-  plus callables keeps the operation-specific code explicit and local.
-- **Add a `Cancelling` lifecycle state.** Mostly cosmetic and would require new reconciliation branches for
-  a state that usually lasts seconds.
+- **Confiar solo en `helm status` para la salud.** Barato, pero una release `deployed` con pods en crash-loop o PVCs sin enlazar reportaría verde. El punto de un plano de control es observar el estado real, por lo que el recorrido del manifiesto no es negociable.
+- **Mantener un heartbeat del worker en lugar de una ventana de obsolescencia fija.** Más piezas móviles (tabla de heartbeat, barrido de expiración) para un problema que una comparación de marca de tiempo de 30 minutos ya resuelve. La recomprobación del token existente ya maneja la carrera "gana la operación más nueva"; la obsolescencia solo es para workers genuinamente atascados.
+- **Recorrer tipos de recursos arbitrarios mediante descubrimiento de CRD.** Fuera del alcance; la salud por CRD no tiene semántica general. Restringir a los ocho tipos integrados mantiene el walker predecible y coincide con lo que la documentación ya promete.
+- **Permitir la desinstalación independientemente de los sites vinculados.** Arriesga huerfanar la base de datos/archivos de un bench dentro del PVC de la release. Bloquear por defecto + puerta de fuerza escrita da al operador una ruta deliberada sin hacer fácil la ruta insegura.
+- **Persistir filas de preparación por recurso.** Viola la regla "el estado observado nunca se persiste" en `AGENTS.md`. El desglose del formulario vuelve a consultar bajo demanda mediante `frappe.xcall`.
+- **Desinstalación automática al eliminar la fila.** La mutación destructiva implícita del clúster desencadenada por una eliminación de MariaDB es exactamente lo que la separación estado deseado-vs-estado observado pretende evitar; la desinstalación sigue siendo una acción explícita del operador.
 
-### Implementation details
+### Implementación
 
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `cancel_site` now accepts
-  `confirm_destructive`, gates `Migrating`, and records destructive acknowledgement in `status_detail`.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.js`: cancelling `Migrating` opens a custom dialog whose
-  primary action is disabled until the operator types `CANCEL`; it submits `confirm_destructive: 1`.
-- `kubeport/tasks/site_tasks.py`: added `SiteOpConfig`, `_run_site_op`, and
-  `_attach_creds_secret_owner_ref`; public create/delete/migrate tasks delegate to the orchestrator.
-- `kubeport/tasks/reconciliation.py`: added `_ORPHAN_SWEEP_GRACE_SECONDS = 300` and skips recent orphan
-  candidates by Kubernetes `creation_timestamp`.
-- Tests: added controller confirmation tests, orchestrator tests, orphan-sweep age tests, and direct
-  behavioural tests for delete/migrate reconciliation.
+- `kubeport/kubeport/doctype/helm_release/helm_release.py`: añadidos `deploy_release`, `uninstall_release` (con `force: bool = False` y detección de site bloqueante), `rollback_release`, `get_release_health`, `load_defaults`, `get_release_history`; `validate()` calcula `desired_spec_hash` y `pending_changes`; `on_trash` bloquea filas que no son `Draft`; `build_release_docname` limita la identidad a clúster/namespace/release; la validación de almacenamiento rechaza combinaciones de `local-path` + `ReadWriteMany`.
+- `kubeport/kubeport/doctype/helm_release/helm_release.js`: indicadores de estado, listener en tiempo real `helm_release_status_update`, máquina de estados de botones (Install / Upgrade / Retry / Redeploy), diálogo de confirmación escrita de fuerza-desinstalar, diálogo de historial/rollback con selector de revisión, desglose de salud post-despliegue, autocompletado de namespace y versión de chart.
+- `kubeport/tasks/helm_tasks.py`: `install_or_upgrade_release`, `rollback_release`, `uninstall_release` todos enrutados a través de `_release_operation_matches` con recomprobaciones de token+estado antes de cada escritura; `_safe_walk` aísla los errores del walker; `_finalize_uninstall_success` restablece la fila a `Draft`; `_is_release_not_found_error` clasifica la desinstalación idempotente.
+- `kubeport/tasks/reconciliation.py`: `_reconcile_helm_releases` (curación de Deployed/Degraded), `_reconcile_stale_helm_operations` + `_reconcile_stale_uninstall` (ventana de obsolescencia de 30 min), `_set_helm_reconciliation_state` (escritura guardada por token), comprobación de ventana de `_helm_operation_is_stale`.
+- `kubeport/utils/release_health.py`: `walk`, `summarize`, `classify_release_state`, `classify_release_from_cluster`, más preparación por tipo para los ocho tipos integrados y `_attach_warning_events` para la anotación de los últimos N eventos.
+- `kubeport/utils/helm.py`: `install_or_upgrade`, `rollback`, `uninstall`, `status`, `get_manifest`, `get_values`, `history`, `show_chart`, `show_values` — todos wrappers de subproceso sobre un kubeconfig temporal por llamada.
+- `kubeport/api/discovery.py`: `get_cluster_discovery` anota cada release en vivo con si existe una fila de seguimiento; `adopt_helm_release` crea una fila de estado deseado a partir de una release descubierta con versión de chart + valores como línea base.
+- Tests añadidos: `test_helm_release.py` (validación, inmutabilidad, puerta de despliegue), `test_helm_tasks.py` (obsolescencia de token para install/rollback/uninstall, superación de sincronización de repo, inventario de chart), `test_release_health.py` (los ocho tipos + adjuntar evento de advertencia), `test_reconciliation.py` (curación de Helm + recuperación de op obsoleta + ruta uninstall-not-found), `test_discovery.py` (anotación de release + adopción).
+- Documentación: `README.md`, `docs/codebase-summary.md` y `docs/control-plane-state.md` actualizados en el mismo ciclo para describir rollback/desinstalación/salud/reconciliación como publicado.
 
-### Known follow-ups
+### Seguimientos conocidos
 
-D2 (terminal `Deleted` state for audit trail), D3 (force-drop for `Failed` without a Job), D4 (`Cancelling`
-state), H5 (migrate pre-flight bench probe), and H6 (maintenance-mode wrapping) remain out of scope for this
-cycle.
+El diff/vista previa de Helm, el desglose de logs de pod e historial de eventos en el formulario, la salud HTTP a nivel de aplicación y la salud con reconocimiento de CRD permanecen fuera del alcance (registrados en `docs/control-plane-state.md` Brechas abiertas).
 
 ---
 
-## 2026-04-26 — Frappe Site: post-creation lifecycle (delete + migrate)
+## 2026-04-27 — Ciclo de vida de Frappe Site: refuerzo previo a la fusión
 
-### Context
+### Contexto
 
-Once a `Frappe Site` row reached `Active`, the control plane had no way to act on the bench-side site. `on_trash` only cleaned up *in-flight* creation Jobs (it early-returned unless `status == "In Progress"`), so deleting an `Active` row silently orphaned the real site (database + files) on the bench PVC. The only remediation was to `kubectl exec` into a bench pod and run `bench drop-site` by hand — defeating the point of a control plane that creates resources but cannot destroy or maintain them. Schema migrations were similarly out-of-band.
+La auditoría previa a la fusión de `feat/site-lifecycle` detectó cinco elementos: cancelar una migración en curso es inseguro porque el DDL de MariaDB no es atómico, el barrido de huérfanos podía competir con la ventana de `db_set` de apply del Job del worker, `on_trash` ignoraba las filas `Failed` que aún tenían un puntero a Job, las nuevas ramas de reconciliación de `Deleting`/`Migrating` carecían de tests de comportamiento directos, y las tres funciones de tarea de site duplicaban la mayor parte de su andamiaje de apply.
 
-### Decision
+### Decisión
 
-- **Two new in-flight states**: `Deleting` and `Migrating`. Lifecycle is now `Draft → In Progress → Active | Failed`, plus `Active → Migrating → Active | Failed` and `Active|Failed → Deleting → [doc deleted] | Failed`.
-- **`delete_site()`** whitelisted method: rotates the operation token, sets `status="Deleting"`, enqueues `delete_site_task`. The task submits a Kubernetes Job running `bench drop-site --no-backup --force` using the same reference-pod-clone pattern as `create_site_task`. Reconciliation polls the Job, runs the existing three-state bench probe, and on a confirmed-missing site calls `frappe.delete_doc` to remove the row itself. On still-present, the row lands `Failed` with the Job logs in `status_detail`.
-- **`migrate_site()`** whitelisted method: same pattern, runs `bench --site $SITE_NAME migrate`. No creds Secret needed (bench reads from `site_config.json`). Reconciliation runs the functional probe; non-zero Job exit with a still-functional site recovers to `Active` (false-negative tolerance).
-- **`on_trash` refuses `Active` rows** with a message directing the operator to "Delete Site" first. For in-flight rows it still rotates the token and enqueues the existing `cancel_site_task` to delete the K8s Job.
-- **`cancel_site()` extends to all three in-flight states** with operation-aware status detail messages.
-- **`_build_job_manifest` becomes `_build_op_job_manifest`** — a generic Job-shape builder taking `operation_label`, `container_command`, and `container_env`. Each operation task assembles its own command and env, keeping per-op concerns local while sharing the pod-spec-clone path.
-- **Reconciliation dispatches by status** via `_reconcile_site_create` / `_reconcile_site_delete` / `_reconcile_site_migrate`. `_finalize_site_status` gains an `expected_status` parameter so it guards `Deleting` and `Migrating` writes the same way it guarded `In Progress`. New `_finalize_site_deletion` deletes the row under the same token guard.
+- **Cancelación con confirmación para `Migrating`.** `cancel_site` acepta `confirm_destructive: bool = False`; `Migrating` lo requiere. El detalle de estado registra "cancelación destructiva reconocida". El cliente usa un diálogo escrito `CANCEL`, y `on_trash` rechaza las filas `Migrating` para que los operadores deban usar la ruta guardada.
+- **Período de gracia del barrido de huérfanos.** `_sweep_orphan_site_jobs` omite los Jobs más jóvenes que `_ORPHAN_SWEEP_GRACE_SECONDS` (5 minutos, coincidiendo con el tick de reconciliación), cerrando la carrera de apply-a-BD del worker.
+- **Limpieza de `on_trash` ampliada.** Tras los rechazos de `Active` y `Migrating`, la limpieza se ejecuta siempre que `operation_job_name` esté establecido, independientemente del estado de la fila.
+- **Refactorización del orquestador.** `create_site_task`, `delete_site_task` y `migrate_site_task` son envoltorios finos sobre `_run_site_op(...)`. El comportamiento por operación vive en `SiteOpConfig` más callables simples para comando, env y construcción opcional del Secret de credenciales.
+- **Tests de comportamiento.** Los tests directos ahora cubren las transiciones de rama de reconciliación de `Deleting` y `Migrating`, el comportamiento de gracia del barrido de huérfanos y las rutas de éxito/superación del `_run_site_op` compartido.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Auto-cascade `on_trash` to `delete_site` for Active rows.** Mixes async lifecycle into row deletion: the row would sit there until the Job confirms, and operators clicking "Delete" expect immediate disappearance. The explicit "Delete Site" button is unambiguous and keeps the cluster effect visible.
-- **Transition the row to `Draft` after a successful drop (Helm Release "Uninstalling → Draft" pattern).** A Helm Release row is a reusable template — the deployment is meant to be redeployable. A `Frappe Site` row identifies a specific site; once dropped, the row is operational debris. Auto-deletion matches user intent.
-- **Default `bench drop-site` (with backup).** Leaves an unindexed SQL dump on the bench PVC with no way to expose it (we have no backup-restore feature yet). `--no-backup` keeps the PVC clean. Backup will come as a first-class operation with proper storage handling.
-- **Backup/restore in this PR.** Substantially larger surface — needs a backup storage strategy (PVC vs object store), a child DocType for backup runs, and file-upload plumbing. Deferred to a dedicated cycle.
-- **Rename `creation_job_name`/`creation_job_token` to drop "creation_".** The fields now hold the *current operation*'s Job, not specifically a creation Job. Renaming requires a schema patch and is orthogonal to the lifecycle work; deferred.
+- **Bloquear completamente la cancelación para `Migrating`.** Demasiado severo para migraciones genuinamente colgadas; el operador tendría que esperar a `activeDeadlineSeconds`.
+- **SIGTERM con un período de gracia largo.** `bench migrate` no tiene un manejador de señal de límite DDL seguro, por lo que esto solo retrasa el mismo riesgo.
+- **Período de gracia de barrido de huérfanos más corto.** Un período más corto funcionaría, pero cinco minutos coincide con la cadencia del planificador: un Job más joven que un tick completo de reconciliación nunca se barre.
+- **Clases de operación orientadas a objetos.** Más pesado que el estilo de función simple del código base; la configuración de dataclass más callables mantiene el código específico de operación explícito y local.
+- **Añadir un estado de ciclo de vida `Cancelling`.** Principalmente cosmético y requeriría nuevas ramas de reconciliación para un estado que normalmente dura segundos.
 
-### Implementation details
+### Implementación
 
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`:
-  - `status` options gain `Deleting` and `Migrating`.
-  - New `migrate_site_btn` and `delete_site_btn` (danger color) buttons. `cancel_site_btn` relabelled to a generic "Cancel".
-  - `creation_job_name` / `creation_job_token` descriptions broadened to "Operation Job…" semantics.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`:
-  - `status` `DF.Literal` extended.
-  - New `delete_site()` and `migrate_site()` whitelisted methods, each rotating the operation token and clearing the prior `creation_job_*` pointers before enqueueing.
-  - `cancel_site()` accepts `In Progress | Deleting | Migrating`; status_detail spells out which operation was cancelled.
-  - `on_trash` throws on `Active`; in-flight cleanup branch widened to all three in-flight statuses.
-- `kubeport/kubeport/tasks/site_tasks.py`:
-  - `_build_job_manifest` → `_build_op_job_manifest(..., operation_label, container_command, container_env, ...)`. Per-op command and env are now built by the caller.
-  - New `delete_site_task` and `migrate_site_task` mirroring `create_site_task` (token-guard pre and post-apply, exception cleanup, realtime events).
-  - New helpers: `_bench_drop_site_command`, `_bench_migrate_command`, `_build_drop_env`, `_build_drop_creds_secret_manifest`. Drop-site and migrate never touch admin credentials; migrate touches no credentials at all.
-- `kubeport/kubeport/tasks/reconciliation.py`:
-  - `_reconcile_frappe_sites` filters on `status IN (In Progress, Deleting, Migrating)` and dispatches to per-op handlers.
-  - New `_reconcile_site_delete` / `_reconcile_site_migrate` / `_apply_delete_probe` helpers; existing creation logic moved into `_reconcile_site_create`.
-  - `_finalize_site_status` gains `expected_status` parameter (callers updated; existing behavioural tests updated).
-  - New `_finalize_site_deletion` calls `frappe.delete_doc(..., ignore_permissions=True, force=True, delete_permanently=True)` after publishing a `frappe_site_status_update` event with `status="Deleted"`.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.js`:
-  - Status indicator map covers all six states.
-  - Per-status button visibility (`Migrate Site` only for `Active`; `Delete Site` for `Active` and `Failed`-with-Job; `Cancel` during any in-flight; relabels per operation).
-  - Realtime listener detects `status="Deleted"` and routes to the list view instead of attempting `reload_doc` on a 404.
-- `kubeport/kubeport/api/site.py`: `get_site_job_logs` docstring broadened to current-operation Job.
-- Tests: `_build_job_manifest` tests rewritten to use the new generic builder via a `_create_manifest` helper; new tests for drop-site command, migrate command, drop env (no admin password), drop creds Secret shape, container `name=operation_label`, and operation-token guard for `Deleting`/`Migrating`.
-- Docs: `docs/control-plane-state.md` capabilities + open gaps + robustness table updated; README capability bullet broadened to "Frappe Site Lifecycle".
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `cancel_site` ahora acepta `confirm_destructive`, bloquea `Migrating` y registra el reconocimiento destructivo en `status_detail`.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.js`: cancelar `Migrating` abre un diálogo personalizado cuya acción principal está desactivada hasta que el operador escribe `CANCEL`; envía `confirm_destructive: 1`.
+- `kubeport/tasks/site_tasks.py`: añadidos `SiteOpConfig`, `_run_site_op` y `_attach_creds_secret_owner_ref`; las tareas públicas de create/delete/migrate delegan al orquestador.
+- `kubeport/tasks/reconciliation.py`: añadidos `_ORPHAN_SWEEP_GRACE_SECONDS = 300` y se omiten candidatos de huérfanos recientes por `creation_timestamp` de Kubernetes.
+- Tests: añadidos tests de confirmación del controlador, tests del orquestador, tests de antigüedad del barrido de huérfanos y tests de comportamiento directos para la reconciliación de delete/migrate.
 
-### Known follow-ups
+### Seguimientos conocidos
 
-- Reconciliation behavioural tests for the new `Deleting` and `Migrating` branches (mock-based, similar to existing creation reconciliation tests). Existing creation tests still cover the dispatch+token-guard path; explicit Deleting/Migrating cases would tighten the guarantee.
-- Field rename (`creation_job_*` → `operation_job_*`) once a quiet window for a schema patch presents itself.
-- Backup/restore as the next dedicated cycle.
+D2 (estado terminal `Deleted` para rastro de auditoría), D3 (forzar eliminación para `Failed` sin Job), D4 (estado `Cancelling`), H5 (sonda bench de pre-vuelo para migrate) y H6 (envoltorio de modo mantenimiento) permanecen fuera del alcance para este ciclo.
 
 ---
 
-## 2026-04-23 — Frappe Site: orphan-Job sweep, hang timeout, label-guarded reconciliation, 3-state bench probe
+## 2026-04-26 — Frappe Site: ciclo de vida post-creación (eliminar + migrar)
 
-### Context
+### Contexto
 
-Pre-merge audit of `feat/frappe-site-provisioning` surfaced five robustness gaps that the prior rounds did not close:
+Una vez que una fila de `Frappe Site` alcanzaba `Active`, el plano de control no tenía forma de actuar sobre el site del lado del bench. `on_trash` solo limpiaba los Jobs de creación *en vuelo* (volvía al inicio salvo que `status == "In Progress"`), por lo que eliminar una fila `Active` huerfanaba silenciosamente el site real (base de datos + archivos) en el PVC del bench. El único remedio era hacer `kubectl exec` en un pod de bench y ejecutar `bench drop-site` a mano — derrotando el propósito de un plano de control que crea recursos pero no puede destruirlos ni mantenerlos. Las migraciones de esquema eran similarmente fuera de banda.
 
-1. A worker hard-killed (OOM, node drain, SIGKILL) between `apply_resource(job)` and `db_set("creation_job_name", ...)` leaves a real Job running with no DocType pointer. Reconciliation filters by non-empty `creation_job_name`, so the Job is invisible; the PVC side-effect persists until a human notices.
-2. A Job stuck in `ImagePullBackOff` / unable to reach DB never flips `succeeded` or `failed`, so reconciliation's polling leaves the row `In Progress` forever.
-3. Reconciliation reads the Job purely by name; a stale `creation_job_name` (or the unlikely name collision) would let us finalize the wrong row's status.
-4. A rolling bench restart during the Job-failed or TTL-expired branch causes the exec-based ground-truth probe to raise, which the old code translated to `False` → terminal `Failed` — even though the site might be perfectly fine.
-5. The `db_type` UI option advertised `postgres`, but the bench command always used `--mariadb-root-*` flags and the superuser was hardcoded to `"postgres"` with no way to override. It had never been validated on a real postgres-backed bench.
+### Decisión
 
-### Decision
+- **Dos nuevos estados en vuelo**: `Deleting` y `Migrating`. El ciclo de vida es ahora `Draft → In Progress → Active | Failed`, más `Active → Migrating → Active | Failed` y `Active|Failed → Deleting → [doc eliminado] | Failed`.
+- **Método público `delete_site()`**: rota el token de operación, establece `status="Deleting"`, encola `delete_site_task`. La tarea envía un Job de Kubernetes que ejecuta `bench drop-site --no-backup --force` usando el mismo patrón de clonación del pod de referencia que `create_site_task`. La reconciliación sondea el Job, ejecuta la sonda de bench de tres estados existente, y al confirmar que el site está ausente llama a `frappe.delete_doc` para eliminar la fila. Si el site aún está presente, la fila aterriza en `Failed` con los logs del Job en `status_detail`.
+- **Método público `migrate_site()`**: mismo patrón, ejecuta `bench --site $SITE_NAME migrate`. No se necesita Secret de credenciales (el bench lee desde `site_config.json`). La reconciliación ejecuta la sonda funcional; una salida no cero del Job con un site aún funcional se recupera a `Active` (tolerancia de falso negativo).
+- **`on_trash` rechaza las filas `Active`** con un mensaje que indica al operador que use "Delete Site" primero. Para las filas en vuelo aún rota el token y encola el `cancel_site_task` existente para eliminar el Job de K8s.
+- **`cancel_site()` se extiende a los tres estados en vuelo** con mensajes de detalle de estado conscientes de la operación.
+- **`_build_job_manifest` se convierte en `_build_op_job_manifest`** — un constructor de forma de Job genérico que toma `operation_label`, `container_command` y `container_env`. Cada tarea de operación ensambla su propio comando y env, manteniendo las preocupaciones por operación locales mientras comparte la ruta de clonación de la especificación del pod.
+- **La reconciliación despacha por estado** mediante `_reconcile_site_create` / `_reconcile_site_delete` / `_reconcile_site_migrate`. `_finalize_site_status` gana un parámetro `expected_status` para que guarde las escrituras de `Deleting` y `Migrating` igual que guardó las de `In Progress`. El nuevo `_finalize_site_deletion` elimina la fila bajo la misma salvaguarda de token.
 
-- **Orphan-Job sweep.** A new `_sweep_orphan_site_jobs()` runs at the end of every 5-minute reconciliation tick. For each cluster/namespace pair that has at least one `Frappe Site` row it lists Jobs labeled `app.kubernetes.io/managed-by=kubeport,kubeport.io/frappe-site` and deletes any whose names do not appear in any row's `creation_job_name`. Uses the existing `_best_effort_delete_job` with Background propagation so the creds Secret is GC'd via ownerRef in the same sweep.
-- **`activeDeadlineSeconds` on every site-creation Job.** Defaults to 30 minutes (`_JOB_ACTIVE_DEADLINE_SECONDS`). Enough headroom for realistic `bench new-site --install-app=erpnext` on modest hardware, tight enough that genuine hangs surface before an operator notices.
-- **Label-guarded reconciliation.** Before finalizing status on any Job, `_reconcile_frappe_sites` calls `_job_belongs_to_site` to confirm the Job's `kubeport.io/frappe-site` label matches the doc's `_safe_label_value(docname)`. Mismatch → log and skip. Never touches the row.
-- **Three-state bench probe.** `_site_exists_in_bench` becomes `_probe_site_state` and returns `SITE_PROBE_EXISTS` / `SITE_PROBE_MISSING` / `SITE_PROBE_UNKNOWN`. Transport-level exec failures (pod selection failure, stream errors) surface as `unknown`; the caller defers the status transition to the next tick instead of writing `Failed`. `_exec_bench_site_functional` now re-raises instead of swallowing exec errors so the distinction is possible.
-- **Hide postgres from the UI for now.** `frappe_site.json` removes `postgres` from the `db_type` options. The `_build_env` / `_bench_new_site_command` postgres branches stay in place for forward compatibility but are only reachable by direct DB write until the flow is plumbed correctly and validated on a real postgres bench.
+### Alternativas descartadas
 
-### Rejected alternatives
+- **Cascada automática de `on_trash` a `delete_site` para filas Active.** Mezcla el ciclo de vida asíncrono en la eliminación de filas: la fila permanecería ahí hasta que el Job confirme, y los operadores que hacen clic en "Delete" esperan desaparición inmediata. El botón explícito "Delete Site" es inequívoco y mantiene el efecto en el clúster visible.
+- **Transicionar la fila a `Draft` tras una eliminación exitosa (patrón "Uninstalling → Draft" de Helm Release).** Una fila de Helm Release es una plantilla reutilizable — el despliegue está pensado para volver a desplegarse. Una fila de `Frappe Site` identifica un site específico; una vez eliminado, la fila es restos operacionales. La auto-eliminación coincide con la intención del usuario.
+- **`bench drop-site` por defecto (con backup).** Deja un volcado SQL no indexado en el PVC del bench sin forma de exponerlo (aún no tenemos la funcionalidad de backup-restauración). `--no-backup` mantiene el PVC limpio. El backup vendrá como una operación de primera clase con manejo adecuado del almacenamiento.
+- **Backup/restauración en este PR.** Superficie sustancialmente mayor — necesita una estrategia de almacenamiento de backup (PVC vs. almacenamiento de objetos), un DocType hijo para las ejecuciones de backup y la plomería de carga de archivos. Aplazado a un ciclo dedicado.
+- **Renombrar `creation_job_name`/`creation_job_token` eliminando "creation_".** Los campos ahora contienen el Job de la *operación actual*, no específicamente un Job de creación. Renombrar requiere un parche de esquema y es ortogonal al trabajo del ciclo de vida; aplazado.
 
-- **Reserve `creation_job_name` before applying the Job.** Rejected again for the same reason as in the 2026-04-22 entry: phantom names on rows for Jobs that do not yet exist. The label-based sweep reaches the same orphan Jobs without the inconsistency window.
-- **Shorter TTL (`ttlSecondsAfterFinished`) instead of `activeDeadlineSeconds`.** TTL only fires once the Job completes. It does not help a Job that is still hung — the very case we need to bound.
-- **Plumb postgres correctly in this PR.** Requires a postgres-backed bench in CI or at least a known-good smoke run. Neither is available this cycle; shipping a visible but broken option is worse than shipping a narrower feature.
+### Implementación
 
-### Implementation details
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`: opciones de `status` ganan `Deleting` y `Migrating`. Nuevos botones `migrate_site_btn` y `delete_site_btn` (color danger). `cancel_site_btn` reetiquetado como "Cancel" genérico. Descripciones de `creation_job_name` / `creation_job_token` ampliadas a semántica "Operation Job…".
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `DF.Literal` de `status` extendido. Nuevos métodos públicos `delete_site()` y `migrate_site()`, cada uno rotando el token de operación y limpiando los punteros `creation_job_*` previos antes de encolar. `cancel_site()` acepta `In Progress | Deleting | Migrating`; `status_detail` especifica qué operación fue cancelada. `on_trash` lanza en `Active`; la rama de limpieza en vuelo ampliada a los tres estados en vuelo.
+- `kubeport/kubeport/tasks/site_tasks.py`: `_build_job_manifest` → `_build_op_job_manifest(..., operation_label, container_command, container_env, ...)`. El comando y env por operación ahora los construye el llamador. Nuevas `delete_site_task` y `migrate_site_task` reflejando `create_site_task` (salvaguarda de token antes y después del apply, limpieza en excepción, eventos en tiempo real). Nuevos helpers: `_bench_drop_site_command`, `_bench_migrate_command`, `_build_drop_env`, `_build_drop_creds_secret_manifest`. Drop-site y migrate nunca tocan credenciales de administrador; migrate no toca credenciales en absoluto.
+- `kubeport/kubeport/tasks/reconciliation.py`: `_reconcile_frappe_sites` filtra por `status IN (In Progress, Deleting, Migrating)` y despacha a manejadores por operación. Nuevos helpers `_reconcile_site_delete` / `_reconcile_site_migrate` / `_apply_delete_probe`; la lógica de creación existente movida a `_reconcile_site_create`. `_finalize_site_status` gana el parámetro `expected_status` (puntos de llamada actualizados; tests de comportamiento existentes actualizados). El nuevo `_finalize_site_deletion` llama a `frappe.delete_doc(..., ignore_permissions=True, force=True, delete_permanently=True)` tras publicar un evento `frappe_site_status_update` con `status="Deleted"`.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.js`: el mapa de indicadores de estado cubre los seis estados. Visibilidad de botones por estado (`Migrate Site` solo para `Active`; `Delete Site` para `Active` y `Failed`-con-Job; `Cancel` durante cualquier estado en vuelo; reetiqueta por operación). El listener en tiempo real detecta `status="Deleted"` y enruta a la vista de lista en lugar de intentar `reload_doc` en un 404.
+- `kubeport/kubeport/api/site.py`: docstring de `get_site_job_logs` ampliado al Job de operación actual.
+- Tests: tests de `_build_job_manifest` reescritos para usar el constructor genérico nuevo mediante un helper `_create_manifest`; nuevos tests para el comando drop-site, el comando migrate, el env drop (sin contraseña de administrador), la forma del Secret de credenciales drop, el `name=operation_label` del contenedor y la salvaguarda del token de operación para `Deleting`/`Migrating`.
+- Documentación: capacidades de `docs/control-plane-state.md` + brechas abiertas + tabla de robustez actualizadas; bullet de capacidad de README ampliado a "Ciclo de vida de Frappe Site".
 
-- `kubeport/tasks/site_tasks.py`:
-  - New module-level constants `_JOB_ACTIVE_DEADLINE_SECONDS`, `SITE_DOC_LABEL`, `MANAGED_BY_LABEL`, `MANAGED_BY_VALUE`.
-  - `_build_job_manifest` adds `spec.activeDeadlineSeconds = _JOB_ACTIVE_DEADLINE_SECONDS` and uses the label constants. `_build_creds_secret_manifest` also uses the label constants so the sweep's selector is guaranteed consistent with what the worker writes.
-- `kubeport/tasks/reconciliation.py`:
-  - New `SITE_PROBE_EXISTS` / `SITE_PROBE_MISSING` / `SITE_PROBE_UNKNOWN` constants.
-  - `_site_exists_in_bench` → `_probe_site_state` (3-state return). Exec transport failures return `unknown`.
-  - `_exec_bench_site_functional` now raises instead of swallowing exceptions.
-  - New `_job_belongs_to_site(job, site)` called in `_reconcile_frappe_sites` before any status write.
-  - New `_sweep_orphan_site_jobs()` wired into `reconcile_all_releases`.
-  - Both the Job-failed branch and the 404-TTL branch call `_probe_site_state`; `SITE_PROBE_UNKNOWN` defers to the next tick instead of finalizing.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`:
-  - `db_type` options narrowed from `mariadb\npostgres` to `mariadb`.
-- `kubeport/tests/test_site_tasks.py`:
-  - New `test_manifest_sets_active_deadline_seconds`.
-- `kubeport/tests/test_reconciliation.py`:
-  - Existing Job-failed tests switched from `_site_exists_in_bench` to `_probe_site_state` with `"exists"` / `"missing"` return values, and all `_reconcile_frappe_sites` tests now patch `_job_belongs_to_site` to bypass label inspection for `SimpleNamespace` fakes.
-  - New `test_reconcile_frappe_sites_skips_job_with_wrong_site_label`.
-  - New `test_reconcile_skips_finalize_on_transient_probe_failure`.
-  - New `UnitTestJobBelongsToSite` (4 cases).
-  - New `UnitTestSweepOrphanSiteJobs` (tracked-name preserved, orphan deleted, empty-creation-job-name still swept).
-  - `test_reconcile_all_releases_only_runs_active_sweeps` extended with `_sweep_orphan_site_jobs` assertion.
-- `docs/frappe-site-smoke.md`: new real-cluster smoke procedure (8 scenarios) — worker-crash recovery (sweep), hung-pod (activeDeadlineSeconds), transient bench restart, etc.
-- `docs/control-plane-state.md`: updated capabilities, robustness table, and "Site Lifecycle" gap for postgres.
+### Seguimientos conocidos
+
+- Tests de comportamiento de reconciliación para las nuevas ramas de `Deleting` y `Migrating` (basados en mock, similares a los tests de reconciliación de creación existentes). Los tests de creación existentes aún cubren la ruta de despacho+salvaguarda-de-token; los casos explícitos de Deleting/Migrating reforzarían la garantía.
+- Renombrado de campos (`creation_job_*` → `operation_job_*`) una vez que se presente una ventana tranquila para un parche de esquema.
+- Backup/restauración como el siguiente ciclo dedicado.
 
 ---
 
-## 2026-04-22 — Frappe Site: fix Recreate (Force) path and orphan Job on mid-flight delete
+## 2026-04-23 — Frappe Site: barrido de Jobs huérfanos, timeout de cuelgue, reconciliación guardada por etiqueta, sonda de bench de tres estados
 
-### Context
+### Contexto
 
-Pre-merge review of `feat/frappe-site-provisioning` surfaced two defects that survived the earlier rounds:
+La auditoría previa a la fusión de `feat/frappe-site-provisioning` detectó cinco brechas de robustez que las rondas anteriores no cerraron:
 
-1. **`Recreate Site (Force)` was dead code.** The UI relabels the primary button and allows the click when `force_create=1` and `status="Active"`, but the server `create_site()` threw on `status="Active"` unconditionally, so the button always errored. The `--force` flag in `_bench_new_site_command` was reachable only from the Failed → retry path, not from Active → recreate, which is the advertised use case.
-2. **Orphan Job on mid-flight delete / force-recreate.** `create_site_task` re-checks the operation token after applying the Job (to handle the user cancelling or re-triggering while we were in flight) and returns on mismatch. Nothing tore down the Job it had just applied. `creation_job_name` stays empty on the row, so `on_trash` and reconciliation can't see the Job either. It ran to completion untracked, creating a site on the bench PVC with no MariaDB row. The Job's own TTL reaped the K8s resources but not the PVC data.
+1. Un worker eliminado de forma brusca (OOM, drenaje de nodo, SIGKILL) entre `apply_resource(job)` y `db_set("creation_job_name", ...)` deja un Job real ejecutándose sin puntero del DocType. La reconciliación filtra por `creation_job_name` no vacío, por lo que el Job es invisible; el efecto secundario del PVC persiste hasta que alguien lo note.
+2. Un Job atascado en `ImagePullBackOff` / incapaz de alcanzar la BD nunca pasa a `succeeded` o `failed`, por lo que el sondeo de la reconciliación deja la fila en `In Progress` indefinidamente.
+3. La reconciliación lee el Job puro por nombre; un `creation_job_name` obsoleto (o la improbable colisión de nombres) permitiría finalizar el estado de la fila incorrecta.
+4. Un reinicio rodante del bench durante la rama de Job-fallido o TTL-expirado hace que la sonda basada en exec eleve una excepción, que el código anterior traducía a `False` → `Failed` terminal — aunque el site podría estar perfectamente bien.
+5. La opción de UI `db_type` anunciaba `postgres`, pero el comando del bench siempre usaba los flags `--mariadb-root-*` y el superusuario estaba codificado como `"postgres"` sin forma de anularlo. Nunca se había validado en un bench real respaldado por postgres.
 
-### Decision
+### Decisión
 
-- **Controller gate respects `force_create`.** `create_site()` now throws on Active only when `force_create` is unchecked. The Python guard matches the JS button's contract.
-- **Worker self-cleans on supersession.** When the post-apply token check fails, `create_site_task` calls `_best_effort_delete_job` and `_best_effort_delete_secret` on the Job and Secret it just created before returning. The same cleanup runs in the exception handler when `job_applied` is true, so a failure partway through the ownerRef step does not leak a Job. `_best_effort_delete_job` uses `propagation_policy="Background"` so K8s GC also reaps the Secret via the ownerRef (when it was attached) and the Job's pods.
+- **Barrido de Jobs huérfanos.** Un nuevo `_sweep_orphan_site_jobs()` se ejecuta al final de cada tick de reconciliación de 5 minutos. Para cada par clúster/namespace que tenga al menos una fila de `Frappe Site` lista Jobs etiquetados `app.kubernetes.io/managed-by=kubeport,kubeport.io/frappe-site` y elimina cualquiera cuyos nombres no aparezcan en el `creation_job_name` de ninguna fila. Usa el `_best_effort_delete_job` existente con propagación Background para que el Secret de credenciales se recoja mediante ownerRef en el mismo barrido.
+- **`activeDeadlineSeconds` en cada Job de creación de site.** Por defecto 30 minutos (`_JOB_ACTIVE_DEADLINE_SECONDS`). Suficiente margen para un `bench new-site --install-app=erpnext` realista en hardware modesto, lo bastante ajustado para que los cuelgues genuinos salgan a la luz antes de que el operador lo note.
+- **Reconciliación guardada por etiqueta.** Antes de finalizar el estado en cualquier Job, `_reconcile_frappe_sites` llama a `_job_belongs_to_site` para confirmar que la etiqueta `kubeport.io/frappe-site` del Job coincide con el `_safe_label_value(docname)` del documento. No coincidencia → registrar y omitir. Nunca toca la fila.
+- **Sonda de bench de tres estados.** `_site_exists_in_bench` se convierte en `_probe_site_state` y devuelve `SITE_PROBE_EXISTS` / `SITE_PROBE_MISSING` / `SITE_PROBE_UNKNOWN`. Los fallos de transporte a nivel exec (fallo de selección de pod, errores de stream) aparecen como `unknown`; el llamador difiere la transición de estado al siguiente tick en lugar de escribir `Failed`. `_exec_bench_site_functional` ahora vuelve a lanzar en lugar de absorber los errores exec para que la distinción sea posible.
+- **Ocultar postgres de la UI por ahora.** `frappe_site.json` elimina `postgres` de las opciones de `db_type`. Las ramas de postgres en `_build_env` / `_bench_new_site_command` permanecen para compatibilidad hacia adelante pero solo son alcanzables mediante escritura directa en BD hasta que el flujo esté correctamente conectado y validado en un bench postgres real.
 
-### Rejected alternatives
+### Alternativas descartadas
 
-- **Reserve `creation_job_name` before applying the Job.** Would make the Job visible to `on_trash` earlier, but introduces a new inconsistency window (a name recorded for a Job that does not yet exist) and forces reconciliation to tolerate phantom names. Deleting from the worker itself, using state it already has in scope, is simpler.
-- **Have `on_trash` list and delete Jobs by label selector when `creation_job_name` is empty.** Works, but the discovery call pays a round-trip on every trash of an In Progress doc just to cover a short-window race. Worker-side cleanup is cheaper and catches the same race.
+- **Reservar `creation_job_name` antes de aplicar el Job.** Rechazado de nuevo por la misma razón que en la entrada de 2026-04-22: nombres fantasma en filas para Jobs que aún no existen. El barrido basado en etiquetas alcanza los mismos Jobs huérfanos sin la ventana de inconsistencia.
+- **TTL más corto (`ttlSecondsAfterFinished`) en lugar de `activeDeadlineSeconds`.** El TTL solo se activa una vez que el Job se completa. No ayuda para un Job que aún está colgado — precisamente el caso que necesitamos acotar.
+- **Conectar postgres correctamente en este PR.** Requiere un bench respaldado por postgres en CI o al menos una ejecución de verificación conocida como buena. Ninguna está disponible en este ciclo; publicar una opción visible pero rota es peor que publicar una funcionalidad más estrecha.
 
-### Implementation details
+### Implementación
 
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: `create_site` gate changed to `if self.status == "Active" and not self.force_create`.
-- `kubeport/tasks/site_tasks.py`:
-  - New `_best_effort_delete_job` mirroring `_best_effort_delete_secret` (404-tolerant, warn-and-continue on everything else, Background propagation).
-  - `create_site_task` tracks `job_applied: bool` and `job_name_for_cleanup`; the post-apply token re-check and the exception branch both delete the orphan Job before returning.
-- `kubeport/tests/test_site_tasks.py`:
-  - New `UnitTestBestEffortDeleteJob` for the helper.
-  - New `test_create_site_task_deletes_orphan_job_when_token_superseded_after_apply` driving `_site_operation_matches` to return `[True, False]`.
-  - New `test_manifest_passes_force_flag_through_to_bench_command` as a regression guard for the Recreate path.
-
----
-
-## 2026-04-22 — Frappe Site credentials move to per-Job Secret; orphan-Job cleanup on trash
-
-### Context
-
-The initial Frappe Site provisioning landed with two security/lifecycle gaps surfaced during pre-merge review:
-
-1. `ADMIN_PASSWORD` was injected as a plaintext env `value` in the Job pod spec, visible to anyone with pod-read RBAC and persisted in etcd until the Job's TTL. `DB_ROOT_PASSWORD` had a Kubernetes Secret path but kept a plaintext fallback for the user-provides-password case.
-2. Deleting a `Frappe Site` document while a creation Job was in flight orphaned the Job: reconciliation filters rows by `status="In Progress"`, so the deleted row was invisible and the Job ran to completion creating an untracked site.
-3. When the Job's `ttlSecondsAfterFinished` elapsed before reconciliation read its final status, the site was left in "In Progress" forever.
-
-### Decision
-
-- **Route every credential through a per-Job Secret.** `create_site_task` creates `{job_name}-creds` (labelled `app.kubernetes.io/managed-by=kubeport`, `kubeport.io/frappe-site=<docname>`) before submitting the Job. The Job consumes `ADMIN_PASSWORD` (always) and `DB_ROOT_PASSWORD` (when no user-supplied Secret) via `secretKeyRef`. After the Job exists we patch the Secret with `ownerReferences` → Job + `blockOwnerDeletion: true`, so K8s GC takes the Secret down with the Job's TTL cleanup. On exception before or during Job apply, we best-effort `delete_namespaced_secret` to avoid orphaning admin creds.
-- **Add `on_trash` to `FrappeSite`.** When the doc is deleted while a Job is in flight it rotates `operation_token` (invalidates the worker) and enqueues `cancel_site_task`, which deletes the Job with `propagation_policy="Background"`; ownerRef GC then reaps the creds Secret as a side effect. `cancel_site_task` also calls `_best_effort_delete_secret` as a backstop for the narrow window where the ownerRef patch never attached.
-- **Recover zombie "In Progress" on 404.** Reconciliation's `read_namespaced_job` 404 branch now calls `_site_exists_in_bench` — the same two-stage bench probe already used on Job-failed — and transitions the site to Active or Failed instead of logging and leaving it stuck.
-- **Validate `site_name`.** Reject anything outside a hostname-style label (lowercase alphanumerics, `.`, `-`, `_`, starting/ending alphanumeric) so the `{bench_release}/{site_name}` autoname, the K8s Job slug, and the bench env stay well-formed. Shell safety was already intact — `"$SITE_NAME"` in `_bench_new_site_command` does not expand command substitutions in the variable's value — but the naming correctness gap needed closing.
-
-### Rejected alternatives
-
-- **Mount passwords via `envFrom: secretRef`**: works, but loses the ability to cleanly mix our creds Secret with the bench reference pod's existing `envFrom` entries without risking accidental env-var leaks. Per-key `secretKeyRef` is more precise.
-- **Put `ownerReferences` on the Secret up front**: rejected because the Job's UID isn't known until after `apply_resource(Job)`. The two-step apply (create Secret, create Job, re-apply Secret with UID) is the canonical pattern.
-- **Delete the creds Secret from `cancel_site_task` only**: rejected because the rare "Secret applied, Job apply failed" path would leak credentials outside the normal cancel flow. Best-effort cleanup in the exception branch of `create_site_task` closes that window.
-
-### Implementation details
-
-- `kubeport/tasks/site_tasks.py`:
-  - New `_build_creds_secret_manifest(secret_name, namespace, site_docname, admin_password, db_root_password)`.
-  - `_build_env` rewritten: no more plaintext password parameters; takes `creds_secret_name` and `db_root_in_creds` and emits `secretKeyRef` for both ADMIN_PASSWORD and DB_ROOT_PASSWORD.
-  - `_build_job_manifest` passes these through.
-  - `create_site_task`: Secret apply → Job apply → read Job → re-apply Secret with `ownerReferences`. Any pre-Job exception triggers `_best_effort_delete_secret`.
-  - `cancel_site_task`: unchanged Job-delete path, plus a trailing `_best_effort_delete_secret` backstop.
-  - New `_best_effort_delete_secret` helper shared by both paths.
-- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`:
-  - New `_SITE_NAME_RE` and `_validate_site_name()` called from `validate()`.
-  - New `on_trash(self)` that rotates the operation token and enqueues `cancel_site_task` when status is "In Progress" and a `creation_job_name` is set.
-- `kubeport/tasks/reconciliation.py`:
-  - 404 branch on `read_namespaced_job` now calls `_site_exists_in_bench` and finalizes to Active or Failed.
-- `kubeport/tests/test_site_tasks.py`:
-  - Expanded `_build_env` tests for the three new cases (ADMIN_PASSWORD secretKeyRef, user DB secret, creds-Secret fallback).
-  - New `_build_creds_secret_manifest` tests.
-  - New `UnitTestCreateSiteTask` (stale-token exit, happy-path Secret→Job→Secret apply with no plaintext passwords, exception rollback with orphan-Secret cleanup).
-  - New `UnitTestCancelSiteTask` (404 tolerance, non-404 logging, Secret cleanup in both).
+- `kubeport/tasks/site_tasks.py`: nuevas constantes de nivel de módulo `_JOB_ACTIVE_DEADLINE_SECONDS`, `SITE_DOC_LABEL`, `MANAGED_BY_LABEL`, `MANAGED_BY_VALUE`. `_build_job_manifest` añade `spec.activeDeadlineSeconds = _JOB_ACTIVE_DEADLINE_SECONDS` y usa las constantes de etiqueta. `_build_creds_secret_manifest` también usa las constantes de etiqueta para que el selector del barrido esté garantizado como consistente con lo que escribe el worker.
+- `kubeport/tasks/reconciliation.py`: nuevas constantes `SITE_PROBE_EXISTS` / `SITE_PROBE_MISSING` / `SITE_PROBE_UNKNOWN`. `_site_exists_in_bench` → `_probe_site_state` (retorno de 3 estados). Los fallos de transporte exec devuelven `unknown`. `_exec_bench_site_functional` ahora lanza en lugar de absorber excepciones. Nuevo `_job_belongs_to_site(job, site)` llamado en `_reconcile_frappe_sites` antes de cualquier escritura de estado. Nuevo `_sweep_orphan_site_jobs()` conectado a `reconcile_all_releases`. Tanto la rama de Job-fallido como la rama de 404-TTL llaman a `_probe_site_state`; `SITE_PROBE_UNKNOWN` difiere al siguiente tick en lugar de finalizar.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.json`: opciones de `db_type` reducidas de `mariadb\npostgres` a `mariadb`.
+- `kubeport/tests/test_site_tasks.py`: nuevo `test_manifest_sets_active_deadline_seconds`.
+- `kubeport/tests/test_reconciliation.py`: los tests de Job-fallido existentes cambiados de `_site_exists_in_bench` a `_probe_site_state` con valores de retorno `"exists"` / `"missing"`, y todos los tests de `_reconcile_frappe_sites` ahora parchean `_job_belongs_to_site` para evitar la inspección de etiquetas en los fakes `SimpleNamespace`. Nuevo `test_reconcile_frappe_sites_skips_job_with_wrong_site_label`. Nuevo `test_reconcile_skips_finalize_on_transient_probe_failure`. Nuevo `UnitTestJobBelongsToSite` (4 casos). Nuevo `UnitTestSweepOrphanSiteJobs` (nombre rastreado preservado, huérfano eliminado, nombre de job de creación vacío aún barrido). `test_reconcile_all_releases_only_runs_active_sweeps` extendido con aserción de `_sweep_orphan_site_jobs`.
+- `docs/frappe-site-smoke.md`: nuevo procedimiento de verificación en clúster real (8 escenarios) — recuperación de caída del worker (barrido), pod colgado (activeDeadlineSeconds), reinicio transitorio del bench, etc.
+- `docs/control-plane-state.md`: capacidades actualizadas, tabla de robustez y brecha "Site Lifecycle" para postgres.
 
 ---
 
-## 2026-04-17 — Frappe Site creation via Kubernetes Jobs
+## 2026-04-22 — Frappe Site: corregir la ruta Recreate (Force) y Job huérfano en eliminación a mitad de vuelo
 
-### Context
+### Contexto
 
-Kubeport already discovers ERPNext benches (Helm releases of `chart_name == "erpnext"`) and the sites
-living on each bench (via exec into running pods). The next capability is creating new sites on those benches.
+La revisión previa a la fusión de `feat/frappe-site-provisioning` detectó dos defectos que sobrevivieron a las rondas anteriores:
 
-The ERPNext Helm chart (`frappe/helm`) provides `jobs.createSite` — a standard Kubernetes Job template
-(confirmed: no Helm hook annotations) that runs `bench new-site` with templated env vars. The official
-mechanism for triggering this job is a `helm upgrade` with `jobs.createSite.enabled: true`.
+1. **`Recreate Site (Force)` era código muerto.** La UI reetiqueta el botón principal y permite el clic cuando `force_create=1` y `status="Active"`, pero el servidor `create_site()` lanzaba en `status="Active"` incondicionalmente, por lo que el botón siempre daba error. El flag `--force` en `_bench_new_site_command` solo era alcanzable desde la ruta Failed → reintentar, no desde Active → recrear, que es el caso de uso anunciado.
+2. **Job huérfano en eliminación a mitad de vuelo / recreación forzada.** `create_site_task` vuelve a comprobar el token de operación después de aplicar el Job (para manejar el caso de que el usuario cancele o vuelva a disparar mientras estábamos en vuelo) y vuelve al inicio si no coincide. Nada desmontó el Job que acababa de aplicar. `creation_job_name` permanece vacío en la fila, por lo que `on_trash` y la reconciliación no pueden ver el Job. Corrió hasta completarse sin seguimiento, creando un site en el PVC del bench sin fila en MariaDB. El propio TTL del Job recogió los recursos de K8s pero no los datos del PVC.
 
-**That approach was rejected** for this implementation (see Architecture Decision below).
-Instead, we submit a Kubernetes Job directly from a new `Frappe Site` DocType — the same way
-`Service Bundle` submits raw manifests.
+### Decisión
 
-### Architecture decision: Direct Job submission (not Helm upgrade)
+- **La puerta del controlador respeta `force_create`.** `create_site()` ahora lanza en Active solo cuando `force_create` no está marcado. La salvaguarda de Python coincide con el contrato del botón JS.
+- **El worker se limpia a sí mismo al ser superado.** Cuando la comprobación de token post-apply falla, `create_site_task` llama a `_best_effort_delete_job` y `_best_effort_delete_secret` en el Job y el Secret que acaba de crear antes de volver. La misma limpieza se ejecuta en el manejador de excepciones cuando `job_applied` es verdadero, para que un fallo a mitad del paso de ownerRef no filtre un Job. `_best_effort_delete_job` usa `propagation_policy="Background"` para que el GC de K8s también recoja el Secret mediante ownerRef (cuando estaba adjunto) y los pods del Job.
 
-Evidence from `frappe/helm` research:
+### Alternativas descartadas
 
-- `job-create-site.yaml` is a *standard* batch/v1 Job, not a Helm hook.
-- It is conditionally rendered only when `jobs.createSite.enabled: true`.
-- After the Job runs, `enabled` must be toggled back to `false` or it re-fires on the next
-  `helm upgrade` — creating a Job name collision (or a duplicate site creation attempt).
-- `adminPassword` and `dbRootPassword` would be embedded as plain text in the Helm Release
-  `values` field (MariaDB-backed, not encrypted for this use case).
+- **Reservar `creation_job_name` antes de aplicar el Job.** Haría el Job visible para `on_trash` antes, pero introduce una nueva ventana de inconsistencia (un nombre registrado para un Job que aún no existe) y obliga a la reconciliación a tolerar nombres fantasma. Eliminar desde el propio worker, usando el estado que ya tiene en alcance, es más simple.
+- **Hacer que `on_trash` liste y elimine Jobs por selector de etiqueta cuando `creation_job_name` está vacío.** Funciona, pero la llamada de descubrimiento paga un round-trip en cada papelera de un documento In Progress solo para cubrir una carrera de ventana corta. La limpieza del lado del worker es más barata y captura la misma carrera.
 
-**Consequences of the Helm upgrade path:**
+### Implementación
 
-| Problem | Impact |
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: la puerta de `create_site` cambiada a `if self.status == "Active" and not self.force_create`.
+- `kubeport/tasks/site_tasks.py`: nuevo `_best_effort_delete_job` reflejando `_best_effort_delete_secret` (tolerante a 404, advertir-y-continuar en todo lo demás, propagación Background). `create_site_task` rastrea `job_applied: bool` y `job_name_for_cleanup`; la recomprobación de token post-apply y la rama de excepción ambas eliminan el Job huérfano antes de volver.
+- `kubeport/tests/test_site_tasks.py`: nuevo `UnitTestBestEffortDeleteJob` para el helper. Nuevo `test_create_site_task_deletes_orphan_job_when_token_superseded_after_apply` llevando `_site_operation_matches` a devolver `[True, False]`. Nuevo `test_manifest_passes_force_flag_through_to_bench_command` como salvaguarda de regresión para la ruta Recreate.
+
+---
+
+## 2026-04-22 — Credenciales de Frappe Site movidas a Secret por Job; limpieza de Job huérfano al mover a papelera
+
+### Contexto
+
+El aprovisionamiento inicial de Frappe Site aterrizó con dos brechas de seguridad/ciclo de vida detectadas durante la revisión previa a la fusión:
+
+1. `ADMIN_PASSWORD` se inyectaba como `value` env en texto plano en la especificación del pod del Job, visible para cualquiera con RBAC de lectura de pods y persistido en etcd hasta el TTL del Job. `DB_ROOT_PASSWORD` tenía una ruta a Secret de Kubernetes pero mantenía un fallback en texto plano para el caso en que el usuario proporciona la contraseña.
+2. Eliminar un documento de `Frappe Site` mientras un Job de creación estaba en vuelo huerfanaba el Job: la reconciliación filtra filas por `status="In Progress"`, por lo que la fila eliminada era invisible y el Job corría hasta completarse creando un site no rastreado.
+3. Cuando el `ttlSecondsAfterFinished` del Job expiraba antes de que la reconciliación leyera su estado final, el site quedaba atascado en "In Progress" indefinidamente.
+
+### Decisión
+
+- **Enrutar cada credencial a través de un Secret por Job.** `create_site_task` crea `{nombre_job}-creds` (etiquetado `app.kubernetes.io/managed-by=kubeport`, `kubeport.io/frappe-site=<docname>`) antes de enviar el Job. El Job consume `ADMIN_PASSWORD` (siempre) y `DB_ROOT_PASSWORD` (cuando no hay Secret proporcionado por el usuario) mediante `secretKeyRef`. Tras existir el Job parcheamos el Secret con `ownerReferences` → Job + `blockOwnerDeletion: true`, para que el GC de K8s lleve el Secret con la limpieza del TTL del Job. En excepción antes o durante el apply del Job, best-effort `delete_namespaced_secret` para evitar huerfanar credenciales de administrador.
+- **Añadir `on_trash` a `FrappeSite`.** Cuando el documento se elimina mientras un Job está en vuelo rota `operation_token` (invalida el worker) y encola `cancel_site_task`, que elimina el Job con `propagation_policy="Background"`; el GC de ownerRef luego recoge el Secret de credenciales como efecto secundario. `cancel_site_task` también llama a `_best_effort_delete_secret` como medida de respaldo para la ventana estrecha donde el parche de ownerRef nunca se adjuntó.
+- **Recuperar "In Progress" zombi en 404.** La rama 404 de `read_namespaced_job` de la reconciliación ahora llama a `_site_exists_in_bench` — la misma sonda de bench de dos etapas ya usada en Job-fallido — y transiciona el site a Active o Failed en lugar de registrar y dejarlo atascado.
+- **Validar `site_name`.** Rechazar cualquier cosa fuera de una etiqueta de estilo hostname (alfanuméricos en minúscula, `.`, `-`, `_`, comenzando/terminando alfanumérico) para que el autonombre `{bench_release}/{site_name}`, el slug del Job de K8s y el env del bench permanezcan bien formados. La seguridad del shell ya era correcta — `"$SITE_NAME"` en `_bench_new_site_command` no expande sustituciones de comandos en el valor de la variable — pero la brecha de corrección del nombrado necesitaba cerrarse.
+
+### Alternativas descartadas
+
+- **Montar contraseñas mediante `envFrom: secretRef`**: funciona, pero pierde la capacidad de mezclar limpiamente nuestro Secret de credenciales con las entradas `envFrom` existentes del pod de referencia del bench sin arriesgar filtraciones accidentales de variables de entorno. `secretKeyRef` por clave es más preciso.
+- **Poner `ownerReferences` en el Secret desde el principio**: rechazado porque el UID del Job no se conoce hasta después de `apply_resource(Job)`. El apply en dos pasos (crear Secret, crear Job, volver a aplicar Secret con UID) es el patrón canónico.
+- **Eliminar el Secret de credenciales solo desde `cancel_site_task`**: rechazado porque la rara ruta "Secret aplicado, apply de Job fallido" filtraría credenciales fuera del flujo normal de cancelación. La limpieza best-effort en la rama de excepción de `create_site_task` cierra esa ventana.
+
+### Implementación
+
+- `kubeport/tasks/site_tasks.py`: nuevo `_build_creds_secret_manifest(secret_name, namespace, site_docname, admin_password, db_root_password)`. `_build_env` reescrito: sin más parámetros de contraseña en texto plano; toma `creds_secret_name` y `db_root_in_creds` y emite `secretKeyRef` para ADMIN_PASSWORD y DB_ROOT_PASSWORD. `_build_job_manifest` los propaga. `create_site_task`: apply de Secret → apply de Job → lectura de Job → re-apply de Secret con `ownerReferences`. Cualquier excepción pre-Job activa `_best_effort_delete_secret`. `cancel_site_task`: ruta de eliminación de Job sin cambios, más un `_best_effort_delete_secret` de respaldo al final. Nuevo helper `_best_effort_delete_secret` compartido por ambas rutas.
+- `kubeport/kubeport/doctype/frappe_site/frappe_site.py`: nuevo `_SITE_NAME_RE` y `_validate_site_name()` llamado desde `validate()`. Nuevo `on_trash(self)` que rota el token de operación y encola `cancel_site_task` cuando el estado es "In Progress" y hay un `creation_job_name` establecido.
+- `kubeport/tasks/reconciliation.py`: la rama 404 en `read_namespaced_job` ahora llama a `_site_exists_in_bench` y finaliza a Active o Failed.
+- `kubeport/tests/test_site_tasks.py`: tests de `_build_env` expandidos para los tres nuevos casos (secretKeyRef de ADMIN_PASSWORD, Secret de BD del usuario, fallback de Secret de credenciales). Nuevos tests de `_build_creds_secret_manifest`. Nuevo `UnitTestCreateSiteTask` (salida por token obsoleto, ruta feliz apply-de-Secret→Job→Secret sin contraseñas en texto plano, rollback de excepción con limpieza de Secret huérfano). Nuevo `UnitTestCancelSiteTask` (tolerancia a 404, registro de no-404, limpieza de Secret en ambos).
+
+---
+
+## 2026-04-17 — Creación de Frappe Site mediante Jobs de Kubernetes
+
+### Contexto
+
+Kubeport ya descubría benches de ERPNext (releases de Helm de `chart_name == "erpnext"`) y los sites que vivían en cada bench (mediante exec en pods en ejecución). La siguiente capacidad es crear nuevos sites en esos benches.
+
+El chart de ERPNext (`frappe/helm`) proporciona `jobs.createSite` — una plantilla estándar de Job de Kubernetes (confirmado: sin anotaciones de hook de Helm) que ejecuta `bench new-site` con variables de entorno con plantilla. El mecanismo oficial para activar este job es un `helm upgrade` con `jobs.createSite.enabled: true`.
+
+**Ese enfoque fue rechazado** para esta implementación (ver Decisión de arquitectura más abajo). En su lugar, enviamos un Job de Kubernetes directamente desde un nuevo DocType `Frappe Site` — de la misma manera que `Service Bundle` envía manifiestos en bruto.
+
+### Decisión de arquitectura: envío directo del Job (no helm upgrade)
+
+Evidencia de la investigación de `frappe/helm`:
+
+- `job-create-site.yaml` es un Job batch/v1 *estándar*, no un hook de Helm.
+- Solo se renderiza condicionalmente cuando `jobs.createSite.enabled: true`.
+- Tras ejecutarse el Job, `enabled` debe volver a `false` o se vuelve a activar en el siguiente `helm upgrade` — creando una colisión de nombre de Job (o un intento duplicado de creación de site).
+- `adminPassword` y `dbRootPassword` estarían incrustados como texto plano en el campo `values` de Helm Release (respaldado por MariaDB, no cifrado para este caso de uso).
+
+**Consecuencias de la ruta helm upgrade:**
+
+| Problema | Impacto |
 |---|---|
-| Values are desired *steady state* | Toggling `jobs.createSite.enabled` on/off conflates one-off operations with deployment config |
-| No clean status tracking | Must watch Job status anyway; Helm abstraction saves nothing |
-| Credentials in values YAML | adminPassword + dbRootPassword exposed to any values dump |
-| Re-fire risk | Any subsequent `helm upgrade` re-triggers site creation unless the operator manually cleans up |
+| Los valores son el *estado constante* deseado | Alternar `jobs.createSite.enabled` confunde operaciones puntuales con configuración de despliegue |
+| Sin seguimiento limpio del estado | Hay que observar el estado del Job de todas formas; la abstracción de Helm no aporta nada |
+| Credenciales en el YAML de valores | adminPassword + dbRootPassword expuestos a cualquier volcado de valores |
+| Riesgo de re-activación | Cualquier `helm upgrade` posterior vuelve a activar la creación del site salvo que el operador lo limpie manualmente |
 
-**Direct Job submission advantages:**
+**Ventajas del envío directo del Job:**
 
-- Reuses `apply_resource()` which already handles `Job` kind
-- Job is ephemeral and owned by kubeport, not by the Helm release
-- Status is trackable via `BatchV1Api.read_namespaced_job()` in reconciliation
-- Fits the existing DocType → background task → reconciliation loop pattern
-- `ttlSecondsAfterFinished` auto-cleans completed Jobs
+- Reutiliza `apply_resource()` que ya gestiona el tipo `Job`
+- El Job es efímero y propiedad de kubeport, no de la release de Helm
+- El estado es rastreable mediante `BatchV1Api.read_namespaced_job()` en la reconciliación
+- Encaja en el patrón existente DocType → tarea en segundo plano → bucle de reconciliación
+- `ttlSecondsAfterFinished` limpia automáticamente los Jobs completados
 
-### Design: DocType, background task, and reconciliation
+### Diseño: DocType, tarea en segundo plano y reconciliación
 
-**DocType fields:**
-- `site_name`: The site domain (e.g., `erp.example.com`)
-- `bench_release`: Link to the target Helm Release (the bench)
-- `admin_password`: Site admin password
-- `install_apps`: Apps to install (e.g., `erpnext`)
-- `db_root_password` or `db_root_secret`: Database credentials
+**Campos del DocType:**
+- `site_name`: El dominio del site (p. ej., `erp.example.com`)
+- `bench_release`: Enlace a la Helm Release objetivo (el bench)
+- `admin_password`: Contraseña de administrador del site
+- `install_apps`: Apps a instalar (p. ej., `erpnext`)
+- `db_root_password` o `db_root_secret`: Credenciales de base de datos
 - `status`: Draft → In Progress → Active | Failed
-- `creation_job_name`: K8s Job name for reconciliation tracking
-- `operation_token`: Concurrency guard
+- `creation_job_name`: Nombre del Job de K8s para el seguimiento de la reconciliación
+- `operation_token`: Salvaguarda de concurrencia
 
-**Background task** (`create_site_task`):
-1. Finds a running bench pod via existing discovery utilities
-2. Clones its container image and sites PVC mount dynamically
-3. Builds and submits a Kubernetes Job manifest
-4. Stores the Job name for reconciliation to track
+**Tarea en segundo plano** (`create_site_task`):
+1. Encuentra un pod de bench en ejecución mediante las utilidades de descubrimiento existentes
+2. Clona su imagen de contenedor y el montaje del PVC de sites dinámicamente
+3. Construye y envía un manifiesto de Job de Kubernetes
+4. Almacena el nombre del Job para que la reconciliación lo rastree
 
-**Reconciliation** (`_reconcile_frappe_sites`):
-- Polls `BatchV1Api.read_namespaced_job()` every 5 minutes
-- On `status.succeeded > 0`: marks Active
-- On `status.failed > 0`: **verifies actual site existence first** (see fix below)
+**Reconciliación** (`_reconcile_frappe_sites`):
+- Sondea `BatchV1Api.read_namespaced_job()` cada 5 minutos
+- En `status.succeeded > 0`: marca Active
+- En `status.failed > 0`: **verifica primero la existencia real del site** (ver corrección más abajo)
 
-### Key design choice: why dynamic pod inspection for image/volumes
+### Elección de diseño clave: por qué la inspección dinámica del pod para imagen/volúmenes
 
-The Job container must use the same image and PVC mounts as the running bench to guarantee
-`bench` is available and the correct sites directory is mounted. Hard-coding image tags or PVC
-naming conventions from the Helm chart would break on version upgrades or custom values.
+El contenedor del Job debe usar la misma imagen y montajes de PVC que el bench en ejecución para garantizar que `bench` esté disponible y el directorio correcto de sites esté montado. Codificar etiquetas de imagen o convenciones de nombres de PVC del chart de Helm rompería en actualizaciones de versión o valores personalizados.
 
-By reading the spec from a live reference pod, the task is resilient to chart evolution without code changes.
+Al leer la especificación desde un pod de referencia en vivo, la tarea es resiliente a la evolución del chart sin cambios de código.
 
 ---
 
-## 2026-04-17 — Fix Frappe Site reconciliation: ground truth over Job exit codes
+## 2026-04-17 — Corrección de la reconciliación de Frappe Site: estado real sobre códigos de salida del Job
 
-### Problem
+### Problema
 
-When `bench new-site` exits with non-zero status **despite successfully creating the site**,
-Kubernetes sets `job.status.failed = 1`. Our reconciliation would mark the site as Failed,
-contradicting the actual cluster state (the site exists and is usable).
+Cuando `bench new-site` sale con estado no cero **a pesar de haber creado el site correctamente**, Kubernetes establece `job.status.failed = 1`. Nuestra reconciliación marcaba el site como Failed, contradiciendo el estado real del clúster (el site existe y es usable).
 
-This happens frequently in ERPNext when:
-- The `--install-app` parameter triggers post-install migrations that emit non-critical warnings
-- Asset builds or database setup steps log to stderr
-- Some post-creation hook exits non-zero while the site config was already written
+Esto ocurre frecuentemente en ERPNext cuando:
+- El parámetro `--install-app` activa migraciones post-instalación que emiten advertencias no críticas
+- Las compilaciones de assets o pasos de configuración de base de datos registran en stderr
+- Algún hook post-creación sale con no cero mientras la configuración del site ya estaba escrita
 
-### Why this matters
+### Por qué importa
 
-The site directory and `site_config.json` exist on the bench (confirmed by discovery) but
-kubeport reports "Failed" — a false negative that confuses operators and requires manual
-verification in the cluster.
+El directorio del site y `site_config.json` existen en el bench (confirmado por el descubrimiento) pero kubeport reporta "Failed" — un falso negativo que confunde a los operadores y requiere verificación manual en el clúster.
 
-### Solution: Ground truth verification
+### Solución: verificación del estado real
 
-When `job.status.failed > 0`:
+Cuando `job.status.failed > 0`:
 
-1. Call `_site_exists_in_bench()` — exec into a live bench pod and check if `site_config.json`
-   actually exists (reusing the same discovery utilities).
-2. If the file exists → mark site as **Active** (Job exit code was a false negative).
-3. Only if the file does not exist → mark as **Failed** and include actual pod log lines.
+1. Llamar a `_site_exists_in_bench()` — ejecutar en un pod de bench en vivo y comprobar si `site_config.json` existe realmente (reutilizando las mismas utilidades de descubrimiento).
+2. Si el fichero existe → marcar el site como **Active** (el código de salida del Job fue un falso negativo).
+3. Solo si el fichero no existe → marcar como **Failed** e incluir las líneas reales del log del pod.
 
-This reinforces the project invariant: **observed state is always queried live from the cluster**.
-Reconciliation bases its decision on ground truth, not on an exit code that lacks semantic meaning.
+Esto refuerza el invariante del proyecto: **el estado observado siempre se consulta en vivo desde el clúster**. La reconciliación basa su decisión en el estado real, no en un código de salida que carece de significado semántico.
 
-### Better failure details
+### Mejores detalles de fallo
 
-`_extract_job_failure_detail()` now fetches the last 30 lines of the failed pod's stdout log
-instead of parsing `terminated.message` (which is always empty — we never configured
-`terminationMessagePath` in the Job spec). This gives meaningful error output when the site
-genuinely fails (e.g., bad database password, app install error).
+`_extract_job_failure_detail()` ahora obtiene las últimas 30 líneas del log de stdout del pod fallido en lugar de analizar `terminated.message` (que siempre está vacío — nunca configuramos `terminationMessagePath` en la especificación del Job). Esto proporciona una salida de error significativa cuando el site genuinamente falla (p. ej., contraseña de base de datos incorrecta, error de instalación de app).
 
-### Implementation details
+### Implementación
 
-- Added `_site_exists_in_bench(site, core_v1) -> bool` helper that uses exec-based discovery
-- Modified `elif failed > 0` block in `_reconcile_frappe_sites()` to check site existence first
-- Updated `_extract_job_failure_detail()` to fetch pod logs via `read_namespaced_pod_log()`
-- Added `bench_release` and `site_name` to the reconciliation query `get_all()` fields
+- Añadido helper `_site_exists_in_bench(site, core_v1) -> bool` que usa el descubrimiento basado en exec
+- Modificado el bloque `elif failed > 0` en `_reconcile_frappe_sites()` para comprobar primero la existencia del site
+- Actualizado `_extract_job_failure_detail()` para obtener logs del pod mediante `read_namespaced_pod_log()`
+- Añadidos `bench_release` y `site_name` a los campos `get_all()` de la consulta de reconciliación
 
-### Testing approach
+### Procedimiento de prueba
 
-1. Create a Frappe Site and click Create Site
-2. Monitor the Job: `kubectl get jobs -n <namespace> -l app.kubernetes.io/managed-by=kubeport`
-3. If the Job pod exits non-zero, wait for reconciliation (5 min) or trigger manually
-4. **Expected:** status transitions to **Active** if the site file exists, despite the non-zero exit
-5. To test the failure path: create a site with wrong DB root password
-6. **Expected:** status transitions to **Failed** with actual `bench new-site` error in the detail
+1. Crear un Frappe Site y hacer clic en Create Site
+2. Monitorizar el Job: `kubectl get jobs -n <namespace> -l app.kubernetes.io/managed-by=kubeport`
+3. Si el pod del Job sale con no cero, esperar a la reconciliación (5 min) o activarla manualmente
+4. **Esperado:** el estado transiciona a **Active** si el fichero del site existe, a pesar de la salida no cero
+5. Para probar la ruta de fallo: crear un site con contraseña de root de BD incorrecta
+6. **Esperado:** el estado transiciona a **Failed** con el error real de `bench new-site` en el detalle
